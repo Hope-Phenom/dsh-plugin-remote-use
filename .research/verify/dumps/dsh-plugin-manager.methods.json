@@ -1,0 +1,62 @@
+[
+  {
+    "name": "listVersionExemptions",
+    "signature": "@Remote listVersionExemptions(): { exemptions: Record<string, string[]>; warnings: string[] }",
+    "summary": "Read exact plugin-version exemptions saved in this profile."
+  },
+  {
+    "name": "setVersionExemption",
+    "signature": "@Remote setVersionExemption(packageVersion: string, runtimeVersion: string, enabled: boolean, acceptRisk?: boolean): Promise<ChangeResult>",
+    "summary": "Grant or revoke one exact plugin/runtime exemption and reevaluate live plugins."
+  },
+  {
+    "name": "listPlugins",
+    "signature": "@Remote async listPlugins(): Promise<PluginInfo[]>",
+    "summary": "Read current plugins, including why a row cannot be changed through the profile patch."
+  },
+  {
+    "name": "listBundles",
+    "signature": "@Remote listBundles(): Promise<BundleInfo[]>",
+    "summary": "Read the profile's installed bundles, the bundles this dsh installation supplies, and the selected names that are not bundles."
+  },
+  {
+    "name": "registries",
+    "signature": "@Remote async registries(): Promise<PluginRegistries>",
+    "summary": "Read the registries this manager asks: the configured first one, its fallbacks in order, and what pnpm's own configuration names."
+  },
+  {
+    "name": "inspect",
+    "signature": "@Remote async inspect(spec: string, options?: InspectOptions, signal?: AbortSignal): Promise<PluginSpecInspection>",
+    "summary": "Read what a spec names before installing it."
+  },
+  {
+    "name": "setPluginEnabled",
+    "signature": "@Remote setPluginEnabled(id: PluginEntryId, enabled: boolean): Promise<ChangeResult>",
+    "summary": "Persist a plugin entry's desired enablement and apply it on live profiles."
+  },
+  {
+    "name": "setBundleEnabled",
+    "signature": "@Remote setBundleEnabled(name: string, enabled: boolean): Promise<ChangeResult>",
+    "summary": "Select or remove a bundle layer while retaining installed dependencies."
+  },
+  {
+    "name": "installBundle",
+    "signature": "@Remote installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>",
+    "summary": "Install a package using the same pnpm implementation as dsh plugin."
+  },
+  {
+    "name": "waitForInstall",
+    "signature": "@Remote async waitForInstall(requestId: PluginInstallRequestId): Promise<ChangeResult | null>",
+    "summary": "Recover the result of an active installation without cancelling it."
+  },
+  {
+    "name": "cancelInstall",
+    "signature": "@Remote async cancelInstall(requestId: PluginInstallRequestId): Promise<PluginInstallCancellation>",
+    "summary": "Stop an installation this manager owns and wait until its files are back."
+  },
+  {
+    "name": "removeBundle",
+    "signature": "@Remote removeBundle(name: string): Promise<ChangeResult>",
+    "summary": "Unload and remove a profile-owned bundle dependency through dsh plugin's pnpm path."
+  }
+]

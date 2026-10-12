@@ -1,0 +1,40 @@
+# Bundle patch for dsh-plugin-remote-use.
+#
+# The row id is the plugin's stable identity in the Settings page and in the profile
+# patch, so keep it stable across versions.
+#
+# ---------------------------------------------------------------------------
+# One delegation tool row PER WORKER.
+#
+# A subagent provider is registered at runtime from this plugin's Config, but the
+# model-facing TOOL row is a static loader entry -- a plugin cannot append tool rows
+# at runtime (DESIGN §5.7, U2). So each worker that should be callable needs its own
+# row below, and the `provider` value must match the worker `id` used in this plugin's
+# Config (`remote-<id>`).
+#
+# The config below is the ONLY shape that passes `assertSubagentProviderConfiguration`
+# for an out-of-process provider (DESIGN §5.7):
+#   * `backgroundMode: one-shot`  -- the seam cannot support continuable children (C2)
+#   * `maxDepth: provider-managed` -- we have no depthLimit capability (C1)
+#   * NO `agentOptions` / `persona` / `toolFilter` keys at all -- their presence makes
+#     the tool plugin throw while handling `subagent/provider-added`, which rolls back
+#     the whole provider registration (Cordis `emit` propagates listener exceptions).
+#   * `modelSelectionSettings: false` (the default) -- keeps provider/model params off
+#     the tool schema.
+#
+# Example row for a worker whose `id` is `labpc`:
+#
+#   - id: tool-subagent-remote-labpc
+#     name: '@deepseek-ai/dsh-tool-subagent'
+#     config:
+#       provider: remote-labpc
+#       toolName: subagent_remote
+#       backgroundMode: one-shot
+#       maxDepth: provider-managed
+# ---------------------------------------------------------------------------
+
+- insert:
+    - id: dsh-plugin-remote-use
+      name: dsh-plugin-remote-use
+      config:
+        workers: []

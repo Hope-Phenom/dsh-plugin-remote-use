@@ -1,0 +1,144 @@
+// ===== Branded
+export type Branded<B extends string> = string & { readonly [BRAND]: B; };
+
+// ===== BundleInfo
+export interface BundleInfo {
+    name: string;
+    version?: string;
+    meta?: PluginLocalizedMeta;
+    description?: string;
+    enabled: boolean;
+    installed: boolean;
+    optional: boolean;
+    removable: boolean;
+    readOnlyReason?: ReadOnlyReason;
+    error?: ManagementError;
+    rows: BundleRowInfo[];
+    overrides: string[];
+}
+
+// ===== BundleRowInfo
+export interface BundleRowInfo {
+    rowId: string;
+    moduleName: string;
+    meta?: PluginLocalizedMeta;
+    entryId?: PluginEntryId;
+}
+
+// ===== ChangeResult
+export interface ChangeResult {
+    changed: boolean;
+    application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled';
+    stage: 'install' | 'enable' | 'remove';
+    target: string;
+    enabled?: boolean;
+    error?: ManagementError;
+    warnings?: string[];
+    packageResult?: PackageResult;
+    bundle?: string;
+    pendingBuilds?: string[];
+    approvedBuilds?: string[];
+    registries?: Registry[];
+    failedAt?: 'registry' | 'spec-host';
+}
+
+// ===== IncompatiblePlugin
+export interface IncompatiblePlugin {
+    name: string;
+    version: string;
+    runtimeVersion: string;
+    peers: Record<string, string>;
+}
+
+// ===== InspectOptions
+export interface InspectOptions {
+    readonly registry?: Registry;
+}
+
+// ===== InstallBundleOptions
+export interface InstallBundleOptions {
+    enabled?: boolean;
+    requestId?: PluginInstallRequestId;
+    approvedBuilds?: string[];
+    registry?: Registry;
+}
+
+// ===== InstallSpecKind
+export type InstallSpecKind = 'registry' | 'path' | 'git' | 'tarball';
+
+// ===== LocalizedText
+export type LocalizedText = string | { readonly en: string; readonly [locale: string]: string; };
+
+// ===== ManagementError
+export interface ManagementError {
+    code: ReadOnlyReason | 'unknown-plugin' | 'invalid-spec' | 'ambiguous-install' | 'not-bundle' | 'not-removable' | 'stop-profile' | 'bundle-in-use' | 'stale-approval' | 'incompatible-version' | 'operation-error';
+    diagnostic?: string;
+    incompatible?: IncompatiblePlugin[];
+}
+
+// ===== PackageResult
+export interface PackageResult {
+    exitCode: number;
+    output: string;
+    truncated: boolean;
+    logPath: string;
+    kind?: PluginInstallFailureKind;
+    timedOut?: boolean;
+    incompatible?: IncompatiblePlugin[];
+}
+
+// ===== PluginEntryId
+export type PluginEntryId = Branded<'PluginEntryId'>;
+
+// ===== PluginFiberPhase
+export type PluginFiberPhase = 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null;
+
+// ===== PluginInfo
+export type PluginInfo = PluginInventoryEntry & ({ patchId: string; readOnlyReason?: never; } | { patchId?: never; readOnlyReason: ReadOnlyReason; });
+
+// ===== PluginInspectProblem
+export type PluginInspectProblem = 'invalid-spec' | 'already-installed' | 'not-found' | 'not-a-package' | 'not-a-bundle' | 'network' | 'unknown';
+
+// ===== PluginInstallCancellation
+export interface PluginInstallCancellation {
+    readonly status: 'cancelled' | 'too-late' | 'not-running';
+}
+
+// ===== PluginInstallFailureKind
+export type PluginInstallFailureKind = 'pnpm-missing' | 'timeout' | 'not-found' | 'no-matching-version' | 'network' | 'disk-full' | 'permission' | 'build-blocked' | 'integrity' | 'unknown';
+
+// ===== PluginInstallRequestId
+export type PluginInstallRequestId = Branded<'PluginInstallRequestId'>;
+
+// ===== PluginInventoryEntry
+export interface PluginInventoryEntry {
+    readonly entryId: PluginEntryId;
+    readonly moduleName: string;
+    readonly meta?: PluginLocalizedMeta;
+    readonly enabled: boolean;
+    readonly fiberPhase: PluginFiberPhase;
+}
+
+// ===== PluginLocalizedMeta
+export interface PluginLocalizedMeta {
+    readonly title?: LocalizedText;
+    readonly description?: LocalizedText;
+    readonly icon?: string;
+    readonly error?: string;
+}
+
+// ===== PluginRegistries
+export interface PluginRegistries {
+    readonly registry: Registry;
+    readonly fallbackRegistries: readonly string[];
+    readonly resolved: string | null;
+}
+
+// ===== PluginSpecInspection
+export type PluginSpecInspection = { readonly status: 'accepted'; readonly kind: InstallSpecKind; readonly name?: string; readonly version?: string; readonly description?: string; readonly bundle: boolean | null; readonly registry: Registry; readonly host?: string; } | { readonly status: 'refused'; readonly problem: PluginInspectProblem; readonly reason: string; readonly registries?: Registry[]; };
+
+// ===== ReadOnlyReason
+export type ReadOnlyReason = 'management-required' | 'unaddressable';
+
+// ===== Registry
+export type Registry = string | null;

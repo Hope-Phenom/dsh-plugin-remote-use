@@ -1,0 +1,15 @@
+{
+  "command": "C:\\Users\\you\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe",
+  "args": [
+    "--expose-internals",
+    "C:\\Users\\you\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js",
+    "--profile",
+    "acp"
+  ],
+  "env": {
+    "ELECTRON_RUN_AS_NODE": "1"
+  },
+  "_note": "replicates dsh.cmd with an argv array; never launch the .cmd shim from Node on Windows",
+  "_installDir": "C:\\Users\\you\\AppData\\Local\\Programs\\DeepSeek Harness",
+  "_permissionMode": "(inherited)"
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote Worker (LAN)",
+    "description": "Delegate tasks to a paired LAN worker and drive it like a subagent over ACP."
+  }
+}

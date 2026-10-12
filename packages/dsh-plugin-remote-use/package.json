@@ -1,0 +1,41 @@
+{
+  "name": "dsh-plugin-remote-use",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "ws": "8.22.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

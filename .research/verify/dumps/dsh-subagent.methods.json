@@ -1,0 +1,72 @@
+[
+  {
+    "name": "resolveMaxDepth",
+    "signature": "resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined",
+    "summary": "Resolve a delegation tool's depth policy against the current user setting."
+  },
+  {
+    "name": "startContinuable",
+    "signature": "async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>",
+    "summary": "Establish one durable continuable child and deliver its initial prompt."
+  },
+  {
+    "name": "sendMessage",
+    "signature": "async sendMessage( sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions, ): Promise<MessageId>",
+    "summary": "Steer one model-authored message to the sender's direct parent or direct continuable child."
+  },
+  {
+    "name": "interrupt",
+    "signature": "interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void",
+    "summary": "Interrupt one live continuable child's current turn under a human parent address or an exact live ancestor Agent."
+  },
+  {
+    "name": "drainContinuableDescendants",
+    "signature": "async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>",
+    "summary": "Close continuable admission below exact live parent Agents, stop only their visible descendant Activations synchronously, then await admitted scoped materializations and release those forests child-first."
+  },
+  {
+    "name": "drainContinuableChildren",
+    "signature": "async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>",
+    "summary": "Release selected resident continuable direct children of one exact live parent."
+  },
+  {
+    "name": "listChildren",
+    "signature": "listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentCatalogEntry[]>",
+    "summary": "Read the parent's durable direct-child catalog without loading or resuming an Agent."
+  },
+  {
+    "name": "listDescendants",
+    "signature": "listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>",
+    "summary": "Recursively list reachable parent catalogs in stable pre-order, preserving each catalog's event order."
+  },
+  {
+    "name": "prompt",
+    "signature": "@Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>",
+    "summary": "Deliver one browser-authored message to a continuable child through the exact live direct parent, retaining the caller-minted request identity and validated browser zone on the accepted message."
+  },
+  {
+    "name": "interruptByParent",
+    "signature": "@Remote('interruptByParent') interruptByParent( childSessionId: SessionId, parentSessionId: SessionId, mode: 'continuable', ): SubagentInterruptReceipt",
+    "summary": "Remote face of {@link interrupt} under one durable parent address."
+  },
+  {
+    "name": "registerProvider",
+    "signature": "registerProvider(provider: SubagentProvider): () => void",
+    "summary": "Register a provider under its name."
+  },
+  {
+    "name": "getProvider",
+    "signature": "getProvider(name: string): SubagentProvider | undefined",
+    "summary": "Look up a provider by name."
+  },
+  {
+    "name": "list",
+    "signature": "list(): string[]",
+    "summary": "List registered provider names in insertion order."
+  },
+  {
+    "name": "start",
+    "signature": "async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>",
+    "summary": "Establish a published child on the named provider."
+  }
+]

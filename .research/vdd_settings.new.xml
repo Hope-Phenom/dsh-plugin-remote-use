@@ -1,0 +1,53 @@
+<?xml version='1.0' encoding='utf-8'?>
+<vdd_settings>
+    <monitors>
+        <count>1</count>
+    </monitors>
+    <gpu>
+        <friendlyname>default</friendlyname>
+    </gpu>
+	<global>
+		<!-- Global refresh rates. 60 must be present: the automation stack runs at 60Hz. -->
+		<g_refresh_rate>60</g_refresh_rate>
+		<g_refresh_rate>30</g_refresh_rate>
+	</global>
+    <resolutions>
+        <!-- 1920x1080@60 FIRST: the slave's desktop resolution must be deterministic
+             and (0,0)-anchored. Keep this entry first. -->
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
+            <refresh_rate>30</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1600</width>
+            <height>900</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1280</width>
+            <height>720</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1024</width>
+            <height>768</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+    <options>
+		<CustomEdid>false</CustomEdid>
+		<PreventSpoof>false</PreventSpoof>
+		<EdidCeaOverride>false</EdidCeaOverride>
+		<HardwareCursor>true</HardwareCursor>
+		<SDR10bit>false</SDR10bit>
+		<HDRPlus>false</HDRPlus>
+		<logging>false</logging>
+        <debuglogging>false</debuglogging>
+	</options>
+</vdd_settings>

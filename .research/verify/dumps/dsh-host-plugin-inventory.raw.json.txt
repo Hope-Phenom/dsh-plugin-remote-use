@@ -1,0 +1,27 @@
+TYPERT = {
+  package: '@deepseek-ai/dsh-host-plugin-inventory',
+  face: 'host',
+  schemas: [
+  ],
+  invocations: [
+    {
+      id: '@deepseek-ai/dsh-host-plugin-inventory#pluginInventory/list',
+      service: 'pluginInventory',
+      namespace: 'pluginInventory',
+      method: 'list',
+      invocation: { kind: 'direct' },
+      parameters: [
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-host-plugin-inventory/types#PluginInventorySnapshot',
+        create: _deepseek_ai_dsh_host_plugin_inventory_pluginInventory_list_result$schema,
+      },
+      sourceLocation: {"file":"packages/host/plugin-inventory/src/index.ts","line":71,"column":9},
+    },
+  ],
+  model: {
+    "services": [],
+    "events": [],
+    "objects": []
+  },

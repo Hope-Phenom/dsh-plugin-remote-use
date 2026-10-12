@@ -1,0 +1,992 @@
+// ===== AfterScheduleRecord
+export interface AfterScheduleRecord {
+    readonly id: ScheduleId;
+    readonly kind: 'after';
+    readonly title: string;
+    readonly prompt: string;
+    readonly afterSeconds: number;
+    readonly scheduledAt: string;
+}
+
+// ===== Agent
+export interface Agent {
+    readonly id: SessionId;
+    readonly options: AgentOptions;
+    readonly session: Session;
+    readonly inbox: Inbox;
+    readonly status: AgentStatus;
+    readonly ctx: Context;
+    cancel(cause: AgentCancelCause, options?: CancelOptions): void;
+    whenIdle(): Promise<void>;
+    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;
+    send(message: UserMessage, target: InboxTarget, wakeup: boolean): void;
+    followup(message: UserMessage): void;
+    steer(message: UserMessage): void;
+    inject(message: UserMessage): void;
+}
+
+// ===== AgentCancelCause
+export type AgentCancelCause = { readonly kind: 'user'; } | { readonly kind: 'parent'; } | { readonly kind: 'hook'; readonly reason: string; } | { readonly kind: 'disposed'; };
+
+// ===== AgentMessageSource
+export interface AgentMessageSource {
+    readonly kind: 'agent-message';
+    readonly form: 'relay';
+    readonly senderSessionId: SessionId;
+}
+
+// ===== AgentOptions
+export interface AgentOptions {
+    provider?: string;
+    model?: string;
+    reasoningEffort?: ReasoningEffortId;
+    maxTokens?: number;
+    subagentDepth?: number;
+}
+
+// ===== AgentStatus
+export type AgentStatus = 'idle' | 'running';
+
+// ===== ApprovalOutcome
+export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
+
+// ===== ApprovalPolicy
+export type ApprovalPolicy = 'ask' | 'never';
+
+// ===== ApprovalRequestId
+export type ApprovalRequestId = Branded<'ApprovalRequestId'>;
+
+// ===== AssistantMessage
+export interface AssistantMessage extends MessageBase {
+    readonly role: 'assistant';
+    readonly source: ModelMessageSource;
+}
+
+// ===== AssistantProviderMetadata
+export interface AssistantProviderMetadata {
+    provider: string;
+    model: string;
+    replayState?: unknown;
+}
+
+// ===== AssistantStreamRecord
+export type AssistantStreamRecord = { readonly type: 'text-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[]; } | { readonly type: 'reasoning-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[]; } | { readonly type: 'tool-call-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly id: ToolCallId; readonly name?: string; readonly args: readonly string[]; } | { readonly type: 'chunk'; readonly time: number; readonly chunk: StreamChunk; };
+
+// ===== AtScheduleRecord
+export interface AtScheduleRecord {
+    readonly id: ScheduleId;
+    readonly kind: 'at';
+    readonly title: string;
+    readonly prompt: string;
+    readonly scheduledAt: string;
+}
+
+// ===== AttachmentId
+export type AttachmentId = Branded<'AttachmentId'>;
+
+// ===== Branded
+export type Branded<B extends string> = string & { readonly [BRAND]: B; };
+
+// ===== BrandedNumber
+export type BrandedNumber<B extends string> = number & { readonly [BRAND]: B; };
+
+// ===== CancelOptions
+export interface CancelOptions {
+    keepInbox?: boolean | undefined;
+}
+
+// ===== CommandId
+export type CommandId = Branded<'CommandId'>;
+
+// ===== CommandSource
+export type CommandSource = CommandSourceMap[keyof CommandSourceMap];
+
+// ===== CommandSourceMap
+export interface CommandSourceMap {
+    user: { kind: 'user'; };
+}
+
+// ===== CompactionCheckpointSource
+export type CompactionCheckpointSource = typeof COMPACT_CHECKPOINT_MARKER & { readonly compactionId: CompactionId; readonly sourceCommandId?: CommandId; };
+
+// ===== CompactionId
+export type CompactionId = Branded<'CompactionId'>;
+
+// ===== ContentBlock
+export type ContentBlock = ContentBlockMap[ContentBlockType];
+
+// ===== ContentBlockMap
+export interface ContentBlockMap {
+    text: TextBlock;
+    reasoning: ReasoningBlock;
+    image: ImageBlock;
+    file: FileBlock;
+    'tool-call': ToolCallBlock;
+    'tool-addition': ToolAdditionBlock;
+    'tool-removal': ToolRemovalBlock;
+}
+
+// ===== ContentBlockType
+export type ContentBlockType = keyof ContentBlockMap;
+
+// ===== ContextFormed
+export type ContextFormed = { readonly form?: never; } | { readonly form: 'instructions'; } | { readonly form: 'catalog'; } | { readonly form: 'snapshot'; readonly sections: readonly ContextSnapshotSection[]; } | { readonly form: 'notice'; readonly summary: string; } | { readonly form: 'relay'; } | { readonly form: 'recall'; };
+
+// ===== ContextSnapshotSection
+export interface ContextSnapshotSection {
+    readonly name: string;
+    readonly text: string;
+}
+
+// ===== ContinuableCreateRequest
+export interface ContinuableCreateRequest {
+    readonly sessionId: SessionId;
+    readonly parent: Agent;
+    readonly signal: AbortSignal;
+}
+
+// ===== ContinuableCreateSpec
+export interface ContinuableCreateSpec {
+    readonly seed?: readonly SessionEvent[];
+}
+
+// ===== ContinuableStart
+export interface ContinuableStart {
+    readonly childId: SessionId;
+    readonly messageId: MessageId;
+}
+
+// ===== ContinuableStartSpec
+export interface ContinuableStartSpec {
+    readonly provider: string;
+    readonly label: string;
+    readonly childId?: SessionId;
+    readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>;
+    readonly signal: AbortSignal;
+}
+
+// ===== ContinuableSubagentDescriptorData
+export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {
+    readonly mode: 'continuable';
+    readonly label: string;
+    readonly agentProvider?: string;
+    readonly agentModel?: string;
+    readonly agentReasoningEffort?: ReasoningEffortId;
+    readonly persona?: string;
+    readonly toolFilter?: ToolRestriction;
+}
+
+// ===== DeveloperMessage
+export interface DeveloperMessage extends MessageBase {
+    readonly role: 'developer';
+}
+
+// ===== EpochHeader
+export interface EpochHeader {
+    config: LlmCallConfig;
+    adapterDefaults?: LlmCallConfigAdapterDefaults;
+    tools?: ToolSchema[];
+    system?: never;
+}
+
+// ===== EveryScheduleDispatchChange
+export interface EveryScheduleDispatchChange {
+    readonly version: 1;
+    readonly operation: 'dispatch';
+    readonly id: ScheduleId;
+    readonly acceptedAt: string;
+}
+
+// ===== EveryScheduleRecord
+export interface EveryScheduleRecord {
+    readonly id: ScheduleId;
+    readonly kind: 'every';
+    readonly title: string;
+    readonly prompt: string;
+    readonly everySeconds: number;
+    readonly scheduledAt: string;
+}
+
+// ===== FeedbackCategory
+export type FeedbackCategory = 'task-result' | 'instruction-following' | 'product-interaction' | 'service-stability' | 'resource-cost' | 'security-privacy-permission' | 'other';
+
+// ===== FeedbackRecord
+export interface FeedbackRecord {
+    readonly text?: string;
+    readonly category?: FeedbackCategory;
+}
+
+// ===== FileAttachmentRef
+export interface FileAttachmentRef {
+    attachmentId: AttachmentId;
+    name: string;
+    bytes: number;
+}
+
+// ===== FileBlock
+export interface FileBlock {
+    type: 'file';
+    attachment: FileAttachmentRef;
+}
+
+// ===== FinishReason
+export type FinishReason = FinishReasonMap[keyof FinishReasonMap];
+
+// ===== FinishReasonMap
+export interface FinishReasonMap {
+    stop: { kind: 'stop'; };
+    'tool-calls': { kind: 'tool-calls'; };
+    'max-tokens': { kind: 'max-tokens'; };
+    aborted: { kind: 'aborted'; failure: LlmFailure; };
+    error: { kind: 'error'; failure: LlmFailure; };
+}
+
+// ===== GoalBlockReason
+export interface GoalBlockReason {
+    readonly code: string;
+    readonly message: string;
+}
+
+// ===== GoalChangeMeta
+export type GoalChangeMeta = GoalSnapshotChangeMeta | GoalClearChangeMeta;
+
+// ===== GoalClearChangeMeta
+export interface GoalClearChangeMeta {
+    readonly kind: 'goal/change';
+    readonly version: 1;
+    readonly operation: 'clear';
+    readonly cleared: GoalRef;
+    readonly clearedAt: number;
+}
+
+// ===== GoalId
+export type GoalId = Branded<'GoalId'>;
+
+// ===== GoalMessageSource
+export interface GoalMessageSource {
+    readonly kind: 'goal';
+    readonly goalId: GoalId;
+    readonly revision: number;
+    readonly round: number;
+}
+
+// ===== GoalOperation
+export type GoalOperation = 'create' | 'edit' | 'pause' | 'resume' | 'complete' | 'block' | 'clear';
+
+// ===== GoalPhase
+export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
+
+// ===== GoalRef
+export interface GoalRef {
+    readonly id: GoalId;
+    readonly revision: number;
+}
+
+// ===== GoalSnapshot
+export interface GoalSnapshot extends GoalRef {
+    readonly objective: string;
+    readonly phase: GoalPhase;
+    readonly blockedReason?: GoalBlockReason;
+    readonly maxGoalRounds: number;
+}
+
+// ===== GoalSnapshotChangeMeta
+export interface GoalSnapshotChangeMeta {
+    readonly kind: 'goal/change';
+    readonly version: 1;
+    readonly operation: Exclude<GoalOperation, 'clear'>;
+    readonly goal: GoalSnapshot;
+    readonly roundsStarted: number;
+    readonly createdAt: number;
+    readonly updatedAt: number;
+}
+
+// ===== ImageAttachmentRef
+export interface ImageAttachmentRef {
+    attachmentId: AttachmentId;
+    mediaType: ImageMediaType;
+    bytes: number;
+    width: number;
+    height: number;
+    name?: string;
+    originalDimensions?: { width: number; height: number; };
+}
+
+// ===== ImageBlock
+export interface ImageBlock {
+    type: 'image';
+    attachment: ImageAttachmentRef;
+    offloaded?: true;
+}
+
+// ===== ImageMediaType
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+
+// ===== ImageOffloadTarget
+export interface ImageOffloadTarget {
+    seq: SessionSeq;
+    imageIndexes: number[];
+}
+
+// ===== Inbox
+export interface Inbox {
+    readonly nextTurn: readonly UserMessage[];
+    readonly nextStep: readonly UserMessage[];
+    clear(): void;
+    append(target: InboxTarget, message: UserMessage): void;
+    prepend(target: InboxTarget, message: UserMessage): void;
+    replace(messageId: MessageId, newMessage: UserMessage): boolean;
+    remove(messageId: MessageId): boolean;
+    splice(target: InboxTarget, start: number, deleteCount: number, inserted: UserMessage[]): UserMessage[];
+}
+
+// ===== InboxTarget
+export type InboxTarget = 'next-turn' | 'next-step';
+
+// ===== JsonSchemaNode
+export interface JsonSchemaNode {
+    type?: JsonSchemaType;
+    oneOf?: JsonSchemaNode[];
+    properties?: Record<string, JsonSchemaNode>;
+    required?: string[];
+    additionalProperties?: boolean;
+    items?: JsonSchemaNode;
+    enum?: JsonSchemaScalar[];
+    const?: JsonSchemaScalar;
+    description?: string;
+    title?: string;
+    default?: JsonValue;
+    examples?: JsonValue;
+}
+
+// ===== JsonSchemaScalar
+export type JsonSchemaScalar = string | number | boolean | null;
+
+// ===== JsonSchemaType
+export type JsonSchemaType = 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
+
+// ===== JsonValue
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue; };
+
+// ===== KnownCatalogMode
+export type KnownCatalogMode = { readonly mode: 'one-shot'; readonly label?: string; } | { readonly mode: 'continuable'; readonly label: string; };
+
+// ===== LegacyAfterScheduleRecord
+export interface LegacyAfterScheduleRecord extends Omit<AfterScheduleRecord, 'title'> {
+    readonly title?: string;
+}
+
+// ===== LegacyAtScheduleRecord
+export interface LegacyAtScheduleRecord extends Omit<AtScheduleRecord, 'title'> {
+    readonly title?: string;
+}
+
+// ===== LegacyEveryScheduleRecord
+export interface LegacyEveryScheduleRecord extends Omit<EveryScheduleRecord, 'title'> {
+    readonly title?: string;
+}
+
+// ===== LegacyScheduleRecord
+export type LegacyScheduleRecord = LegacyAfterScheduleRecord | LegacyAtScheduleRecord | LegacyEveryScheduleRecord;
+
+// ===== LlmCallConfig
+export interface LlmCallConfig {
+    provider: string;
+    model: string;
+    reasoningEffort?: ReasoningEffortId;
+    temperature?: number;
+    maxTokens?: number;
+    stop?: string[];
+}
+
+// ===== LlmCallConfigAdapterDefaults
+export interface LlmCallConfigAdapterDefaults {
+    reasoningEffort?: true;
+    maxTokens?: true;
+}
+
+// ===== LlmFailure
+export interface LlmFailure {
+    readonly message: string;
+    readonly code: string;
+    readonly status?: number;
+    readonly providerRetryAfterMs?: number;
+    readonly requestId?: ProviderRequestId;
+    readonly offloadImages?: number;
+}
+
+// ===== Message
+export type Message = MessageRoleMap[keyof MessageRoleMap];
+
+// ===== MessageBase
+export interface MessageBase {
+    readonly id: MessageId;
+    readonly content: readonly ContentBlock[];
+    readonly source: MessageSource;
+}
+
+// ===== MessageFeedbackDelete
+export interface MessageFeedbackDelete {
+    readonly sessionId: SessionId;
+    readonly messageId: MessageId;
+}
+
+// ===== MessageFeedbackItem
+export interface MessageFeedbackItem {
+    readonly messageId: MessageId;
+    readonly rating: MessageFeedbackRating;
+    readonly note?: string;
+    readonly category?: FeedbackCategory;
+    readonly version: MessageFeedbackVersion;
+    readonly createdAt: number;
+    readonly updatedAt: number;
+}
+
+// ===== MessageFeedbackPut
+export interface MessageFeedbackPut {
+    readonly sessionId: SessionId;
+    readonly item: MessageFeedbackItem;
+}
+
+// ===== MessageFeedbackRating
+export type MessageFeedbackRating = 'positive' | 'negative';
+
+// ===== MessageFeedbackVersion
+export type MessageFeedbackVersion = Branded<'MessageFeedbackVersion'>;
+
+// ===== MessageId
+export type MessageId = Branded<'MessageId'>;
+
+// ===== MessageRoleMap
+export interface MessageRoleMap {
+    system: SystemMessage;
+    developer: DeveloperMessage;
+    user: UserMessage;
+    assistant: AssistantMessage;
+    tool: ToolResultMessage;
+}
+
+// ===== MessageSource
+export type MessageSource = MessageSourceMap[keyof MessageSourceMap];
+
+// ===== MessageSourceMap
+export interface MessageSourceMap {
+    user: { kind: 'user'; };
+    model: ModelMessageSource;
+    tool: ToolMessageSource;
+    'system-prompt': SystemPromptMessageSource;
+    'model-selection': { kind: 'model-selection'; } & ContextFormed;
+    'user-approval': { kind: 'user-approval'; } & ContextFormed;
+    'ptc-mode': { kind: 'ptc-mode'; };
+    'tool-registry': { kind: 'tool-registry'; };
+    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string; };
+    'agent-message': AgentMessageSource;
+    'subagent-settled': SubagentSettledMessageSource;
+    'skill-invocation': SkillInvocationSource;
+    'cordis-host-runner': { kind: 'cordis-host-runner'; };
+    goal: GoalMessageSource;
+    schedule: { kind: 'schedule'; } & ContextFormed;
+    'compact-checkpoint': CompactionCheckpointSource;
+    'session-reference': SessionReferenceSource;
+    'user-question-reply': { kind: 'user-question-reply'; callId: ToolCallId; outcome: 'answered'; };
+}
+
+// ===== ModelMessageSource
+export interface ModelMessageSource extends AssistantProviderMetadata {
+    kind: 'model';
+}
+
+// ===== ModelSelection
+export interface ModelSelection {
+    readonly provider: string;
+    readonly model: string;
+    readonly reasoningEffort?: string;
+}
+
+// ===== ObjectJsonSchema
+export type ObjectJsonSchema = JsonSchemaNode & { type: 'object'; };
+
+// ===== OneShotScheduleDispatchChange
+export interface OneShotScheduleDispatchChange {
+    readonly version: 1;
+    readonly operation: 'dispatch';
+    readonly id: ScheduleId;
+}
+
+// ===== OneShotSubagentDescriptorData
+export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {
+    readonly mode: 'one-shot';
+    readonly label?: string;
+}
+
+// ===== OptionalSessionSeq
+export type OptionalSessionSeq = SessionSeq | null;
+
+// ===== PromptContentPart
+export type PromptContentPart = { readonly type: 'text'; readonly text: string; } | { readonly type: 'image'; readonly mediaType: ImageMediaType; readonly data: string; readonly name?: string; };
+
+// ===== ProviderRequestId
+export type ProviderRequestId = Branded<'ProviderRequestId'>;
+
+// ===== PtcDispatchEventData
+export interface PtcDispatchEventData extends PtcDispatchStartEventData {
+    isError: boolean;
+    content: ContentBlock[];
+    error?: { name: string; code: string; reason?: string; };
+}
+
+// ===== PtcDispatchStartEventData
+export interface PtcDispatchStartEventData {
+    rootCallId: ToolCallId;
+    parentCallId: ToolCallId;
+    subCallId: ToolCallId;
+    name: string;
+    arguments: unknown;
+}
+
+// ===== ReasoningBlock
+export interface ReasoningBlock {
+    type: 'reasoning';
+    text: string;
+}
+
+// ===== ReasoningEffortId
+export type ReasoningEffortId = Branded<'ReasoningEffortId'>;
+
+// ===== ReplayEnvelope
+export interface ReplayEnvelope {
+    response: unknown;
+    blocks?: readonly unknown[];
+}
+
+// ===== RequestContext
+export interface RequestContext {
+    provider: string;
+    model: string;
+    contextWindow?: number;
+    systemPromptUpdate?: SystemPromptUpdate;
+}
+
+// ===== RequestHeaderReason
+export type RequestHeaderReason = 'initial' | 'resume' | 'change' | 'series';
+
+// ===== ResolvedSubagentStartRequest
+export interface ResolvedSubagentStartRequest extends SubagentStartRequest {
+    readonly descriptor: SubagentDescriptorData;
+}
+
+// ===== SandboxMode
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+// ===== ScheduleChange
+export type ScheduleChange = ScheduleCreateChange | ScheduleDeleteChange | ScheduleDispatchChange;
+
+// ===== ScheduleCreateChange
+export interface ScheduleCreateChange {
+    readonly version: 1;
+    readonly operation: 'create';
+    readonly schedule: LegacyScheduleRecord;
+}
+
+// ===== ScheduleDeleteChange
+export interface ScheduleDeleteChange {
+    readonly version: 1;
+    readonly operation: 'delete';
+    readonly id: ScheduleId;
+}
+
+// ===== ScheduleDispatchChange
+export type ScheduleDispatchChange = OneShotScheduleDispatchChange | EveryScheduleDispatchChange;
+
+// ===== ScheduleId
+export type ScheduleId = Branded<'ScheduleId'>;
+
+// ===== Session
+export class Session {
+    get surface(): SessionSurface;
+    readonly header: SessionHeader;
+    readonly inheritedEventCount: SessionLogOffset;
+    get id(): SessionId;
+    readonly firstLiveSeq: SessionLogOffset;
+    readonly firstLifecycleSeq: SessionLogOffset;
+    eventAt(seq: SessionSeq): SessionEvent | undefined;
+    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];
+    ownEvents(): readonly SessionEvent[];
+    isOwnSeq(seq: SessionSeq): boolean;
+    get seq(): SessionLogOffset;
+    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : []): SessionEvent<T>;
+    requestHeader(): EpochHeader | undefined;
+    requestContext(): RequestContext | undefined;
+    toolHistory(): ToolHistory;
+    deriveMessages(): Message[];
+    deriveEventMessage(event: SessionEvent): Message | null;
+}
+
+// ===== SessionEvent
+export type SessionEvent<T extends SessionEventType = SessionEventType> = { [K in SessionEventType]: { type: K; seq: SessionSeq; time: number; data: SessionEventMap[K]; ignorable?: true; } & (K extends SurfaceEventType ? SurfaceIntent<K> : { surfaceOp?: never; sourceEventSeqs?: never; }) }[T];
+
+// ===== SessionEventMap
+export interface SessionEventMap {
+    'turn/start': { turn: number; };
+    'turn/end': { turn: number; reason: TurnEndReason; };
+    'step/start': { turn: number; step: number; };
+    'step/end': { turn: number; step: number; };
+    'user/message': UserMessage;
+    'developer/message': { turn: number; step: number; message: DeveloperMessage; headerSeq?: SessionSeq; };
+    'system/message': { turn: number; step: number; message: SystemMessage; };
+    'assistant/message': { turn: number; step: number; message: AssistantMessage; stream: AssistantStreamRecord[]; usage?: TokenUsage; interrupted?: true; };
+    'assistant/attempt': { turn: number; step: number; stream: AssistantStreamRecord[]; };
+    'tool/call': { turn: number; step: number; callId: ToolCallId; name: string; arguments: string; };
+    'tool/result': { turn: number; step: number; message: ToolResultMessage; error?: { name: string; code: string; reason?: string; }; meta?: JsonValue; };
+    'request/header': { header: EpochHeader; reason: RequestHeaderReason; startsSeries?: true; };
+    'request/context': RequestContext;
+    'session/end-seed': { inherited?: true; };
+    'agent/inbox/spliced': { target: InboxTarget; start: number; removedCount?: number; inserted: UserMessage[]; outcome?: 'canceled'; };
+    'sandbox/mode': { mode: SandboxMode; source?: 'delegation'; };
+    'approval/asked': { id: ApprovalRequestId; toolName: string; callId?: ToolCallId; reason?: string; };
+    'approval/decided': { id: ApprovalRequestId; outcome: ApprovalOutcome; };
+    'approval/policy': { policy: ApprovalPolicy; source?: 'delegation'; };
+    'tool/ptc-dispatch-start': PtcDispatchStartEventData;
+    'tool/ptc-dispatch': PtcDispatchEventData;
+    'agent-preset/selected': { agentPreset: string; };
+    'command/run': { commandId: CommandId; name: string; args?: string; source: CommandSource; };
+    'command/done': { commandId: CommandId; kind: 'success' | 'error'; text?: string; sourceEventSeq?: import('@deepseek-ai/dsh-session/types').SessionSeq; };
+    'image/offload': { targets: ImageOffloadTarget[]; };
+    'session/title': SessionTitleEventData;
+    'todo/write': { todos: TodoItem[]; };
+    'model/selection': ModelSelection;
+    'subagent/descriptor': SubagentDescriptorData;
+    'permission/preset': { preset: string; };
+    'subagent/catalog': SubagentCatalogEvent;
+    'compaction/start': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null; };
+    'compaction/summary': { compactionId: CompactionId; sourceCommandId?: CommandId; summary: ContentBlock[]; shadowedRange: { start: SessionSeq; end: SessionSeq; }; shadowedSeqs: SessionSeq[]; shadowedTokenCount: number; provider: string; model: string; maxTokens?: number; usage?: TokenUsage; } & ({ rawOutput: ContentBlock[]; llmStreamCall: true; } | { rawOutput?: ContentBlock[]; llmStreamCall?: never; });
+    'compaction/end': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null; error?: string; };
+    'compaction/prune': { shadowedRange: { start: SessionSeq; end: SessionSeq; }; shadowedSeqs: SessionSeq[]; shadowedTokenCount: number; };
+    'feedback/record': FeedbackRecord;
+    'goal/change': GoalChangeMeta;
+    'feedback/message-put': MessageFeedbackPut;
+    'feedback/message-delete': MessageFeedbackDelete;
+    'schedule/change': ScheduleChange;
+}
+
+// ===== SessionEventType
+export type SessionEventType = keyof SessionEventMap;
+
+// ===== SessionHeader
+export interface SessionHeader {
+    readonly version: typeof SESSION_FORMAT_VERSION;
+    readonly id: SessionId;
+    readonly createdAt: number;
+    readonly cwd?: string;
+    readonly parentSession?: SessionId;
+    readonly isSeeded: boolean;
+    readonly origin?: 'subagent';
+    readonly delegationDepth?: number;
+    readonly agentPreset?: string;
+}
+
+// ===== SessionId
+export type SessionId = Branded<'SessionId'>;
+
+// ===== SessionLogOffset
+export type SessionLogOffset = BrandedNumber<'SessionLogOffset'>;
+
+// ===== SessionReferenceSource
+export interface SessionReferenceSource {
+    kind: 'session-reference';
+    form: 'recall';
+    version: 1;
+    references: { sessionId: string; label: string; capturedFormatVersion?: number; capturedThroughSeq: OptionalSessionSeq; compacted: boolean; originalMessages: number; retainedMessages: number; omittedMessages: number; omittedBytes: number; truncated: boolean; inputIndex: number; }[];
+}
+
+// ===== SessionRequestId
+export type SessionRequestId = Branded<'session-request-id'>;
+
+// ===== SessionSeq
+export type SessionSeq = BrandedNumber<'SessionSeq'>;
+
+// ===== SessionSurface
+export interface SessionSurface {
+    readonly nodes: readonly SessionSeq[];
+    readonly replaceGeneration: number;
+    readonly contentGeneration: number;
+}
+
+// ===== SessionTitleEventData
+export interface SessionTitleEventData {
+    readonly title: string;
+    readonly messageSeqs: SessionSeq[];
+    readonly source: SessionTitleSource;
+}
+
+// ===== SessionTitleModelIdentity
+export interface SessionTitleModelIdentity {
+    readonly provider: string;
+    readonly model: string;
+}
+
+// ===== SessionTitleProviderId
+export type SessionTitleProviderId = Branded<'SessionTitleProviderId'>;
+
+// ===== SessionTitleSource
+export type SessionTitleSource = { readonly kind: 'fallback'; } | { readonly kind: 'provider'; readonly provider: SessionTitleProviderId; readonly model?: SessionTitleModelIdentity; } | { readonly kind: 'user'; };
+
+// ===== SkillInvocationSource
+export interface SkillInvocationSource {
+    readonly kind: 'skill-invocation';
+    readonly name: string;
+    readonly form: 'instructions';
+}
+
+// ===== StreamChunk
+export type StreamChunk = { type: 'block-start'; index: number; blockType: ContentBlockType; } | { type: 'text-delta'; index: number; text: string; } | { type: 'reasoning-delta'; index: number; text: string; } | { type: 'tool-call-delta'; index: number; id: ToolCallId; name?: string; argumentsDelta: string; } | { type: 'block-end'; index: number; block: ContentBlock; } | { type: 'usage'; usage: TokenUsage; } | { type: 'finish'; reason: FinishReason; replayState?: ReplayEnvelope; };
+
+// ===== SubagentCapabilities
+export interface SubagentCapabilities {
+    readonly agentOptions: boolean;
+    readonly outputSchema: boolean;
+    readonly depthLimit: boolean;
+    readonly toolFilter: boolean;
+    readonly persona: boolean;
+}
+
+// ===== SubagentCatalogEntry
+export type SubagentCatalogEntry = { readonly id: SessionId; readonly createdAt: number; } & ({ readonly mode: 'one-shot'; readonly label?: string; } | { readonly mode: 'continuable'; readonly label: string; } | { readonly mode: 'unknown'; readonly label?: string; });
+
+// ===== SubagentCatalogEvent
+export type SubagentCatalogEvent = { readonly childId: SessionId; readonly childCreatedAt: number; } & (({ readonly version: 0; } & KnownCatalogMode) | ({ readonly version: 1; } & (KnownCatalogMode | { readonly mode: 'unknown'; readonly label?: string; })));
+
+// ===== SubagentCatalogRow
+export type SubagentCatalogRow = { readonly id: SessionId; readonly activity: 'running' | 'inactive'; } & ({ readonly mode: 'one-shot'; readonly label?: string; } | { readonly mode: 'continuable'; readonly label: string; });
+
+// ===== SubagentDescendantListEntry
+export type SubagentDescendantListEntry = SubagentListEntry & { readonly parentId: SessionId; readonly depth: number; };
+
+// ===== SubagentDescriptorBase
+export interface SubagentDescriptorBase {
+    readonly version: number;
+    readonly mode: 'one-shot' | 'continuable';
+    readonly provider: string;
+}
+
+// ===== SubagentDescriptorData
+export type SubagentDescriptorData = OneShotSubagentDescriptorData | ContinuableSubagentDescriptorData;
+
+// ===== SubagentInterruptAuthority
+export type SubagentInterruptAuthority = { readonly kind: 'user'; readonly parentSessionId: SessionId; } | { readonly kind: 'ancestor'; readonly agent: Agent; };
+
+// ===== SubagentInterruptReceipt
+export interface SubagentInterruptReceipt {
+    readonly accepted: true;
+}
+
+// ===== SubagentListEntry
+export type SubagentListEntry = SubagentCatalogRow & { readonly kind: 'child'; readonly hasChildren: boolean; } | { readonly kind: 'diagnostic'; readonly id: SessionId; readonly reason: 'corrupt' | 'unsupported' | 'unavailable'; };
+
+// ===== SubagentPromptReceipt
+export interface SubagentPromptReceipt {
+    readonly messageId: MessageId;
+}
+
+// ===== SubagentPromptRequest
+export interface SubagentPromptRequest {
+    readonly requestId: SubagentPromptRequestId;
+    readonly parentSessionId: SessionId;
+    readonly childSessionId: SessionId;
+    readonly mode: 'continuable';
+    readonly delivery: 'queue' | 'steer';
+    readonly content: readonly PromptContentPart[];
+    readonly clientTimeZone?: string;
+}
+
+// ===== SubagentPromptRequestId
+export type SubagentPromptRequestId = Branded<'session-request-id'>;
+
+// ===== SubagentProvider
+export interface SubagentProvider {
+    readonly name: string;
+    readonly capabilities: SubagentCapabilities;
+    readonly inheritsParentContext: boolean;
+    readonly agentRouteDefaults?: Readonly<{ provider: string; model: string; }>;
+    start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;
+    prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>;
+}
+
+// ===== SubagentResult
+export interface SubagentResult {
+    readonly output: readonly ContentBlock[];
+    readonly structured?: unknown;
+    readonly diagnostic?: string;
+    readonly stopReason: SubagentStopReason;
+}
+
+// ===== SubagentRun
+export interface SubagentRun {
+    readonly id: SessionId;
+    readonly localAgent: Agent | undefined;
+    readonly result: Promise<SubagentResult>;
+    dispose(): Promise<void>;
+}
+
+// ===== SubagentSendMessageOptions
+export interface SubagentSendMessageOptions {
+    readonly signal: AbortSignal;
+}
+
+// ===== SubagentSettledMessageSource
+export interface SubagentSettledMessageSource {
+    readonly kind: 'subagent-settled';
+    readonly form: 'notice';
+    readonly summary: string;
+    readonly senderSessionId: SessionId;
+}
+
+// ===== SubagentStartRequest
+export interface SubagentStartRequest {
+    readonly label?: string;
+    readonly prompt: ContentBlock[];
+    readonly parent: Agent;
+    readonly signal: AbortSignal;
+    readonly agentOptions?: AgentOptions;
+    readonly outputSchema?: ObjectJsonSchema;
+    readonly maxDepth?: number;
+    readonly toolFilter?: ToolRestriction;
+    readonly persona?: string;
+}
+
+// ===== SubagentStopReason
+export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap];
+
+// ===== SubagentStopReasonMap
+export interface SubagentStopReasonMap {
+    completed: 'completed';
+    aborted: 'aborted';
+    error: 'error';
+    'max-tokens': 'max-tokens';
+    refusal: 'refusal';
+}
+
+// ===== SurfaceEventType
+export type SurfaceEventType = 'system/message' | 'developer/message' | 'user/message' | 'assistant/message' | 'tool/result';
+
+// ===== SurfaceIntent
+export type SurfaceIntent<T extends SurfaceEventType = SurfaceEventType> = { surfaceOp: SurfaceOp; } & (T extends 'assistant/message' ? { sourceEventSeqs?: never; } : { sourceEventSeqs?: SessionSeq[]; });
+
+// ===== SurfaceOp
+export type SurfaceOp = 'append' | { op: 'replace'; startSeq: SessionSeq; endSeq: SessionSeq; };
+
+// ===== SystemMessage
+export interface SystemMessage extends MessageBase {
+    readonly role: 'system';
+    readonly source: MessageSourceMap['system-prompt'];
+}
+
+// ===== SystemPromptMessageSource
+export interface SystemPromptMessageSource {
+    kind: 'system-prompt';
+}
+
+// ===== SystemPromptUpdate
+export type SystemPromptUpdate = 'in-history';
+
+// ===== TextBlock
+export interface TextBlock {
+    type: 'text';
+    text: string;
+}
+
+// ===== TodoItem
+export interface TodoItem {
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+}
+
+// ===== TokenUsage
+export interface TokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    reasoningTokens?: number;
+}
+
+// ===== ToolAdditionBlock
+export interface ToolAdditionBlock {
+    type: 'tool-addition';
+    toolName: string;
+    tool?: never;
+}
+
+// ===== ToolCallBlock
+export interface ToolCallBlock {
+    type: 'tool-call';
+    id: ToolCallId;
+    name: string;
+    arguments: string;
+}
+
+// ===== ToolCallId
+export type ToolCallId = Branded<'ToolCallId'>;
+
+// ===== ToolHistory
+export interface ToolHistory {
+    readonly tools: readonly ToolSchema[];
+    readonly updates: readonly { readonly messageId: MessageId; readonly additions: readonly ToolSchema[]; }[];
+}
+
+// ===== ToolMessageSource
+export interface ToolMessageSource {
+    kind: 'tool';
+    callId: ToolCallId;
+}
+
+// ===== ToolRemovalBlock
+export interface ToolRemovalBlock {
+    type: 'tool-removal';
+    toolName: string;
+}
+
+// ===== ToolRestriction
+export interface ToolRestriction {
+    readonly allow?: readonly string[];
+    readonly deny?: readonly string[];
+}
+
+// ===== ToolResultMessage
+export interface ToolResultMessage extends MessageBase {
+    readonly role: 'tool';
+    readonly source: ToolMessageSource;
+    readonly toolCallId: ToolCallId;
+    readonly isError?: boolean;
+}
+
+// ===== ToolSchema
+export interface ToolSchema {
+    deferLoading?: true;
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
+
+// ===== TurnEndCancelCause
+export type TurnEndCancelCause = AgentCancelCause | { readonly kind: 'legacy'; };
+
+// ===== TurnEndReason
+export type TurnEndReason = TurnEndReasonMap[keyof TurnEndReasonMap];
+
+// ===== TurnEndReasonMap
+export interface TurnEndReasonMap {
+    completed: { kind: 'completed'; };
+    aborted: { kind: 'aborted'; reason: TurnEndCancelCause; };
+    blocked: { kind: 'blocked'; };
+    error: { kind: 'error'; error: LlmFailure; };
+    'max-tokens': { kind: 'max-tokens'; };
+    interrupted: { kind: 'interrupted'; };
+    forked: { kind: 'forked'; };
+}
+
+// ===== UserMessage
+export interface UserMessage extends MessageBase {
+    readonly role: 'user';
+}
