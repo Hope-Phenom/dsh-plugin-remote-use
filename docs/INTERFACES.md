@@ -268,6 +268,51 @@ export class AcpBridge {
 
 ## 集成后确认的契约细节（实现时照此）
 
+### 🔴 `ctx.tools.register()` **不会转换** `parameters` —— 必须是完整 JSON Schema
+
+这是插件第一次装机时踩到的坑，代价是**插件完全不可用**：
+
+```
+Invalid schema for function 'remote_agents':
+schema must be a JSON Schema of 'type: "object"', got 'type: null'.
+```
+
+**事实**（读 `dsh-tools/lib/index.js`）：
+
+| 环节 | 行为 |
+|---|---|
+| `defineTool(options)` | `const parameters = parameterSchemaSpecToJsonSchema(options.parameters)` —— **这里**把作者简写编译成真实 JSON Schema |
+| `ctx.tools.register(definition)` | **只校验 `output`**（`assertSupportedJsonSchema(output.schema)` + `output.render` 必须存在）与 `timeoutMs`，然后 `layer.tools.insert(name, definition)` —— **`parameters` 原样存储，完全不碰** |
+
+⇒ 所以如果像下面这样写，模型收到的是一个**没有根类型**的 schema：
+
+```js
+// ❌ 作者简写未经转换就注册 —— 每个调用都会失败
+ctx.tools.register({ name, parameters: { action: { type: 'string', required: true } }, output, execute })
+
+// ✅ 用 defineTool（第一方插件的写法）
+ctx.tools.register(defineTool({ name, parameters: {...}, output, execute }))
+
+// ✅ 或者自己生成完整 JSON Schema（第三方插件更稳，见下）
+ctx.tools.register({ name, parameters: objectSchema({...}), output, execute })
+```
+
+**为什么第三方插件不该依赖 `defineTool`**：它来自 `@deepseek-ai/dsh-tools`，而本机实测
+`@deepseek-ai/*` 在插件里**解析不到**（profile 的 `node_modules/@deepseek-ai/...` 是旧 npm 安装留下的
+悬空 junction，Node 又按真实路径解析）。既然 import 不可靠，就在自己这边做转换。
+
+**转换规则**（镜像 `parameterSchemaSpecToJsonSchema`）：
+
+```js
+{ type: 'object', properties: <字段去掉 required 关键字>, ...(required.length ? { required: [...] } : {}) }
+```
+
+⚠️ **`required: true` 是作者简写、不是 JSON Schema 关键字** —— 必须提到根的 `required` 数组里，
+并且**从属性上删掉**；留着它同样是非法 schema。`required` 为空时整个键应省略。
+
+⚠️ 这个坑**所有单测都能通过而插件完全不可用**，因为 `register` 不校验 `parameters`。
+必须有一条**断言 schema 形状**的测试，以及装载路径上的同类检查（见 `plugin-smoke.mjs`）。
+
 ### 路由只看 `needsHuman`，不看 `source`
 
 `Decision.source` 是**审计分类**，不是调用方分流的依据。特别是 `danger-full-access`

@@ -178,6 +178,21 @@ check('registered the three remote tools',
 check('every tool declares output.schema + render',
   registered.tools.every((t) => t.output?.schema !== undefined && typeof t.output?.render === 'function'))
 check('no remote_send_message (C2)', !names.includes('remote_send_message'))
+
+// The model transport requires an object-rooted parameter schema, and
+// `ctx.tools.register()` stores `parameters` verbatim (it validates only `output`). A
+// shorthand map left unconverted therefore makes EVERY call fail at the model with
+// 'schema must be a JSON Schema of type: "object", got type: null'. This is the check
+// that catches that class of bug on the load path instead of in production.
+for (const t of registered.tools) {
+  check(`${t.name}: parameters are an object-rooted JSON Schema`,
+    t.parameters?.type === 'object' && typeof t.parameters?.properties === 'object',
+    `type=${JSON.stringify(t.parameters?.type)} keys=${JSON.stringify(Object.keys(t.parameters ?? {}))}`)
+  const stray = Object.entries(t.parameters?.properties ?? {})
+    .filter(([, p]) => p?.required !== undefined).map(([n]) => n)
+  check(`${t.name}: no property keeps a "required" keyword`, stray.length === 0, stray.join(','))
+}
+
 check('registered a runtime-context section', registered.sections.length === 1, `got ${registered.sections.length}`)
 check('injected into webServer for the settings route',
   registered.injects.some((d) => Array.isArray(d) && d.includes('webServer')))

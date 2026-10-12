@@ -16,8 +16,49 @@
  */
 
 /**
+ * Build an object-rooted JSON Schema from a field map.
+ *
+ * WHY THIS IS HAND-ROLLED INSTEAD OF USING `defineTool`:
+ *
+ * `defineTool` from `@deepseek-ai/dsh-tools` exists to perform exactly this conversion
+ * (`const parameters = parameterSchemaSpecToJsonSchema(options.parameters)`), but a
+ * third-party plugin cannot rely on importing `@deepseek-ai/*` here: the profile's
+ * `node_modules/@deepseek-ai/...` entries are dangling junctions left by an old npm
+ * install, and Node resolves a linked package through its real path, so the import
+ * fails. Confirmed empirically — `@deepseek-ai/schemastery` is not importable either.
+ *
+ * `ctx.tools.register()` does NOT convert parameters; it validates only `output` and
+ * stores the definition verbatim. So registering the author shorthand unconverted hands
+ * the model a schema with no root type, and EVERY call fails with:
+ *
+ *   Invalid schema for function 'remote_agents':
+ *   schema must be a JSON Schema of 'type: "object"', got 'type: null'.
+ *
+ * The mapping mirrors `parameterSchemaSpecToJsonSchema`: a field's `required: true`
+ * moves its NAME into the root `required` array and is stripped from the property (it is
+ * not a JSON Schema property keyword). `required` is omitted entirely when empty, exactly
+ * as the official converter does.
+ *
+ * @param {Record<string, { required?: boolean, [k: string]: unknown }>} fields
+ * @returns {{ type: 'object', properties: Record<string, unknown>, required?: string[] }}
+ */
+export function objectSchema(fields) {
+  const properties = {}
+  const required = []
+  for (const [name, spec] of Object.entries(fields ?? {})) {
+    const { required: isRequired, ...rest } = spec ?? {}
+    properties[name] = rest
+    if (isRequired === true) required.push(name)
+  }
+  return required.length === 0
+    ? { type: 'object', properties }
+    : { type: 'object', properties, required }
+}
+
+/**
  * One tool definition, shaped per DSH's verified registration contract:
- * `output` is REQUIRED and holds `render`; `parameters` is loose JSON Schema.
+ * `output` is REQUIRED and holds `render`; `parameters` must already be a COMPLETE
+ * JSON Schema (see objectSchema above) because nothing downstream converts it.
  *
  * @typedef {object} ToolDefinition
  * @property {string} name
@@ -50,12 +91,12 @@ export function makeRemoteTools(deps) {
       + 'action="status": one task by taskId (state, elapsed, tool calls, whether it is waiting for approval).\n'
       + 'action="wait": block until a task settles, then report its outcome.\n'
       + 'Remote tasks cannot be continued: there is no `remote_send_message`. Delegate a fresh task instead.',
-    parameters: {
+    parameters: objectSchema({
       action: { type: 'string', required: true, description: 'list | status | wait' },
       taskId: { type: 'string', description: 'Required for status and wait.' },
       peerId: { type: 'string', description: 'Optional filter for list.' },
       timeoutMs: { type: 'number', description: 'For wait: give up after this many ms (default 120000).' },
-    },
+    }),
     output: {
       schema: { type: 'string' },
       render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],
@@ -83,9 +124,9 @@ export function makeRemoteTools(deps) {
       'Stop a task running on a paired LAN worker. `interrupt_agent` does not work for remote tasks '
       + '(they have no local Activation), so use this instead. Cancellation is cooperative and not '
       + 'instant: the worker must reach a quiescent point before the task settles as aborted.',
-    parameters: {
+    parameters: objectSchema({
       taskId: { type: 'string', required: true, description: 'The remote task to stop.' },
-    },
+    }),
     output: {
       schema: { type: 'string' },
       render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],
@@ -115,9 +156,9 @@ export function makeRemoteTools(deps) {
       + 'Blocking findings (`S1`-`S8`, `S9`, `S12`, `S14`, `S15`) prevent dispatch. '
       + '`no-interactive-session` means the worker is healthy but nobody is logged in on it — that is an '
       + 'operational state, not a fault, and it cannot be fixed from here.',
-    parameters: {
+    parameters: objectSchema({
       peerId: { type: 'string', description: 'Worker to check. Omit to check every paired worker.' },
-    },
+    }),
     output: {
       schema: { type: 'string' },
       render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],

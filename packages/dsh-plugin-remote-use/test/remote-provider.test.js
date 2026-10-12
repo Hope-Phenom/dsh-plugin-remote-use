@@ -7,7 +7,7 @@ import { RemoteProvider, blocksToText, assertUsableCwd, GATE_REFUSED } from '../
 import { TaskRegistry } from '../lib/core/task-registry.js'
 import { NO_START_CAPABILITIES, limitDiagnostic } from '../lib/provider/out-of-process-helpers.js'
 import {
-  makeRemoteTools, renderSelfcheck, renderTaskDetail, waitForTask,
+  makeRemoteTools, renderSelfcheck, renderTaskDetail, waitForTask, objectSchema,
 } from '../lib/tools/remote-tools.js'
 
 // ---------------------------------------------------------------------------
@@ -321,6 +321,83 @@ test('tools are registered under the documented names and all declare output.ren
 test('there is no remote_send_message: the seam cannot continue a remote child (C2)', () => {
   const tools = makeRemoteTools({ registry: new TaskRegistry({}), peers: new Map() })
   assert.equal(tools.some((t) => t.name === 'remote_send_message'), false)
+})
+
+// ---------------------------------------------------------------------------
+// REGRESSION: the model-facing parameter schema
+//
+// These exist because the first shipped version registered the author shorthand
+// (`{ action: { type: 'string', required: true } }`) without the conversion that
+// `defineTool` performs. `ctx.tools.register()` stores `parameters` verbatim and
+// validates only `output`, so the model received a schema with no root type and EVERY
+// call failed with:
+//
+//   Invalid schema for function 'remote_agents':
+//   schema must be a JSON Schema of 'type: "object"', got 'type: null'.
+//
+// Every unit test passed while the plugin was unusable. Asserting the shape here is the
+// only thing that catches that offline.
+// ---------------------------------------------------------------------------
+
+test('REGRESSION: every tool declares an object-rooted JSON Schema for parameters', () => {
+  const tools = makeRemoteTools({ registry: new TaskRegistry({}), peers: new Map() })
+  for (const t of tools) {
+    assert.equal(t.parameters?.type, 'object',
+      `${t.name}: parameters.type must be "object", got ${JSON.stringify(t.parameters?.type)}`)
+    assert.equal(typeof t.parameters.properties, 'object', `${t.name}: properties must be present`)
+    assert.ok(!Array.isArray(t.parameters.properties), `${t.name}: properties must be a map`)
+  }
+})
+
+test('REGRESSION: `required: true` becomes a root required entry, not a property keyword', () => {
+  const tools = makeRemoteTools({ registry: new TaskRegistry({}), peers: new Map() })
+  for (const t of tools) {
+    for (const [name, prop] of Object.entries(t.parameters.properties)) {
+      assert.equal(prop.required, undefined,
+        `${t.name}.${name}: "required" is not a JSON Schema property keyword and must be stripped`)
+    }
+    const declared = t.parameters.required ?? []
+    assert.ok(Array.isArray(declared), `${t.name}: required must be an array when present`)
+    for (const r of declared) {
+      assert.ok(r in t.parameters.properties, `${t.name}: required names "${r}", not a declared property`)
+    }
+  }
+})
+
+test('REGRESSION: required fields are exactly the intended ones', () => {
+  const tools = makeRemoteTools({ registry: new TaskRegistry({}), peers: new Map() })
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t.parameters]))
+  assert.deepEqual(byName.remote_agents.required, ['action'])
+  assert.deepEqual(byName.remote_interrupt.required, ['taskId'])
+  assert.deepEqual(Object.keys(byName.remote_agents.properties), ['action', 'taskId', 'peerId', 'timeoutMs'])
+  // remote_selfcheck takes no required argument: it checks every worker by default.
+  assert.equal(byName.remote_selfcheck.required, undefined)
+  assert.deepEqual(Object.keys(byName.remote_selfcheck.properties), ['peerId'])
+})
+
+test('REGRESSION: parameters survive a JSON round-trip as the model transport requires', () => {
+  const tools = makeRemoteTools({ registry: new TaskRegistry({}), peers: new Map() })
+  for (const t of tools) {
+    assert.deepEqual(JSON.parse(JSON.stringify(t.parameters)), t.parameters,
+      `${t.name}: parameters must be plain JSON`)
+  }
+})
+
+test('objectSchema mirrors the official converter', () => {
+  // Root type + properties map; `required` present only when non-empty.
+  assert.deepEqual(objectSchema({ a: { type: 'string' } }),
+    { type: 'object', properties: { a: { type: 'string' } } })
+  assert.deepEqual(objectSchema({ a: { type: 'string', required: true }, b: { type: 'number' } }),
+    { type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } }, required: ['a'] })
+  // No fields is still a valid object schema, never an empty shorthand.
+  assert.deepEqual(objectSchema({}), { type: 'object', properties: {} })
+  assert.deepEqual(objectSchema(undefined), { type: 'object', properties: {} })
+  // Descriptions survive.
+  assert.deepEqual(objectSchema({ a: { type: 'string', description: 'd' } }).properties.a,
+    { type: 'string', description: 'd' })
+  // Multiple required fields keep declaration order.
+  assert.deepEqual(objectSchema({ a: { type: 'string', required: true }, b: { type: 'string', required: true } }).required,
+    ['a', 'b'])
 })
 
 test('remote_agents rejects an unknown action instead of guessing', async () => {
