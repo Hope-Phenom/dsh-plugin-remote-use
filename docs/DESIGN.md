@@ -1715,35 +1715,84 @@ echo shell-works  → (no output)  同上
 | 工作目录错误 | ❌ | 修好 `process.cwd()`（原为 `C:\Windows\System32`）后仍失败 |
 | **Windows 沙箱** | ✅ | `DSH_PERMISSION_MODE=danger-full-access` 绕过沙箱后立刻正常 |
 
-**采用的处理**：从机运行在 `danger-full-access`。
+**采用的处理**：**已修好**，见 §14.3。
 
-### 14.3 🔴 由此产生的真实安全态势（必须如实记录）
+### 14.3 ✅ 沙箱已修好，边界已恢复（并实测验证）
 
-沙箱关闭后，**审批链路整条失效**——因为触发点是"沙箱拒绝 → 提权 → 审批请求"：
+#### 根因：mediator 是 GUI 子系统镜像，拿不到控制台
+
+`dsh-sandbox-local` 用 **`process.execPath`** 作为 mediator 解释器。在本部署里那是
+**`DeepSeek Harness.exe`（GUI 子系统）**，而 **Windows 从不为 GUI 子系统镜像自动分配控制台**。
+于是 runner 创建的 `WRITE_RESTRICTED` 子进程**没有任何控制台可继承**，在 DLL 初始化阶段就死掉
+——`0xC0000142`，零输出。**每一条 shell 命令都失败。**
+
+#### 实测证据（本机，runner 从 asar 提取，同参数，只换解释器；8/8 有效运行）
+
+| mediator | read-only + `cmd /c exit 0` | workspace-write + `pwsh` |
+|---|---|---|
+| **`node.exe`（控制台子系统）** | ✅ exit 0 | ✅ exit 0，子进程输出正常 |
+| **`DeepSeek Harness.exe`（GUI 子系统）** | 🔴 `0xC0000142` | 🔴 `0xC0000142` |
+
+#### 修法：`runnerCommand` 指向一个翻译 shim
+
+**不能**直接把 `runnerCommand` 指向 windows-acl runner —— `confine()` 会**无条件**给它前置
+`bwrapProfileArgs(policy)`（bubblewrap 方言：`--ro-bind`/`--bind`/`--tmpfs`），runner 会以
+`windows-acl-run: unknown argument: --ro-bind` 拒绝。`runnerCommand` 是"运维断言这是 bwrap 兼容
+runner"的路径，**不是**替换 win32 rung 的开关。
+
+因此 `shim.mjs` 被命名为 runner 并负责翻译两个方言。**它被 `node.exe` 启动正是关键** ——
+控制台子系统镜像会被自动分配控制台，而那正是受限子进程需要的。shim 再以 `node.exe`
+启动真正的 runner，使用 runner 自己的 argv 契约。
+
+两个文件都不能放在 `app.asar` 里：普通 `node.exe` 没有 asar 支持。所以由
+`extract-mediator.mjs`（**必须在 Electron-as-node 下运行**，因为只有 Electron 能读 asar 内部）
+把 runner 及其**依赖闭包**落盘到真实目录。
+
+⚠️ 注意 `fs.cpSync` **不能**从 asar 拷贝（即使 `readdirSync`/`statSync` 在同一路径上成功，
+它仍报 `ENOENT ... not found in <asar>`）；必须用 `readFile`+`writeFile` 手工递归。
+而 koffi 的原生库在**独立包** `@koromix/koffi-win32-x64` 里，位于 **`app.asar.unpacked`**
+（Electron 会把 `.node` 解包到 asar 之外）。
+
+#### 修好后的实测结果
 
 ```
-实测：写入 C:\Users\worker\approval-probe.txt（工作区外）→ 成功
+whoami           → ERROR: Access is denied.  exit 1     ← 受限令牌拒绝（沙箱真实生效的证据）
+echo shell-works → shell-works                exit 0     ← 命令能跑
+Get-Location     → C:\dsh-remote\p0work       exit 0
+
+工作区内写入 sandbox-inside.txt        → ✅ 成功
+工作区外写入 C:\Users\worker\...txt     → 🔴 [sandbox: file access denied under workspace-write mode]
+```
+
+#### 完整闭环（P0 漏洞的最终闭合）
+
+| 步骤 | 实测结果 |
+|---|---|
+| 1. 沙箱拒绝越界写入 | ✅ |
+| 2. agent 提权重试 `danger-full-access`（与 P0 时同样的过度申请） | ✅ |
+| 3. 审批请求跨局域网抵达主机 | ✅ 主机 `bridge.approvals = 1` |
+| 4. **审阅引擎拒绝**（§8.3 档位检查） | ✅ `rejected` |
+| 5. 文件未创建、agent 停止（fail-closed） | ✅ 从机 `outside-absent` / `escalation-absent` |
+
+⇒ **§7.5「真正的边界是从机沙箱」这条设计前提现已成立。** 而且 P0 里被无脑客户端自动放行的
+那个越权申请，现在**被沙箱逼成审批请求、再被档位检查拒绝**——两层防御都真实存在。
+
+**已知争议点**（外部报告未复现，仅是分析）：`AllocConsole()` 在 runner 内调用也能修好，
+那是更干净的上游修法（shim 是变通）。上游 `deepseek-ai/deepseek-harness` 关闭了 issue、
+不接受外部 PR，文档渠道是 GitHub Discussions。
+
+### 14.3.1 若沙箱再次不可用时的降级路径
+
+`danger-full-access` 仍然可用，但**必须知道代价**（这是实测，不是推测）：沙箱关闭后
+**审批链路整条失效**——因为触发点是"沙箱拒绝 → 提权 → 审批请求"：
+
+```
+实测：danger-full-access 下写入 C:\Users\worker\approval-probe.txt → 成功
       无审批提示、无沙箱拒绝标记
 ```
 
-即使把 `approval.policy` 钉成 `ask` 也一样（已实测），因为**没有沙箱拒绝就没有 escalation**。
-
-⇒ **在 `danger-full-access` 下，本设计的安全模型退化为：**
-
-| 层次 | 是否有效 | 说明 |
-|---|---|---|
-| **派单门禁**（S1–S18 自检） | ✅ 有效 | 从机不就绪则不派单 |
-| **档位检查**（§8.3） | ❌ **不触发** | `decideApproval` 依附于审批请求，而请求从不发生 |
-| **审批桥 + `rawInput` 缓存** | ❌ **不触发** | 同上 |
-| **prompt 本身** | ✅ 唯一实际边界 | 主机让它做什么，它就能做什么 |
-
-⚠️ **这推翻了 §7.5 里"真正的边界仍然是从机沙箱"这一条设计前提。** 在该从机上，沙箱不存在。
-
-**这个取舍为何在此可接受**：该从机是**专用 GUI 测试机、位于内网、由同一人控制**。但这是**环境特定的理由，不是一般性的安全论证**。
-
-**恢复该边界的两条路**：
-1. **修好沙箱**：在从机上手动运行那个 runner，捕获它的 `windows-acl-run: <detail>` stderr，判断是令牌创建失败还是子进程初始化失败
-2. **主机侧强化**：既然从机不设防，主机应在派单前做更强的任务级声明与事后审计（但**无法阻止**从机 agent 的行动——它只能观测）
+即使把 `approval.policy` 钉成 `ask` 也一样，因为**没有沙箱拒绝就没有 escalation**。
+此时安全模型退化为：门禁 ✅ / 档位检查 ❌ 不触发 / 审批桥 ❌ 不触发 / **prompt 是唯一实际边界**。
 
 ### 14.4 部署期暴露的插件自身缺陷（已修）
 
