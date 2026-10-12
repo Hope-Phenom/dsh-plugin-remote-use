@@ -173,8 +173,8 @@ if (provider !== undefined) {
 
 const names = registered.tools.map((t) => t.name).sort()
 console.log(`  INFO  tools registered: ${JSON.stringify(names)}`)
-check('registered the three remote tools',
-  names.join(',') === 'remote_agents,remote_interrupt,remote_selfcheck', names.join(','))
+check('registered the four remote tools',
+  names.join(',') === 'remote_agents,remote_interrupt,remote_screenshot,remote_selfcheck', names.join(','))
 check('every tool declares output.schema + render',
   registered.tools.every((t) => t.output?.schema !== undefined && typeof t.output?.render === 'function'))
 check('no remote_send_message (C2)', !names.includes('remote_send_message'))

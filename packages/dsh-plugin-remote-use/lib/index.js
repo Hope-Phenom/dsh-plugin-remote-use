@@ -23,7 +23,7 @@
 // NOTE: `@deepseek-ai/schemastery` is deliberately NOT a static import here -- see the
 // defensive resolution below for why a missing schema must not abort the module.
 import { AcpBridge } from './bridge/acp-bridge.js'
-import { PeerConnection } from './bridge/peer-connection.js'
+import { PeerConnection, httpBaseOf } from './bridge/peer-connection.js'
 import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
@@ -154,6 +154,10 @@ export function apply(ctx, config) {
     const connection = new PeerConnection({
       peerId,
       log: (level, message) => log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](message),
+      // Binary payloads (screenshots) come from the relay's HTTP side, not through the ACP
+      // message pump. Derived from the same URL so there is one thing to configure.
+      httpBase: httpBaseOf(worker.url),
+      token: worker.token,
       createBridge: () => new AcpBridge({
         url: worker.url,
         token: worker.token,

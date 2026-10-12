@@ -152,7 +152,7 @@ if (route !== undefined) {
 // ---------------------------------------------------------------------------
 console.log('\n=== 2. delegation through the mounted provider ===')
 const registry = mounted.tools.length // just to prove tools exist below
-check('the three remote tools are registered', mounted.tools.length === 3, `got ${mounted.tools.length}`)
+check('the four remote tools are registered', mounted.tools.length === 4, `got ${mounted.tools.length}`)
 
 const t0 = Date.now()
 const run = await provider.start({
@@ -169,6 +169,30 @@ if (result.diagnostic !== undefined) console.log(`  diagnostic = ${result.diagno
 check('the delegated task completed', result.stopReason === 'completed', String(result.stopReason))
 check('assistant output came back', (result.output?.[0]?.text ?? '').length > 0)
 void registry
+
+// ---------------------------------------------------------------------------
+// 2b. The screenshot tool, through the mounted tool set
+// ---------------------------------------------------------------------------
+console.log('\n=== 2b. remote_screenshot through the mounted tool set ===')
+const shotTool = mounted.tools.find((t) => t.name === 'remote_screenshot')
+check('remote_screenshot is registered', shotTool !== undefined)
+if (shotTool !== undefined) {
+  const text = String(await shotTool.execute({}, {}))
+  console.log('  ' + text.split('\n').map((l) => l.trim()).filter(Boolean).join('\n  '))
+  check('the tool reported a file path', /File: .+\.png/.test(text))
+  check('the tool tells the model to call read_image', /read_image/.test(text))
+  const m = /File: (.+\.png)/.exec(text)
+  if (m !== null) {
+    const { existsSync, statSync } = await import('node:fs')
+    check('the PNG exists on the host', existsSync(m[1]), m[1])
+    if (existsSync(m[1])) {
+      const size = statSync(m[1]).size
+      console.log(`  saved: ${m[1]} (${size} bytes)`)
+      check('the PNG is a real image (not empty)', size > 10_000, `${size} bytes`)
+      check('it has a PNG signature', (await import('node:fs')).readFileSync(m[1]).subarray(0, 4).toString('hex') === '89504e47')
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 3. Teardown

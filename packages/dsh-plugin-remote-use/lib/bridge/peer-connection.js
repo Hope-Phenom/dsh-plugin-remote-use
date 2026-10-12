@@ -25,6 +25,32 @@
  * @module dsh-plugin-remote-use/peer-connection
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+/** Where downloaded worker screenshots land. The host's image reader must be able to open it. */
+export function defaultShotDir() {
+  return join(tmpdir(), 'dsh-remote-screenshots')
+}
+
+/**
+ * Turn a WebSocket URL into its HTTP counterpart on the same relay:
+ * `ws://h:p` -> `http://h:p`, `wss://h:p` -> `https://h:p`.
+ * @param {string} wsUrl
+ * @returns {string} '' when the URL is unusable
+ */
+export function httpBaseOf(wsUrl) {
+  if (typeof wsUrl !== 'string' || wsUrl === '') return ''
+  try {
+    const u = new URL(wsUrl)
+    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
+    return `${u.protocol}//${u.host}`
+  } catch {
+    return ''
+  }
+}
+
 export class PeerConnection {
   /**
    * @param {object} opts
@@ -32,12 +58,20 @@ export class PeerConnection {
    * @param {() => object} opts.createBridge  builds a fresh, unconnected bridge
    * @param {(level: 'info'|'warn'|'error', message: string) => void} [opts.log]
    * @param {() => number} [opts.now]
+   * @param {string} [opts.httpBase]   relay HTTP origin, for binary endpoints
+   * @param {string} [opts.token]      bearer for those endpoints
+   * @param {string} [opts.shotDir]    where downloaded screenshots are written
+   * @param {typeof fetch} [opts.fetchImpl]
    */
   constructor(opts) {
     this.peerId = opts.peerId
     this.createBridge = opts.createBridge
     this.log = opts.log ?? (() => {})
     this.now = opts.now ?? (() => Date.now())
+    this.httpBase = opts.httpBase ?? ''
+    this.token = opts.token ?? ''
+    this.shotDir = opts.shotDir ?? defaultShotDir()
+    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
 
     /** @type {object | undefined} */
     this.bridge = undefined
@@ -138,8 +172,7 @@ export class PeerConnection {
   }
 
   /** Cancel the worker's current run. Never throws for a missing connection. */
-  async cancel() {
-    if (!this.connected) {
+  async cancel() {    if (!this.connected) {
       // Nothing to cancel on a link that was never established: do not connect purely to
       // deliver a cancel.
       this.log('warn', `cancel for "${this.peerId}" ignored: not connected`)
@@ -150,6 +183,77 @@ export class PeerConnection {
     } catch (error) {
       await this.#invalidateIfTransportError(error)
       this.log('warn', `cancel on "${this.peerId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Capture the worker's desktop and save the PNG locally.
+   *
+   * WHY HTTP AND NOT THE RPC: the relay exposes both, but the bytes must not travel as
+   * base64 inside a JSON-RPC result -- that inflates a multi-megabyte PNG by a third and
+   * would have to pass through the ACP message pump, which exists for small control
+   * frames. The RPC returns metadata; `GET /screenshot` returns the image. One download
+   * gives both (geometry is in the response headers), so no RPC round trip is needed.
+   *
+   * The file is written where the HOST's image reader can open it, which is what lets the
+   * model actually look at the worker's screen rather than only read about it.
+   *
+   * @param {{ fresh?: boolean, timeoutMs?: number }} [opts]
+   * @returns {Promise<{ localPath: string, width: number, height: number, bytes: number,
+   *                     displays: number, capturedAt: string, elapsedMs: number }>}
+   */
+  async screenshot(opts = {}) {
+    if (this.httpBase === '') {
+      throw new Error(`PeerConnection(${this.peerId}): no HTTP base derived from the worker URL`)
+    }
+    if (typeof this.fetchImpl !== 'function') {
+      throw new Error('PeerConnection: no fetch implementation available')
+    }
+
+    const url = `${this.httpBase}/screenshot${opts.fresh === false ? '' : '?fresh=1'}`
+    const controller = new AbortController()
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? Number(opts.timeoutMs) : 60_000
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    if (typeof timer.unref === 'function') timer.unref()
+
+    let res
+    try {
+      res = await this.fetchImpl(url, {
+        headers: this.token === '' ? {} : { authorization: `Bearer ${this.token}` },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      throw new Error(`worker "${this.peerId}" screenshot request failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (res.status !== 200) {
+      let detail = ''
+      try { detail = String(await res.text()).slice(0, 200) } catch { /* body may be empty */ }
+      throw new Error(`worker "${this.peerId}" screenshot returned HTTP ${res.status}${detail === '' ? '' : `: ${detail}`}`)
+    }
+
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length === 0) throw new Error(`worker "${this.peerId}" screenshot was empty`)
+
+    mkdirSync(this.shotDir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const localPath = join(this.shotDir, `${this.peerId}-${stamp}.png`)
+    writeFileSync(localPath, buf)
+
+    const num = (name) => {
+      const v = Number(res.headers.get(name))
+      return Number.isFinite(v) ? v : 0
+    }
+    return {
+      localPath,
+      width: num('x-shot-width'),
+      height: num('x-shot-height'),
+      bytes: buf.length,
+      displays: num('x-shot-displays'),
+      capturedAt: res.headers.get('x-shot-captured-at') ?? '',
+      elapsedMs: num('x-shot-ms'),
     }
   }
 

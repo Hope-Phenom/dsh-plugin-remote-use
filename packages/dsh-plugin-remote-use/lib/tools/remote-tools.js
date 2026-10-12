@@ -180,7 +180,67 @@ export function makeRemoteTools(deps) {
     },
   }
 
-  return [remoteAgents, remoteInterrupt, remoteSelfcheck]
+  /**
+   * Capture the worker's desktop.
+   *
+   * The return value is a path, not the picture: the model reaches the image with its own
+   * `read_image` on that path. That split is deliberate -- the picture never has to travel
+   * through the ACP message pump, which exists for small control frames, and it works even
+   * though the worker's own model may be unable to inspect images.
+   */
+  const remoteScreenshot = {
+    name: 'remote_screenshot',
+    group: 'remote',
+    description:
+      'Capture the screen of a paired LAN worker and save it locally.\n'
+      + 'IMPORTANT: the tool returns a FILE PATH, not the picture. Call `read_image` on that path '
+      + 'to actually look at the worker\'s screen; without that step you have only a filename.\n'
+      + 'Use this to see what a GUI task did, to debug a failed visual assertion, or before '
+      + 'deciding whether a task that needs the desktop is worth delegating.\n'
+      + 'The capture covers the whole virtual desktop, so on a multi-monitor worker the frame '
+      + 'includes every display plus any uncovered area (which renders black). The worker-side '
+      + 'console is hidden by the relay so it does not appear in the frame.',
+    parameters: objectSchema({
+      peerId: { type: 'string', description: 'Worker to capture. Omit when only one worker is paired.' },
+      fresh: {
+        type: 'boolean',
+        description: 'Force a new capture. Defaults to true; pass false to reuse the relay\'s last frame.',
+      },
+    }),
+    output: {
+      schema: { type: 'string' },
+      render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],
+    },
+    async execute(args) {
+      const wanted = typeof args?.peerId === 'string' && args.peerId !== ''
+        ? peers.get(args.peerId)
+        : [...peers.values()][0]
+      if (wanted === undefined) {
+        return typeof args?.peerId === 'string' && args.peerId !== ''
+          ? `remote_screenshot: no worker with peerId "${args.peerId}"`
+          : 'remote_screenshot: no paired workers'
+      }
+      if (wanted.connection?.screenshot === undefined) {
+        return `remote_screenshot: worker "${wanted.peerId}" has no screenshot channel`
+      }
+      try {
+        const shot = await wanted.connection.screenshot({ fresh: args?.fresh !== false })
+        const lines = [
+          `Captured ${wanted.name} at ${shot.capturedAt || 'now'} in ${shot.elapsedMs}ms.`,
+          `File: ${shot.localPath}`,
+        ]
+        if (shot.width > 0) lines.push(`Virtual desktop: ${shot.width}x${shot.height} across ${shot.displays} display(s).`)
+        lines.push(`Size: ${shot.bytes} bytes.`)
+        lines.push('')
+        lines.push(`Next: call read_image with file_path "${shot.localPath}" to see it.`)
+        return lines.join('\n')
+      } catch (error) {
+        return `remote_screenshot failed for "${wanted.peerId}": ${error instanceof Error ? error.message : String(error)}`
+      }
+    },
+  }
+
+  return [remoteAgents, remoteInterrupt, remoteSelfcheck, remoteScreenshot]
 }
 
 /**

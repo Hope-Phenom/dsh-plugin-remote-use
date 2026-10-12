@@ -310,7 +310,8 @@ test('tools are registered under the documented names and all declare output.ren
   const registry = new TaskRegistry({})
   const peers = new Map()
   const tools = makeRemoteTools({ registry, peers })
-  assert.deepEqual(tools.map((t) => t.name).sort(), ['remote_agents', 'remote_interrupt', 'remote_selfcheck'])
+  assert.deepEqual(tools.map((t) => t.name).sort(),
+    ['remote_agents', 'remote_interrupt', 'remote_screenshot', 'remote_selfcheck'])
   for (const t of tools) {
     assert.equal(typeof t.output?.schema, 'object', `${t.name} must declare output.schema`)
     assert.equal(typeof t.output?.render, 'function', `${t.name} must declare output.render`)
