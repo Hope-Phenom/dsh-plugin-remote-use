@@ -28,12 +28,16 @@ $payload = @(
   'C:\dsh-remote\p0work\remote-proof.txt',
   'C:\dsh-remote\p0work\image-probe.png',
   'C:\dsh-remote\p0work\selfcheck-screen.png',
+  'C:\dsh-remote\p0work\sandbox-inside.txt',
   'C:\Users\worker\p0-approval-test.txt',
   'C:\Users\worker\plugin-escape-attempt.txt',
-  'C:\Users\worker\approval-probe.txt'
+  'C:\Users\worker\approval-probe.txt',
+  'C:\Users\worker\sandbox-outside.txt',
+  'C:\Users\worker\sandbox-escalation.txt'
 )
-# Transients from bringing the relay up, from the standalone capture, and from the pwsh
-# diagnostics.
+# Transients from bringing the relay up, from the standalone capture, and from the pwsh and
+# sandbox diagnostics. NOTE: C:\dsh-remote\sandbox-mediator is NOT cleaned -- it is the
+# sandbox fix itself (runner + dependency closure + shim), referenced by the profile patch.
 $transient = @(
   'C:\dsh-remote\shot.png',
   'C:\dsh-remote\screenshot-report.txt',
@@ -56,6 +60,14 @@ $transient = @(
   'C:\dsh-remote\cleanup-p0.txt',
   'C:\dsh-remote\stop.txt',
   'C:\dsh-remote\start.txt',
+  'C:\dsh-remote\shim-out.txt',
+  'C:\dsh-remote\shim-err.txt',
+  'C:\dsh-remote\exp-out.txt',
+  'C:\dsh-remote\exp-err.txt',
+  'C:\dsh-remote\acl-recon.txt',
+  'C:\dsh-remote\find-native.txt',
+  'C:\dsh-remote\validate-shim.txt',
+  'C:\dsh-remote\sandbox-mediator-test.txt',
   'C:\dsh-remote\plugin-slave\ctl.txt',
   'C:\dsh-remote\plugin-slave\start.txt',
   'C:\dsh-remote\plugin-slave\stop.txt',
