@@ -1422,8 +1422,7 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | **P2 授权** | 审批桥接 + ReviewEngine（规则 + 任务内记忆）+ 90 秒超时 + 待审批通知 | 从机提权操作能被主机批准/拒绝；超时按拒绝；映射缺失默认拒绝 |
 | **P3 可见性** | `TaskRegistry` + `remote_agents` + `remote_interrupt` + 运行时上下文注入 | 模型能查询/等待/打断远程任务；不会"忘记"已派出的任务 |
 | **P4 工作区同步** | manifest + blob + 事务性切换 + 路径映射 | 从机能拿到与主机一致的工作区；同步中途失败不留半成品 |
-| **P5 审计与 UI** | AuditLog + Settings 页 + 从机「工作节点」页 + 急停 | 能回答"谁批准了什么"；能从从机本地急停 |
-| **P6 加固** | 协议版本协商、重连与在途任务对齐、磁盘 GC、配额 | 断网重连不产生重复任务；从机重启后状态一致 |
+| **P5 审计与 UI** | AuditLog + Settings 页 + 从机「工作节点」页 + 急停 | 能回答"谁批准了什么"；能从从机本地急停 | ⚠️ Settings 页已做（§15）；AuditLog 未做 || **P6 加固** | 协议版本协商、重连与在途任务对齐、磁盘 GC、配额 | 断网重连不产生重复任务；从机重启后状态一致 |
 
 **P0 必须先做**，因为它验证的是整条路线的技术前提（ACP over WS 可跑通）。若 P0 失败，退回自研 `session.event` 中继（只替换 `Transport` 实现，上层不动）。
 
@@ -1805,3 +1804,97 @@ Get-Location     → C:\dsh-remote\p0work       exit 0
 | relay 重启后首次调用必失败 | bridge 无心跳，死 socket 要等一次失败才发现 | **已知未修**（第二次调用自愈） |
 
 **共性教训**：前两条都是**测试覆盖的接缝**漏掉的——单测用预先连好的假 bridge、冒烟测试只挂载不连从机、真机测试自己建桥。补上 `plugin-live.mjs`（已安装位置 + 真实 `apply()` + 真实从机）后，这两个 bug 都跑不掉。
+
+---
+
+## 15. Settings 页（P5 第一步）
+
+### 15.1 为什么这样接
+
+DSH 里第三方插件挂设置页的契约（从同机另一个插件 `dsh-plugin-notify` 的工作实现读出，非猜测）：
+
+```jsonc
+// package.json —— 两处缺一不可
+"exports": { "./client": "./lib/client.js" },
+"dsh": { "client": { "platform": "web" } }
+```
+
+```js
+// lib/client.js —— 纯模块工厂，无构建步骤，React 取自浏览器模块表
+window.__ModuleLoader__.load({
+  id: '<包 id>',
+  factory(require) {
+    const React = require('react'); const h = React.createElement
+    const inject = ['slots', 'locale']
+    function apply(ctx) {
+      ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section', id: '<插件 id>', order: 45,
+        label: () => t('nav'), locale: NS,
+      }, Section))
+    }
+    return { inject, apply }
+  },
+})
+```
+
+`dsh-client-modules` 从**已装载的 Loader 条目**里扫描 `dsh.client`，bundle 服务在
+`/plugins/<entry.id>/client.js`（`PLUGIN_ROUTE = "/plugins"`，`kind: "prefix"`）。
+
+⚠️ **声明写错会让 fiber 响亮失败**：该扫描在服务构造时同步执行，"a malformed declaration
+or missing bundle … aggregates into one loud throw (FAILED fiber)"。所以这不是装饰性配置。
+
+### 15.2 页面内容（本轮范围）
+
+| 区块 | 数据来源 |
+|---|---|
+| **可用状态** | 每个工作节点一张卡：verdict 徽标、`sessionSegment`、连接态与重连/审批/心跳失败计数、检查计数 |
+| **检查明细** | 默认只列**非 pass** 项（失败是运维打开此页的原因），可展开全部 |
+| **诊断** | 每节点：重新自检（`maxAgeMs: 0`，强制新鲜）、截图、连接测试 |
+| **任务** | `registry.list()`，活动态用橙色点标记，等待审批单独标注 |
+| **急停** | 打断所有在途任务；每任务独立捕获失败，一个失败不会中断其余 |
+
+**host 侧**：`GET` 返回快照；`POST` 执行 `selfcheck` / `screenshot` / `interrupt` / `ping`。
+每个失败都返回 `{ ok: false, error }` 而非抛出 —— 抛出去只会让页面拿到一个没有内容的 500。
+
+### 15.3 本机角色：**只显示，不提供开关**
+
+「本机在主/从之间切换（对称配对）」是**选定方向**，但它是与"管理已知工作节点"不同的风险等级：
+让本机可被远程驱动需要自己的安全论证。因此本页**只陈述当前角色**，不放一个点了没用的控件 ——
+一个死的开关比没有开关更糟。
+
+### 15.4 ⚠️ 未验证的部分（必须说清）
+
+**本轮只验证到"DSh 之外"的边界**，因为 `dsh-client-modules` 的包元数据**永久缓存**：
+
+```js
+resolveMeta(loaderName, baseUrl) {
+  const cached = this.pkgMeta.get(sourceKey);
+  if (cached !== void 0) return cached;     // 命中即返回
+```
+
+`pkgMeta` 在全文件中**从不被清除**。本插件的 `package.json` 在 DSH 启动时被扫描过，当时还没有
+`dsh.client`，于是 `null` 被永久缓存 ⇒ **必须重启 DSH 才能发现客户端半边**。
+
+已验证（204/204 测试，`test/settings-page.test.js` 15 条）：
+
+| 已验证 | 方式 |
+|---|---|
+| `package.json` 声明符合 `parseDshClient` 要求 | 读真实 manifest 断言 |
+| 客户端工厂可加载、`inject`/`apply` 形状正确 | 用桩 `window.__ModuleLoader__` 跑真实文件 |
+| 恰好注册一个 `settings.section`，id/order/locale 正确 | 断言注册调用 |
+| 中英词典均被注册 | 断言 `locale.register` |
+| **组件能渲染出树**（含工作节点行、任务行、畸形数据不崩） | 最小 React 桩 + 组件展开 |
+| 路由 GET/POST 各动作、错误路径、`no-store` | 假 req/res |
+
+**未验证**：DSH 真的把该 bundle 服务在 `/plugins/dsh-plugin-remote-use/client.js`，以及设置页真的出现。
+这一步**必须重启 DSH**，且因 `/plugins` 前缀需浏览器认证（令牌只由 `dsh web` 打印，不落盘），
+只能由人在界面上确认。
+
+### 15.5 测试桩踩到的两个坑（同类错误第三次出现）
+
+| 坑 | 症状 | 原因 |
+|---|---|---|
+| `loadClient()` 不调 `apply()` | 4 条渲染测试全挂 | 注册发生在 `apply` 里，不调就得到空注册表 |
+| `createElement` 不调用函数组件 | "工作节点行渲染"失败，而内联任务表通过 | `h(WorkerCard)` 只是建元素；组件从未执行 |
+
+第二个尤其值得记：**它表现为"某个用例失败、相邻用例通过"**，很容易被误读成"数据问题"而不是"测试桩缺了一步"。

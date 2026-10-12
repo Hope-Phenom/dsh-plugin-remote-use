@@ -357,9 +357,46 @@ export function makeApprovalDecider(deps) {
   }
 }
 
+/** Largest POST body the Settings page may send. It only carries a small action object. */
+const SETTINGS_MAX_BODY = 16 * 1024
+
+/** Read and parse a JSON request body without letting a huge one exhaust memory. */
+function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error(`request body exceeds ${limit} bytes`))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('error', reject)
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8').trim()
+      if (text === '') return resolve({})
+      try {
+        resolve(JSON.parse(text))
+      } catch (error) {
+        reject(new Error(`body is not valid JSON: ${error instanceof Error ? error.message : String(error)}`))
+      }
+    })
+  })
+}
+
 /**
- * The Settings page's data route. Read-only in this first cut: it reports worker
- * reachability, the readiness report, and the in-flight task list.
+ * The Settings page's data route.
+ *
+ * GET  reports worker reachability, the readiness report, and the in-flight task list.
+ * POST performs the page's actions (`selfcheck`, `screenshot`, `interrupt`, `ping`).
+ *
+ * Every failure is returned as `{ ok: false, error }` with a 4xx/5xx status rather than
+ * thrown: the browser half renders the message, and an unhandled rejection here would show
+ * the page a bare 500 with nothing to display.
+ *
  * @param {{ peers: Map<string, any>, registry: TaskRegistry, cache: ToolCallCache }} deps
  */
 export function makeSettingsRoute(deps) {
@@ -372,31 +409,118 @@ export function makeSettingsRoute(deps) {
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(body))
       }
-      if (req.method !== 'GET' && req.method !== 'POST') return send(405, { ok: false, error: 'method-not-allowed' })
-      const workers = []
-      for (const peer of peers.values()) {
-        let report = null
-        let error = ''
-        try { report = await peer.selfcheck() } catch (e) { error = e instanceof Error ? e.message : String(e) }
-        workers.push({
-          peerId: peer.peerId,
-          name: peer.name,
-          cwd: peer.defaultCwd,
-          report,
-          error,
-          activeTasks: registry.activeCountForPeer(peer.peerId),
-          // Surface the LINK state separately from the readiness report. Without it a
-          // "not connected" failure looks like a worker fault, which is how the missing
-          // connect() stayed invisible until a real profile load.
-          connection: peer.connection?.stats,
-        })
+
+      /** Collect one row per configured worker, including its link state and readiness. */
+      const snapshot = async () => {
+        const workers = []
+        for (const peer of peers.values()) {
+          let report = null
+          let error = ''
+          try {
+            report = await peer.selfcheck()
+          } catch (e) {
+            error = e instanceof Error ? e.message : String(e)
+          }
+          workers.push({
+            peerId: peer.peerId,
+            name: peer.name,
+            cwd: peer.defaultCwd,
+            report,
+            error,
+            activeTasks: registry.activeCountForPeer(peer.peerId),
+            // Surface the LINK state separately from the readiness report. Without it a
+            // "not connected" failure looks like a worker fault, which is how the missing
+            // connect() stayed invisible until a real profile load.
+            connection: peer.connection?.stats,
+          })
+        }
+        return {
+          ok: true,
+          workers,
+          tasks: registry.list().slice(0, 50),
+          toolCallCache: { size: cache.size, misses: cache.misses },
+        }
       }
-      return send(200, {
-        ok: true,
-        workers,
-        tasks: registry.list().slice(0, 50),
-        toolCallCache: { size: cache.size, misses: cache.misses },
-      })
+
+      if (req.method === 'GET') return send(200, await snapshot())
+      if (req.method !== 'POST') return send(405, { ok: false, error: 'method-not-allowed' })
+
+      let body
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        return send(400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+      const action = String(body?.action ?? '')
+
+      /** Resolve one peer by id, or reply with a 404 the page can show. */
+      const peerOr = (peerId) => {
+        const peer = peers.get(String(peerId ?? ''))
+        if (peer === undefined) {
+          send(404, { ok: false, error: `no such worker "${peerId}"` })
+          return undefined
+        }
+        return peer
+      }
+
+      try {
+        switch (action) {
+          case 'selfcheck': {
+            // `maxAgeMs: 0` forces a fresh probe. The page's whole point is to answer
+            // "can it run right now", and a cached report cannot answer that.
+            const peer = peerOr(body?.peerId)
+            if (peer === undefined) return
+            const report = await peer.selfcheck({ maxAgeMs: 0 })
+            return send(200, { ok: true, peerId: peer.peerId, report })
+          }
+
+          case 'screenshot': {
+            const peer = peerOr(body?.peerId)
+            if (peer === undefined) return
+            // The capture path is independent of the ACP link, so it still works when the
+            // worker's agent is busy -- which is exactly when a screenshot is most wanted.
+            const shot = await peer.screenshot({ fresh: true })
+            return send(200, { ok: true, peerId: peer.peerId, screenshot: shot })
+          }
+
+          case 'ping': {
+            const peer = peerOr(body?.peerId)
+            if (peer === undefined) return
+            await peer.ensure()
+            return send(200, { ok: true, peerId: peer.peerId, connected: peer.connected })
+          }
+
+          case 'interrupt': {
+            // Emergency stop. `peerId` narrows it to one worker; omitting it stops every
+            // in-flight task, which is the button a page needs when something has gone
+            // wrong and the user does not want to reason about which worker is which.
+            const only = body?.peerId === undefined ? undefined : String(body.peerId)
+            const active = registry.active()
+            const cancelled = []
+            const failures = []
+            for (const task of active) {
+              if (only !== undefined && task.peerId !== only) continue
+              const peer = peers.get(task.peerId)
+              if (peer === undefined) {
+                failures.push({ taskId: task.taskId, error: `worker "${task.peerId}" is not connected` })
+                continue
+              }
+              try {
+                await peer.bridge.cancel()
+                cancelled.push(task.taskId)
+              } catch (error) {
+                failures.push({ taskId: task.taskId, error: error instanceof Error ? error.message : String(error) })
+              }
+            }
+            return send(200, { ok: true, cancelled, failures, considered: active.length })
+          }
+
+          default:
+            return send(400, { ok: false, error: `unknown action "${action}"` })
+        }
+      } catch (error) {
+        return send(502, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
     },
   }
 }
