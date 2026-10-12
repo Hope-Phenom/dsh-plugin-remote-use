@@ -35,6 +35,18 @@ export function defaultShotDir() {
 }
 
 /**
+ * Liveness probe interval.
+ *
+ * WHY A HEARTBEAT: `AcpBridge` does not watch its socket, and the relay closes it on
+ * restart, so `connected` keeps reporting true over a dead link. Without a probe the first
+ * call after any worker restart fails -- measured, and the failure surfaced as the
+ * misleading "nobody is logged in" before that was fixed. A cheap periodic ping turns a
+ * silent death into a prompt reconnect.
+ */
+const DEFAULT_HEARTBEAT_MS = 15_000
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5_000
+
+/**
  * Turn a WebSocket URL into its HTTP counterpart on the same relay:
  * `ws://h:p` -> `http://h:p`, `wss://h:p` -> `https://h:p`.
  * @param {string} wsUrl
@@ -62,6 +74,8 @@ export class PeerConnection {
    * @param {string} [opts.token]      bearer for those endpoints
    * @param {string} [opts.shotDir]    where downloaded screenshots are written
    * @param {typeof fetch} [opts.fetchImpl]
+   * @param {number} [opts.heartbeatMs] liveness probe interval; 0 disables it
+   * @param {number} [opts.heartbeatTimeoutMs]
    */
   constructor(opts) {
     this.peerId = opts.peerId
@@ -72,6 +86,10 @@ export class PeerConnection {
     this.token = opts.token ?? ''
     this.shotDir = opts.shotDir ?? defaultShotDir()
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
+    this.heartbeatMs = Number.isFinite(opts.heartbeatMs) ? Math.max(0, Number(opts.heartbeatMs)) : DEFAULT_HEARTBEAT_MS
+    this.heartbeatTimeoutMs = Number.isFinite(opts.heartbeatTimeoutMs)
+      ? Math.max(1, Number(opts.heartbeatTimeoutMs))
+      : DEFAULT_HEARTBEAT_TIMEOUT_MS
 
     /** @type {object | undefined} */
     this.bridge = undefined
@@ -82,6 +100,13 @@ export class PeerConnection {
     this.lastError = ''
     this.lastConnectedAt = 0
     this.disposed = false
+
+    /** @type {ReturnType<typeof setInterval> | undefined} */
+    this.heartbeatTimer = undefined
+    this.heartbeatBeating = false
+    this.heartbeats = 0
+    this.heartbeatFailures = 0
+    this.lastHeartbeatAt = 0
   }
 
   /** True when a bridge exists and reports an established session. */
@@ -98,6 +123,10 @@ export class PeerConnection {
       connectFailures: this.connectFailures,
       lastError: this.lastError,
       lastConnectedAt: this.lastConnectedAt,
+      heartbeatMs: this.heartbeatMs,
+      heartbeats: this.heartbeats,
+      heartbeatFailures: this.heartbeatFailures,
+      lastHeartbeatAt: this.lastHeartbeatAt,
       ...(this.bridge?.stats !== undefined && this.bridge.stats !== null ? { bridge: this.bridge.stats } : {}),
     }
   }
@@ -125,6 +154,7 @@ export class PeerConnection {
         this.lastConnectedAt = this.now()
         this.lastError = ''
         this.log('info', `connected to worker "${this.peerId}"`)
+        this.#startHeartbeat()
       })().catch((error) => {
         this.connectFailures += 1
         this.lastError = error instanceof Error ? error.message : String(error)
@@ -261,6 +291,7 @@ export class PeerConnection {
   async dispose() {
     if (this.disposed) return
     this.disposed = true
+    this.#stopHeartbeat()
     const bridge = this.bridge
     this.bridge = undefined
     if (bridge === undefined) return
@@ -269,6 +300,61 @@ export class PeerConnection {
     } catch (error) {
       this.log('warn', `dispose of "${this.peerId}" failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // liveness
+  // -------------------------------------------------------------------------
+
+  /**
+   * Probe the link periodically so a socket that died silently is noticed BETWEEN calls
+   * rather than by a user-facing failure.
+   *
+   * The relay answers `dsh-remote/ping` from its own event loop, so this costs the worker's
+   * agent nothing and gives a definitive alive/dead answer.
+   */
+  #startHeartbeat() {
+    this.#stopHeartbeat()
+    if (this.heartbeatMs <= 0 || this.disposed) return
+    this.heartbeatTimer = setInterval(() => { void this.#beat() }, this.heartbeatMs)
+    // Never hold the process open just for a liveness probe.
+    if (typeof this.heartbeatTimer?.unref === 'function') this.heartbeatTimer.unref()
+  }
+
+  #stopHeartbeat() {
+    if (this.heartbeatTimer !== undefined) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = undefined
+    }
+  }
+
+  async #beat() {
+    if (this.disposed || !this.connected || this.heartbeatBeating) return
+    if (typeof this.bridge?.callPlugin !== 'function') return
+    this.heartbeatBeating = true
+    try {
+      await this.bridge.callPlugin('dsh-remote/ping', {}, { timeoutMs: this.heartbeatTimeoutMs })
+      this.heartbeats += 1
+      this.lastHeartbeatAt = this.now()
+    } catch (error) {
+      this.heartbeatFailures += 1
+      const message = error instanceof Error ? error.message : String(error)
+      this.log('warn', `worker "${this.peerId}" heartbeat failed (${message}); treating the link as dead`)
+      // A failed liveness probe IS evidence the link is gone, so this deliberately does not
+      // go through the message-matching in #invalidateIfTransportError.
+      await this.#discardLink()
+    } finally {
+      this.heartbeatBeating = false
+    }
+  }
+
+  /** Throw away the current bridge so the next `ensure()` builds a fresh one. */
+  async #discardLink() {
+    this.#stopHeartbeat()
+    const dead = this.bridge
+    this.bridge = undefined
+    if (dead === undefined) return
+    try { await dead.dispose() } catch { /* the socket is already gone */ }
   }
 
   /**
@@ -285,8 +371,6 @@ export class PeerConnection {
     if (!transportish) return
 
     this.log('warn', `worker "${this.peerId}" link is no longer usable (${message}); discarding it so the next call reconnects`)
-    const dead = this.bridge
-    this.bridge = undefined
-    try { await dead?.dispose() } catch { /* the socket is already gone */ }
+    await this.#discardLink()
   }
 }

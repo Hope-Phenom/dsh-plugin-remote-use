@@ -34,6 +34,13 @@ function fakeBridge(opts = {}) {
       return { stopReason: 'completed', output: 'ok', toolCalls: [] }
     },
     async cancel() { calls.cancel += 1; if (opts.cancelError !== undefined) throw new Error(opts.cancelError) },
+    /** Liveness probe target. `bridge.pingFails` lets a test kill the link mid-flight. */
+    async callPlugin(method, params, o) {
+      calls.callPlugin = (calls.callPlugin ?? 0) + 1
+      if (bridge.pingFails === true) throw new Error('ACP connection closed')
+      if (o?.timeoutMs !== undefined) calls.lastPingTimeoutMs = o.timeoutMs
+      return { pong: true, method }
+    },
     async selfcheck(o) {
       calls.selfcheck += 1
       if (opts.selfcheckError !== undefined) throw new Error(opts.selfcheckError)
@@ -371,4 +378,96 @@ test('screenshot does not require an established ACP session', async () => {
   assert.ok(existsSync(shot.localPath))
   assert.equal(fetchImpl.calls.length, 1)
   rmSync(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// liveness heartbeat
+//
+// REGRESSION CONTEXT: AcpBridge does not watch its socket, and the relay closes it on
+// restart, so `connected` kept reporting true over a dead link. The first call after any
+// worker restart therefore failed -- measured on the real worker, where it surfaced as the
+// misleading "nobody is logged in" message. The heartbeat turns that silent death into a
+// prompt reconnect.
+// ---------------------------------------------------------------------------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function makeHeartbeatConnection(bridgeOpts = {}, connOpts = {}) {
+  const { conn, created, logs } = makeConnection(bridgeOpts)
+  conn.heartbeatMs = connOpts.heartbeatMs ?? 20
+  conn.heartbeatTimeoutMs = connOpts.heartbeatTimeoutMs ?? 200
+  return { conn, created, logs }
+}
+
+test('the heartbeat probes the relay while a link is alive', async () => {
+  const { conn, created } = makeHeartbeatConnection()
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  await sleep(80)
+  assert.ok((created[0].calls.callPlugin ?? 0) >= 1, 'the link must be probed')
+  assert.ok(conn.heartbeats >= 1, 'successful probes must be counted')
+  assert.ok(conn.lastHeartbeatAt > 0)
+  assert.equal(conn.heartbeatFailures, 0)
+  await conn.dispose()
+})
+
+test('a failed heartbeat discards the link so the next call reconnects', async () => {
+  const { conn, created, logs } = makeHeartbeatConnection()
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  assert.equal(conn.connected, true)
+
+  // The worker goes away: probes start failing.
+  created[0].pingFails = true
+  await sleep(90)
+
+  assert.equal(conn.connected, false, 'the dead link must not keep reporting connected')
+  assert.ok(conn.heartbeatFailures >= 1)
+  assert.equal(created[0].calls.dispose, 1, 'the dead bridge must be disposed')
+  assert.ok(logs.some(([, m]) => /heartbeat failed/.test(m)), 'the drop must be logged')
+
+  // The next call must build a fresh bridge and succeed WITHOUT a user-visible failure --
+  // that is the whole point of probing between calls.
+  const result = await conn.startTask({ cwd: 'c', prompt: 'b' })
+  assert.equal(result.stopReason, 'completed')
+  assert.equal(created.length, 2, 'a fresh bridge must have been created')
+  await conn.dispose()
+})
+
+test('the heartbeat stops on dispose and does not leak a timer', async () => {
+  const { conn, created } = makeHeartbeatConnection()
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  await sleep(50)
+  const before = created[0].calls.callPlugin ?? 0
+  await conn.dispose()
+  await sleep(80)
+  assert.equal(created[0].calls.callPlugin ?? 0, before, 'no probe may run after dispose')
+  assert.equal(conn.heartbeatTimer, undefined)
+})
+
+test('heartbeatMs 0 disables probing entirely', async () => {
+  const { conn, created } = makeHeartbeatConnection({}, { heartbeatMs: 0 })
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  await sleep(60)
+  assert.equal(created[0].calls.callPlugin ?? 0, 0)
+  assert.equal(conn.heartbeats, 0)
+  await conn.dispose()
+})
+
+test('the heartbeat does not run while disconnected', async () => {
+  const { conn, created } = makeHeartbeatConnection()
+  // Never connected: nothing to probe.
+  await sleep(60)
+  assert.equal(created.length, 0, 'no bridge should be built just to probe')
+  await conn.dispose()
+})
+
+test('the heartbeat reports its interval and counters', async () => {
+  const { conn } = makeHeartbeatConnection({}, { heartbeatMs: 25 })
+  assert.equal(conn.stats.heartbeatMs, 25)
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  await sleep(60)
+  const s = conn.stats
+  assert.ok(s.heartbeats >= 1)
+  assert.equal(s.heartbeatFailures, 0)
+  assert.ok(s.lastHeartbeatAt > 0)
+  await conn.dispose()
 })

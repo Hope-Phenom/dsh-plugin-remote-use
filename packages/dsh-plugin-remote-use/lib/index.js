@@ -95,6 +95,8 @@ export const Config = Schema !== null
     /** Prefix a remote tool's name; one row per worker uses `<toolPrefix>` + worker id. */
     toolPrefix: Schema.string().default('subagent_remote'),
     injectTaskSummary: Schema.boolean().default(true),
+    /** Liveness probe interval per worker, in ms. 0 disables it. */
+    heartbeatMs: Schema.number().default(15000),
   })
   : {
     // Rendered as "unsupported" in the Settings page; `normalizeConfig` applies the very
@@ -105,6 +107,7 @@ export const Config = Schema !== null
     requiredTier: 'workspace-write',
     toolPrefix: 'subagent_remote',
     injectTaskSummary: true,
+    heartbeatMs: 15_000,
     _defaults: WORKER_DEFAULTS,
   }
 
@@ -158,6 +161,9 @@ export function apply(ctx, config) {
       // message pump. Derived from the same URL so there is one thing to configure.
       httpBase: httpBaseOf(worker.url),
       token: worker.token,
+      // Probe the link periodically so a relay restart is noticed between calls instead of
+      // failing the next one. 0 disables probing.
+      heartbeatMs: cfg.heartbeatMs,
       createBridge: () => new AcpBridge({
         url: worker.url,
         token: worker.token,
@@ -297,6 +303,7 @@ export function normalizeConfig(config) {
     requiredTier: String(config?.requiredTier ?? 'workspace-write'),
     toolPrefix: String(config?.toolPrefix ?? 'subagent_remote'),
     injectTaskSummary: config?.injectTaskSummary !== false,
+    heartbeatMs: Number.isFinite(config?.heartbeatMs) ? Math.max(0, Number(config.heartbeatMs)) : 15_000,
   }
 }
 
