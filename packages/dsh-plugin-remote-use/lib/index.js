@@ -20,7 +20,8 @@
  * @module dsh-plugin-remote-use
  */
 
-import z from '@deepseek-ai/schemastery'
+// NOTE: `@deepseek-ai/schemastery` is deliberately NOT a static import here -- see the
+// defensive resolution below for why a missing schema must not abort the module.
 import { AcpBridge } from './bridge/acp-bridge.js'
 import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
@@ -36,30 +37,75 @@ export const name = 'dsh-plugin-remote-use'
 export const inject = ['subagents', 'tools', 'systemPrompt']
 
 /**
+ * Resolve `@deepseek-ai/schemastery` defensively.
+ *
+ * WHY THIS IS NOT A STATIC IMPORT: the host is expected to intercept `@deepseek-ai/*`
+ * for third-party plugins (that is why `dsh-cost-meter` can list `@deepseek-ai/dsh-credentials`
+ * as a peer dependency). But this plugin is linked into the profile, and Node resolves
+ * modules through the package's REAL path — `profiles/node_modules/@deepseek-ai/schemastery`
+ * is not necessarily on that path, and on this machine it is one of the 482 dangling
+ * junctions left by an old npm install. A failed static import would abort the whole
+ * module, so the plugin would not load at all.
+ *
+ * Falling back to a plain object costs only the Settings-page form: dsh-app-boot marks a
+ * non-Schemastery `Config` as `unsupported`, and configuration still arrives from the
+ * patch layer, which is where worker entries are written anyway.
+ */
+const SCHEMA_UNAVAILABLE = 'SCHEMA_UNAVAILABLE'
+let Schema = null
+try {
+  Schema = (await import('@deepseek-ai/schemastery')).default ?? null
+} catch (error) {
+  console.warn(`[remote-use] @deepseek-ai/schemastery not importable (${error instanceof Error ? error.message : String(error)}); `
+    + 'falling back to a plain Config object. Workers must be configured through the profile patch layer, '
+    + 'and the Settings page will not render a form for this plugin.')
+}
+
+/** The default worker shape, shared by the schema and the fallback. */
+const WORKER_DEFAULTS = {
+  name: '',
+  token: '',
+  enabled: true,
+  serialQueue: 1,
+}
+
+/**
  * Plugin configuration.
  *
  * A worker entry needs the relay's address and shared secret. `cwd` is the worker-side
  * absolute path a task runs in — it must exist on the worker and is also what the
  * sandbox scopes writes to.
  */
-export const Config = z.object({
-  workers: z.array(z.object({
-    id: z.string().required(),
-    name: z.string().default(''),
-    url: z.string().required(),
-    token: z.string().default(''),
-    cwd: z.string().required(),
-    enabled: z.boolean().default(true),
-    /** Per-worker serial concurrency. GUI is an exclusive resource: 1. */
-    serialQueue: z.number().default(1),
-  })).default([]),
-  approvalTimeoutMs: z.number().default(90_000),
-  /** Tier a task needs unless the delegation narrows it. */
-  requiredTier: z.string().default('workspace-write'),
-  /** Prefix a remote tool's name; one row per worker uses `<toolPrefix>` + worker id. */
-  toolPrefix: z.string().default('subagent_remote'),
-  injectTaskSummary: z.boolean().default(true),
-})
+export const Config = Schema !== null
+  ? Schema.object({
+    workers: Schema.array(Schema.object({
+      id: Schema.string().required(),
+      name: Schema.string().default(''),
+      url: Schema.string().required(),
+      token: Schema.string().default(''),
+      cwd: Schema.string().required(),
+      enabled: Schema.boolean().default(true),
+      /** Per-worker serial concurrency. GUI is an exclusive resource: 1. */
+      serialQueue: Schema.number().default(1),
+    })).default([]),
+    approvalTimeoutMs: Schema.number().default(90_000),
+    /** Tier a task needs unless the delegation narrows it. */
+    requiredTier: Schema.string().default('workspace-write'),
+    /** Prefix a remote tool's name; one row per worker uses `<toolPrefix>` + worker id. */
+    toolPrefix: Schema.string().default('subagent_remote'),
+    injectTaskSummary: Schema.boolean().default(true),
+  })
+  : {
+    // Rendered as "unsupported" in the Settings page; `normalizeConfig` applies the very
+    // same defaults, so behaviour is identical for a patch-configured install.
+    [SCHEMA_UNAVAILABLE]: true,
+    workers: [],
+    approvalTimeoutMs: 90_000,
+    requiredTier: 'workspace-write',
+    toolPrefix: 'subagent_remote',
+    injectTaskSummary: true,
+    _defaults: WORKER_DEFAULTS,
+  }
 
 /**
  * Plugin body.
