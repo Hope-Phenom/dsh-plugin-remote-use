@@ -23,6 +23,7 @@
 // NOTE: `@deepseek-ai/schemastery` is deliberately NOT a static import here -- see the
 // defensive resolution below for why a missing schema must not abort the module.
 import { AcpBridge } from './bridge/acp-bridge.js'
+import { PeerConnection } from './bridge/peer-connection.js'
 import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
@@ -145,30 +146,42 @@ export function apply(ctx, config) {
   for (const worker of cfg.workers) {
     if (!worker.enabled) continue
     const peerId = worker.id
-    const bridge = new AcpBridge({
-      url: worker.url,
-      token: worker.token,
-      approvalTimeoutMs: cfg.approvalTimeoutMs,
-      // Explicit mapping rather than passing the event payload straight through: the
-      // cache's contract keys off `title` (which IS the tool name in DSH), and a shape
-      // mismatch here would silently cache `toolName: undefined`, which in turn makes
-      // `allowedTools` never match and leaves the audit trail without a tool name.
-      onUpdate: (evt) => {
-        if (evt.tool === undefined) return
-        const entry = { title: evt.tool.toolName, rawInput: evt.tool.rawInput, status: evt.tool.status }
-        if (evt.kind === 'tool_call') cache.note(evt.tool.toolCallId, entry)
-        else if (evt.kind === 'tool_call_update') cache.update(evt.tool.toolCallId, entry)
-      },
-      // Constructor-level fallback. `RemoteProvider` passes a per-task decider to
-      // `startTask`, and that one wins when present; this keeps the bridge honest if
-      // some other caller uses it without one (fail closed either way).
-      onApproval: makeApprovalDecider({ cfg, worker, memories, log }),
+
+    // The connection is LAZY: nothing connects until something needs the worker. An
+    // eager connect at load time would fail whenever the worker is off or still booting,
+    // and there is no useful moment to retry from. PeerConnection owns the bridge's
+    // lifecycle so a dead link is rebuilt rather than reused.
+    const connection = new PeerConnection({
+      peerId,
+      log: (level, message) => log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](message),
+      createBridge: () => new AcpBridge({
+        url: worker.url,
+        token: worker.token,
+        approvalTimeoutMs: cfg.approvalTimeoutMs,
+        // Explicit mapping rather than passing the event payload straight through: the
+        // cache's contract keys off `title` (which IS the tool name in DSH), and a shape
+        // mismatch here would silently cache `toolName: undefined`, which in turn makes
+        // `allowedTools` never match and leaves the audit trail without a tool name.
+        onUpdate: (evt) => {
+          if (evt.tool === undefined) return
+          const entry = { title: evt.tool.toolName, rawInput: evt.tool.rawInput, status: evt.tool.status }
+          if (evt.kind === 'tool_call') cache.note(evt.tool.toolCallId, entry)
+          else if (evt.kind === 'tool_call_update') cache.update(evt.tool.toolCallId, entry)
+        },
+        // Constructor-level fallback. `RemoteProvider` passes a per-task decider to
+        // `startTask`, and that one wins when present; this keeps the bridge honest if
+        // some other caller uses it without one (fail closed either way).
+        onApproval: makeApprovalDecider({ cfg, worker, memories, log }),
+      }),
     })
 
     const workerRuntime = {
       peerId,
       name: worker.name === '' ? peerId : worker.name,
-      bridge,
+      // The provider and the tools only use startTask/cancel/selfcheck/dispose/connected,
+      // all of which PeerConnection implements, so they cannot tell it is not a bridge.
+      bridge: connection,
+      connection,
       defaultCwd: worker.cwd,
       /**
        * Ask the worker for a fresh readiness report. Falls back to a synthesised
@@ -176,7 +189,7 @@ export function apply(ctx, config) {
        */
       async selfcheck() {
         try {
-          return await bridge.selfcheck()
+          return await connection.selfcheck()
         } catch (error) {
           return {
             verdict: 'blocked',
@@ -206,7 +219,7 @@ export function apply(ctx, config) {
       })
       const disposeProvider = ctx.subagents.registerProvider(provider)
       log.info(`registered subagent provider "${provider.name}" -> ${worker.url}`)
-      ctx.effect(() => () => { void bridge.dispose() }, 'remote-use: bridge teardown')
+      ctx.effect(() => () => { void connection.dispose() }, 'remote-use: connection teardown')
       return () => {
         disposeProvider()
         for (const m of memories.values()) m.dispose()
@@ -356,6 +369,10 @@ export function makeSettingsRoute(deps) {
           report,
           error,
           activeTasks: registry.activeCountForPeer(peer.peerId),
+          // Surface the LINK state separately from the readiness report. Without it a
+          // "not connected" failure looks like a worker fault, which is how the missing
+          // connect() stayed invisible until a real profile load.
+          connection: peer.connection?.stats,
         })
       }
       return send(200, {
