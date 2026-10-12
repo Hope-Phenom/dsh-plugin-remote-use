@@ -27,21 +27,32 @@ $payload = @(
   'C:\dsh-remote\p0work\plugin-proof.txt',
   'C:\dsh-remote\p0work\remote-proof.txt',
   'C:\dsh-remote\p0work\image-probe.png',
+  'C:\dsh-remote\p0work\selfcheck-screen.png',
   'C:\Users\worker\p0-approval-test.txt',
-  'C:\Users\worker\plugin-escape-attempt.txt'
+  'C:\Users\worker\plugin-escape-attempt.txt',
+  'C:\Users\worker\approval-probe.txt'
 )
-# Transients from bringing the relay up and from the earlier standalone capture.
+# Transients from bringing the relay up, from the standalone capture, and from the pwsh
+# diagnostics.
 $transient = @(
   'C:\dsh-remote\shot.png',
   'C:\dsh-remote\screenshot-report.txt',
   'C:\dsh-remote\diag-out.txt',
   'C:\dsh-remote\diag-err.txt',
   'C:\dsh-remote\diag-relay.txt',
+  'C:\dsh-remote\diag-pwsh.txt',
+  'C:\dsh-remote\diag-pwsh-out.txt',
+  'C:\dsh-remote\diag-pwsh-err.txt',
+  'C:\dsh-remote\pwsh-probe-loop.txt',
+  'C:\dsh-remote\pwsh-probe-out.txt',
+  'C:\dsh-remote\pwsh-probe-err.txt',
   'C:\dsh-remote\bootstrap.txt',
   'C:\dsh-remote\bootstrap-shot.txt',
+  'C:\dsh-remote\bootstrap-pwsh.txt',
   'C:\dsh-remote\ctl.txt',
   'C:\dsh-remote\run-ctl.ps1',
   'C:\dsh-remote\run-shot.ps1',
+  'C:\dsh-remote\run-pwsh-probe.ps1',
   'C:\dsh-remote\cleanup-p0.txt',
   'C:\dsh-remote\stop.txt',
   'C:\dsh-remote\start.txt',
@@ -63,7 +74,7 @@ if (Test-Path $shots) {
   W "cleared $n captured frame(s) from $shots"
 }
 
-foreach ($t in 'DshCtl', 'DshShot', 'DshCleanup', 'DshStopRelay', 'DshStartRelay') {
+foreach ($t in 'DshCtl', 'DshShot', 'DshPwshProbe', 'DshCleanup', 'DshStopRelay', 'DshStartRelay') {
   schtasks /delete /tn $t /f 2>&1 | Out-Null
 }
 

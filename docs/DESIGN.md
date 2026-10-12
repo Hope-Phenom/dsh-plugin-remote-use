@@ -1648,3 +1648,111 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | 5 | 审批请求只带 `toolCallId` → 必须自建 `rawInput` 缓存 | §10.0.1 |
 | 6 | 档位检查：申请宽于所需则拒绝；`danger-full-access` 必须人工确认 | §8.3 |
 | 7 | 无审批应答 → 从机 turn 永久挂起 → 主机必须实现超时 | §8.4 |
+
+---
+
+## 14. 部署后发现的三个上游缺陷与由此产生的安全态势
+
+前三节都是本插件自身的问题；这一节是**在真实从机上部署后，发现 DSH 本身的三处缺陷**，以及它们如何改变了本设计的实际安全边界。
+
+### 14.1 🔴 `dsh-acp-app` 的模型 id 写错，导致图片能力被静默关闭
+
+```yaml
+# dsh-acp-app/cordis.patch.yml —— dsh --profile acp 用的就是它
+- id: acp
+  name: '@deepseek-ai/dsh-acp'
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash      # ← 目录里没有这个 id
+
+# dsh-llm-deepseek 的模型目录
+{ id: "deepseek-flash", name: "DeepSeek-V41-Flash", inputModalities: ["text", "image"] }
+
+# dsh-base 的同一项是正确的
+      config:
+        model: deepseek-flash
+```
+
+**一个错字同时关掉三件事**（都实测确认）：
+
+| 后果 | 证据 |
+|---|---|
+| `initialize` 报 `promptCapabilities.image: false` | `supportsAcpImagePrompts()` 解析同一 id 失败 → **主机无法向从机发图** |
+| 从机 `read_image` 全部失败 | `read_image` 报 `model "deepseek-v4-flash" does not declare image input` |
+| 上下文窗口 / 推理档位元数据缺失 | `resolveModelInfo` 拿不到 |
+
+**修法**：从机 `profiles/acp/cordis.patch.yml` 覆盖 `acp` 行的 model 为 `deepseek-flash`。修好后从机立刻能读图——实测它能准确描述一张探针图（"red/green/blue 三条竖带 + 绿带中央黑圆"）。
+
+**为什么对本项目关键**：从机的**视觉验证能力**是 GUI 测试的核心。这个 bug 让它完全不可用。
+
+⚠️ **一个方法论教训**：我最初据此得出"直接走 ACP 图片路径不可行"的结论并写进了文档。**那是错的**——真实原因是 id 不匹配。教训是：**当错误信息给出一个具体的技术理由时，要去验证那条理由的**前提**，而不是接受它**。
+
+### 14.2 🔴 Windows 沙箱让从机完全没有可用 shell
+
+```
+dsh-sandbox-local:  PLATFORM_CHAINS.win32 = ["windows-acl"]     ← 只有一个候选
+                    STATIC_ENFORCEMENT["windows-acl"] = "partial"
+```
+
+注释明说：**"the product never probes"**（单一候选的链不做探测，直接选用）。而那个 runner：
+
+> creates the **WRITE_RESTRICTED** token ... spawns the wrapped argv under it
+
+**在这台机器上，任何经该路径创建的进程都在初始化阶段死掉**：
+
+```
+whoami            → (no output)  exit 3221225794 = 0xC0000142 STATUS_DLL_INIT_FAILED
+echo shell-works  → (no output)  同上
+```
+
+**排除清单**（逐项实测，不是推断）：
+
+| 猜测 | 结论 | 依据 |
+|---|---|---|
+| 执行策略未放开 | ❌ | `LocalMachine=RemoteSigned`；且 `0xC0000142` 是进程初始化失败，**根本没走到检查策略**。若真是策略问题会看到"未数字签名"报错 |
+| 杀软（火绒 HIPS）拦截 | ❌ | **边跑边截图 19 帧**，全程无弹窗 |
+| pwsh 安装损坏 | ❌ | 在交互会话里连续 12 次全部成功（277–358ms） |
+| 工作目录错误 | ❌ | 修好 `process.cwd()`（原为 `C:\Windows\System32`）后仍失败 |
+| **Windows 沙箱** | ✅ | `DSH_PERMISSION_MODE=danger-full-access` 绕过沙箱后立刻正常 |
+
+**采用的处理**：从机运行在 `danger-full-access`。
+
+### 14.3 🔴 由此产生的真实安全态势（必须如实记录）
+
+沙箱关闭后，**审批链路整条失效**——因为触发点是"沙箱拒绝 → 提权 → 审批请求"：
+
+```
+实测：写入 C:\Users\worker\approval-probe.txt（工作区外）→ 成功
+      无审批提示、无沙箱拒绝标记
+```
+
+即使把 `approval.policy` 钉成 `ask` 也一样（已实测），因为**没有沙箱拒绝就没有 escalation**。
+
+⇒ **在 `danger-full-access` 下，本设计的安全模型退化为：**
+
+| 层次 | 是否有效 | 说明 |
+|---|---|---|
+| **派单门禁**（S1–S18 自检） | ✅ 有效 | 从机不就绪则不派单 |
+| **档位检查**（§8.3） | ❌ **不触发** | `decideApproval` 依附于审批请求，而请求从不发生 |
+| **审批桥 + `rawInput` 缓存** | ❌ **不触发** | 同上 |
+| **prompt 本身** | ✅ 唯一实际边界 | 主机让它做什么，它就能做什么 |
+
+⚠️ **这推翻了 §7.5 里"真正的边界仍然是从机沙箱"这一条设计前提。** 在该从机上，沙箱不存在。
+
+**这个取舍为何在此可接受**：该从机是**专用 GUI 测试机、位于内网、由同一人控制**。但这是**环境特定的理由，不是一般性的安全论证**。
+
+**恢复该边界的两条路**：
+1. **修好沙箱**：在从机上手动运行那个 runner，捕获它的 `windows-acl-run: <detail>` stderr，判断是令牌创建失败还是子进程初始化失败
+2. **主机侧强化**：既然从机不设防，主机应在派单前做更强的任务级声明与事后审计（但**无法阻止**从机 agent 的行动——它只能观测）
+
+### 14.4 部署期暴露的插件自身缺陷（已修）
+
+| 缺陷 | 后果 | 状态 |
+|---|---|---|
+| 工具 `parameters` 用作者简写直接注册 | **4 个工具全部不可用**（`type: null`）——`ctx.tools.register` 不转换 `parameters` | 已修 + 变异测试 |
+| 从未调用 `bridge.connect()` | **自检与派单整条路径不通** | 已修 + 15 条测试 |
+| 兜底报告写 `sessionSegment: 'unavailable'` | **从机不可达被误报为"没人登录"** | 已修 + 回归测试 |
+| 中继启动器未设工作目录 | ACP 的 `process.cwd()` 是 System32，而沙箱 `workspaceRoot: process.cwd()` | 已修 |
+| relay 重启后首次调用必失败 | bridge 无心跳，死 socket 要等一次失败才发现 | **已知未修**（第二次调用自愈） |
+
+**共性教训**：前两条都是**测试覆盖的接缝**漏掉的——单测用预先连好的假 bridge、冒烟测试只挂载不连从机、真机测试自己建桥。补上 `plugin-live.mjs`（已安装位置 + 真实 `apply()` + 真实从机）后，这两个 bug 都跑不掉。
