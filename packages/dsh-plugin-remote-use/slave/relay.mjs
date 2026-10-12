@@ -355,6 +355,12 @@ const server = createServer((req, res) => {
       ok: true,
       agent: LAUNCH.command,
       auth: TOKEN !== '',
+      // The agent inherits THIS working directory, and dsh-base's sandbox-policy uses
+      // `process.cwd()` as its workspaceRoot. A launcher that leaves the cwd at
+      // C:\Windows\System32 therefore hands the sandbox System32 as the workspace, which
+      // breaks child process creation (pwsh dies with 0xC0000142 / STATUS_DLL_INIT_FAILED).
+      // Surfacing it here makes that misconfiguration visible instead of mysterious.
+      cwd: process.cwd(),
       pluginRpc: [`${PLUGIN_PREFIX}ping`, `${PLUGIN_PREFIX}selfcheck`, `${PLUGIN_PREFIX}screenshot`],
       http: ['/healthz', '/screenshot'],
     }))

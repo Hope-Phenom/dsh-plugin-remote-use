@@ -107,6 +107,15 @@ try {
   if (`$h -ne [IntPtr]::Zero) { [RelayConsole]::ShowWindow(`$h, 0) | Out-Null }
 } catch { }
 
+# Set the working directory BEFORE launching node.
+#
+# This is load-bearing, not tidiness: the ACP agent inherits it, and dsh-base's
+# sandbox-policy sets `workspaceRoot: process.cwd()`. A scheduled task that does not set a
+# working directory starts in C:\Windows\System32, so the sandbox would treat System32 as
+# the workspace and the agent's pwsh tool would die with 0xC0000142
+# (STATUS_DLL_INIT_FAILED) on every command.
+Set-Location "$d"
+
 & node "$d\relay.mjs" --port $Port --token '$Token' --cmd-file "$d\agent-spec.json" --selfcheck-script "$d\selfcheck.ps1" --screenshot-script "$d\screenshot.ps1" --verbose *> "$d\relay.log"
 "@
     Set-Content -Path $runner -Value $runBody -Encoding UTF8

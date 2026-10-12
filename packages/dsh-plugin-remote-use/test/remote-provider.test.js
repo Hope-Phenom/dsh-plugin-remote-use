@@ -138,6 +138,32 @@ test('gate distinguishes "no interactive session" from "worker broken"', async (
   })
 })
 
+test('REGRESSION: an unreachable worker is NOT reported as "nobody is logged in"', async () => {
+  // The unreachable fallback once set sessionSegment: 'unavailable', so the gate claimed
+  // the worker had no interactive session whenever the relay was merely down. That is a
+  // wrong diagnosis -- it sends the operator to check the login state instead of the link.
+  const unreachable = {
+    verdict: 'blocked',
+    sessionSegment: 'unknown',
+    blockingFailures: 1,
+    warnings: 0,
+    unchecked: 0,
+    checks: [{
+      id: 'S0', name: 'worker reachable', severity: 'blocking', status: 'fail',
+      expected: 'relay responds', actual: 'connect ECONNREFUSED', fix: 'check the relay',
+    }],
+  }
+  const { provider } = makeProvider({ report: unreachable })
+  await assert.rejects(() => provider.start(REQ), (err) => {
+    assert.equal(err.code, GATE_REFUSED)
+    assert.equal(err.details.reason, 'selfcheck-failed', 'must be a reachability failure, not a session one')
+    assert.match(err.message, /S0/)
+    assert.match(err.message, /ECONNREFUSED/)
+    assert.doesNotMatch(err.message, /logged in/, 'must not blame the login state')
+    return true
+  })
+})
+
 test('gate refuses when the worker is unreachable', async () => {
   const bridge = fakeBridge()
   bridge.selfcheck = async () => ({ verdict: 'blocked', sessionSegment: 'unavailable', blockingFailures: 1, warnings: 0, unchecked: 0, checks: [{ id: 'S0', name: 'reachable', severity: 'blocking', status: 'fail', expected: 'x', actual: 'y' }] })

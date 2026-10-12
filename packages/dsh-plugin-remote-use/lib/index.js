@@ -195,9 +195,14 @@ export function apply(ctx, config) {
         try {
           return await connection.selfcheck()
         } catch (error) {
+          // `sessionSegment` is about the WORKER'S SESSION, not about reachability. Saying
+          // 'unavailable' here made the dispatch gate report "nobody is logged in" whenever
+          // the relay was merely down -- a wrong diagnosis that sends the operator to check
+          // the login state instead of the link. 'unknown' is honest: the check never ran,
+          // so the blocking S0 failure below is what should decide the gate.
           return {
             verdict: 'blocked',
-            sessionSegment: 'unavailable',
+            sessionSegment: 'unknown',
             blockingFailures: 1,
             warnings: 0,
             unchecked: 0,
