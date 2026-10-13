@@ -18,7 +18,8 @@
  */
 import { strict as assert } from 'node:assert'
 import { spawnSync } from 'node:child_process'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -70,11 +71,28 @@ test('the worker self-check derives its install and credential paths from the en
   // Named explicitly rather than left to the scan above, so the intent survives a refactor of the
   // regex. These are the two checks that produced false blocking failures.
   const script = readFileSync(join(SLAVE, 'selfcheck.ps1'), 'utf8')
-  assert.match(script, /Join-Path \$env:LOCALAPPDATA/u, 'S14 must derive the install directory')
-  assert.match(script, /Join-Path \$env:USERPROFILE/u, 'S15 must derive the credentials path')
+  assert.match(script, /Join-Path \$env:LOCALAPPDATA/u, 'S14 must use the current account install')
+  assert.match(script, /Join-Path \$env:USERPROFILE/u, 'S15 must use the current account profile')
   // And the report must say WHERE it looked, so "signed out" is distinguishable from "looked in
   // the wrong place" -- the distinction that made the original failure hard to read.
-  assert.match(script, /missing in:/u, 'S15 must list the paths it tried')
+  assert.match(script, /candidate locations|locations, including/u, 'S14/S15 must report how many places were tried')
+})
+
+test('the self-check works under a SYSTEM scheduled task, not only interactively', () => {
+  // THE REGRESSION THIS GUARDS. Deriving the paths from `$env:LOCALAPPDATA` is correct for an
+  // interactive run and WRONG for this script's other mode: a boot check under a SYSTEM scheduled
+  // task, where `$env:LOCALAPPDATA` points at C:\Windows\system32\config\systemprofile. The first
+  // fix did exactly that -- replacing a check that was right on one machine with one that was
+  // wrong on all of them in that mode.
+  //
+  // Verified by running the script with those variables pointed at the systemprofile and watching
+  // S14/S15 stay green. Here the mechanism is asserted, so a future simplification fails loudly.
+  const script = readFileSync(join(SLAVE, 'selfcheck.ps1'), 'utf8')
+  assert.match(script, /Get-Process -Name 'DeepSeek Harness'/u,
+    'S14 must take the location from a RUNNING DSH, whatever account the script runs as')
+  assert.match(script, /Get-ChildItem \$root -Directory/u,
+    'S14/S15 must also scan every user profile, which is what a SYSTEM run cannot see about itself')
+  assert.match(script, /SystemDrive/u, 'the profile scan must be rooted on the system drive, not a literal')
 })
 
 test('the target-app check is configurable and says which state it is in', () => {
@@ -129,6 +147,42 @@ test('files enumerates the slave scripts instead of whitelisting the whole direc
   assert.equal(files.includes('slave'), false,
     'a bare "slave" entry whitelists everything under it, and npm cannot then exclude the generated reports')
   assert.ok(files.some((f) => f.startsWith('slave/')), 'the slave scripts must still ship')
+})
+
+test('the PACKED tarball can actually run the worker relay', () => {
+  // THE STRONGEST FORM OF THE PACKAGING CHECK, and what the two earlier attempts were
+  // substituting for: pack it, extract it, and RUN the relay out of the extraction.
+  //
+  // Listing what `files` ought to contain is an approximation -- and it was wrong twice. The relay
+  // imports `ws` from `slave/node_modules`, and `files` now enumerates `slave/*.mjs`,
+  // `slave/*.ps1` and `slave/node_modules` separately: drop the third and a published plugin
+  // installs cleanly and then cannot start its own listener. Only running it from the packed copy
+  // catches that.
+  const dir = mkdtempSync(join(tmpdir(), 'remote-use-pack-'))
+  try {
+    const packed = spawnSync('npm', ['pack', '--json', '--pack-destination', dir], {
+      cwd: PKG_ROOT, encoding: 'utf8', timeout: 120_000, shell: true,
+    })
+    assert.equal(packed.status, 0, `npm pack failed: ${String(packed.stderr).slice(0, 300)}`)
+    const filename = JSON.parse(String(packed.stdout))?.[0]?.filename
+    assert.equal(typeof filename, 'string', 'the packer did not report a filename')
+
+    const extract = spawnSync('tar', ['-xzf', join(dir, filename), '-C', dir], { encoding: 'utf8', timeout: 60_000 })
+    assert.equal(extract.status, 0, `extracting the tarball failed: ${String(extract.stderr).slice(0, 200)}`)
+
+    const relay = join(dir, 'package', 'slave', 'relay.mjs')
+    assert.equal(existsSync(relay), true, 'the relay is missing from the packed tarball')
+
+    // `--print-pairing` exits immediately, and that is enough: it exercises the relay's module
+    // graph (including `ws`), its argument parsing and its pairing encoder.
+    const run = spawnSync(process.execPath, [relay, '--port', '7395', '--token', 'packed-probe-token', '--print-pairing'], {
+      encoding: 'utf8', timeout: 30_000,
+    })
+    assert.equal(run.status, 0, `the packed relay failed to run: ${String(run.stderr).slice(0, 300)}`)
+    assert.match(String(run.stdout), /^dshpair1\./u, 'the packed relay could not produce a pairing string')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('param() is the first statement in the scripts that take parameters', () => {

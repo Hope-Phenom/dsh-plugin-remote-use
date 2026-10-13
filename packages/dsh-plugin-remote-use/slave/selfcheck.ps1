@@ -161,37 +161,63 @@ Add-Check 'S11' 'no auto-lock policy' 'warning' $(if ($null -eq $il) { 'pass' } 
 $qe = (Get-ItemProperty 'HKCU:\Console' -Name QuickEdit -ErrorAction SilentlyContinue).QuickEdit
 Add-Check 'S12' 'console QuickEdit off' 'blocking' $(if ("$qe" -eq '0') { 'pass' } else { 'fail' }) '0' "$qe" 'HKCU Console QuickEdit=0 and InsertMode=0'
 # S14 DSH installed
-# The path is DERIVED, not hardcoded. It used to be 'C:\Users\worker\...', which is the reference
-# worker's user: on any other machine this check reported "not installed" while DSH was running --
-# a false negative that, together with S15, drove the verdict to `blocked` on a machine that had
-# just completed a task. A readiness report that fails on a working machine teaches the operator
-# to ignore it.
-$dshCandidates = @(
-  (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'),
-  (Join-Path $env:ProgramFiles 'DeepSeek Harness'),
-  (Join-Path ${env:ProgramFiles(x86)} 'DeepSeek Harness'),
-  'C:\Program Files\DeepSeek Harness'
-) | Where-Object { $_ -and $_ -ne '' }
+#
+# The path is DERIVED, not hardcoded -- but "derive it from $env:LOCALAPPDATA" is NOT enough, and
+# getting that wrong once already is why this comment is long.
+#
+# The history: it used to be the literal 'C:\Users\worker\...', correct on exactly one machine. The
+# first fix derived it from the environment, which is correct for an interactive run and WRONG for
+# the other mode this script has -- a boot check under a SYSTEM scheduled task, where
+# $env:LOCALAPPDATA points at C:\Windows\system32\config\systemprofile and no candidate matches.
+# So the naive derivation replaced a check that was right on one machine with one that is wrong on
+# all of them in that mode.
+#
+# The candidates are therefore gathered from every source that can name the install:
+#   1. a RUNNING DSH process -- whatever account we are, it says where DSH actually is
+#   2. the current account's install location
+#   3. Program Files
+#   4. every user profile on the machine -- what a SYSTEM run cannot see about itself
+$dshCandidates = New-Object System.Collections.ArrayList
+$runningDsh = Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($runningDsh -and $runningDsh.Path) { [void]$dshCandidates.Add((Split-Path -Parent $runningDsh.Path)) }
+[void]$dshCandidates.Add((Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'))
+[void]$dshCandidates.Add((Join-Path $env:ProgramFiles 'DeepSeek Harness'))
+if (${env:ProgramFiles(x86)}) { [void]$dshCandidates.Add((Join-Path ${env:ProgramFiles(x86)} 'DeepSeek Harness')) }
+[void]$dshCandidates.Add('C:\Program Files\DeepSeek Harness')
+$profileRoots = @()
+if ($env:SystemDrive) { $profileRoots += (Join-Path $env:SystemDrive 'Users') }
+foreach ($root in $profileRoots) {
+  Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    [void]$dshCandidates.Add((Join-Path $_.FullName 'AppData\Local\Programs\DeepSeek Harness'))
+  }
+}
+$dshCandidates = @($dshCandidates | Where-Object { $_ -and $_ -ne '' } | Select-Object -Unique)
 $ver = ''
 foreach ($candidate in $dshCandidates) {
   if (-not (Test-Path $candidate)) { continue }
   $exe = Get-ChildItem $candidate -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($exe) { $ver = $exe.VersionInfo.FileVersion; break }
 }
-Add-Check 'S14' 'DSH installed' 'blocking' $(if ($ver) { 'pass' } else { 'fail' }) 'installed' $ver 'install DSH and match the master version'
+Add-Check 'S14' 'DSH installed' 'blocking' $(if ($ver) { 'pass' } else { 'fail' }) 'installed' $(if ($ver) { $ver } else { 'nowhere in ' + $dshCandidates.Count + ' candidate locations' }) 'install DSH and match the master version'
 # S15 credentials
-# Same correction, and the same reason. The report names WHICH path it looked at, so a genuine
-# "signed out" is distinguishable from "looked in the wrong place".
-$credCandidates = @(
-  (Join-Path $env:USERPROFILE '.dsh\.credentials.yaml'),
-  (Join-Path $env:APPDATA 'dsh\.credentials.yaml')
-) | Where-Object { $_ -and $_ -ne '' }
+# Same reasoning and the same sources: a SYSTEM run must still be able to find the account whose
+# DSH is signed in. The report names WHICH path it looked at, and lists them all when it finds
+# none, so a genuine "signed out" is distinguishable from "looked in the wrong place".
+$credCandidates = New-Object System.Collections.ArrayList
+[void]$credCandidates.Add((Join-Path $env:USERPROFILE '.dsh\.credentials.yaml'))
+[void]$credCandidates.Add((Join-Path $env:APPDATA 'dsh\.credentials.yaml'))
+foreach ($root in $profileRoots) {
+  Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    [void]$credCandidates.Add((Join-Path $_.FullName '.dsh\.credentials.yaml'))
+  }
+}
+$credCandidates = @($credCandidates | Where-Object { $_ -and $_ -ne '' } | Select-Object -Unique)
 $credFound = ''
 foreach ($candidate in $credCandidates) {
   if (Test-Path $candidate) { $credFound = $candidate; break }
 }
 $hasCred = $credFound -ne ''
-Add-Check 'S15' 'model credentials present' 'blocking' $(if ($hasCred) { 'pass' } else { 'fail' }) 'exists' $(if ($hasCred) { $credFound } else { 'missing in: ' + ($credCandidates -join '; ') }) 'sign in to DSH on the worker'
+Add-Check 'S15' 'model credentials present' 'blocking' $(if ($hasCred) { 'pass' } else { 'fail' }) 'exists' $(if ($hasCred) { $credFound } else { 'missing in ' + $credCandidates.Count + ' locations, including ' + $credCandidates[0] }) 'sign in to DSH on the worker'
 # S16 disk space
 $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
 $freeGB = if ($d) { [math]::Round($d.FreeSpace / 1GB, 1) } else { 0 }
