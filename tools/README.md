@@ -166,3 +166,54 @@ C:\Users\you\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\...
       关键文件 + junction 均校验通过                                   ✅
 最关键：linktarget\index.js 内容完好，且通过 junction 仍可读            ✅
 ```
+
+---
+
+# 沙箱就绪检查
+
+`check-sandbox-ready.mjs` —— 回答"**这台机器现在能不能用 Windows 沙箱约束住命令**"。
+它是 §16 那条"沙箱不可用就拒绝启用"的**门禁**：门禁需要一个能跑的检查，而不是一段被相信的文字。
+
+```powershell
+# 默认检查 C:\dsh-sandbox-mediator 与当前 desktop profile
+node tools\check-sandbox-ready.mjs
+
+# 指定 mediator 或 profile
+node tools\check-sandbox-ready.mjs --mediator C:\dsh-sandbox-mediator --profile <cordis.patch.yml>
+```
+
+退出码：`0` 就绪 · `1` 未就绪 · `2` 检查本身跑不了（mediator 未物化）。
+
+## 它检查两件事，缺一不可
+
+| 检查 | 为什么 |
+|---|---|
+| **mediator 真的在限制** | 工作区内可写（对照）、工作区外被拒**且无残留**、read-only 连工作区也不可写、read-only 仍可读 |
+| **profile 真的指向这个 shim** | 否则 DSH 会回落到自己的 mediator。只查前者会得到"沙箱有救了"而实际**并未生效** |
+
+## 三个被写错又被修掉的探针（记录下来，免得有人加回来）
+
+| 写错的探针 | 为什么错 |
+|---|---|
+| `whoami` 失败 = 受限令牌生效 | Windows rung 造的是 `WRITE_RESTRICTED`，**只限制写**；读自己的进程身份照样成功。实测它返回用户名而限制**完全正常** —— 这个探针会把健康的沙箱报成坏的 |
+| `cmd /c echo x > "path"` 探路径 | 引号经 argv 传不过去，报"文件名语法不正确"。**更糟的是工作区外那条因此"通过"了**：它看到非零退出且无文件，就以为沙箱拒绝了 —— 一个因为错误原因而失败的探针，比没有探针更坏，因为它给出你想要的答案 |
+| 子进程 PowerShell 的 `GetConsoleWindow()` | 量的是**子进程**。PowerShell 是控制台子系统，会自己分配控制台，于是在计划任务里也答"present"，给出的结论与事实相反 |
+
+## 缺陷机制（一句话）
+
+Windows 沙箱的 mediator 由 `process.execPath` 构造，而那是 `DeepSeek Harness.exe`（GUI 子系统）。
+**控制台子系统进程会分配或继承控制台，GUI 子系统不会** —— 所以父进程没有控制台时，
+受限子进程拿不到标准句柄而死（从机 `0xC0000142`；主机 `GetStdHandle failed: null stdin handle`）。
+
+⇒ 用 `node.exe` 起 shim 就绕开了它。实测：同一 runner、同一参数、同样无控制台，
+`DeepSeek Harness.exe` 失败而 `node.exe` 成功。
+
+## 相关脚本（`.research/`）
+
+| 脚本 | 用途 |
+|---|---|
+| `extract-mediator.mjs` | 把 runner 依赖闭包物化出 app.asar（**DSH 升级后必须重跑**） |
+| `sandbox-mediator-shim.mjs` | 方言翻译器本体，部署为 `<mediator>\shim.mjs` |
+| `validate-shim.ps1` | 只验方言翻译（4/4），可参数化给主机/从机 |
+| `validate-sandbox-confinement.ps1` | 只验限制能力（5/5），可参数化 |
+| `deploy-ps1.ps1` | `.ps1` 部署门禁（ASCII + PS 5.1 语法）；`-ValidateOnly` 可离线跑 |
