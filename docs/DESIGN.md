@@ -2906,20 +2906,29 @@ slave/selfcheck.txt    slave/shots/old.png
 从机（`192.168.1.101`）自第 3 轮起离线，所以**从机侧的改动都已写好并通过测试，但尚未部署到那台机器**。
 本节是唯一的清单 —— 一份"改了但没生效"的列表比没有列表更危险。
 
-### 19.1 需要拷贝到 `C:\dsh-remote\plugin-slave\` 的文件
+### 19.1 部署到 `C:\dsh-remote\plugin-slave\`
 
-| 文件 | 为什么 |
+**不要再手工照这份清单拷文件 —— 用 `tools\deploy-slave.ps1 -Destination <dir>`。**
+它拷完会**真的运行**拷过去的中继来验证；下面 `node_modules\ws` 那行遗漏，就是它第一次演练时抓到的。
+
+| 文件/目录 | 为什么 |
 |---|---|
 | `relay.mjs` | 截图回收、配对串生成、广播地址打分、`--pairing-file`、`--keep-shots` |
 | `prune-shots.mjs` | **新增** —— relay 现在 `import` 它，缺了 relay 起不来 |
 | `pairing.mjs` | **新增** —— 同上 |
 | `net-address.mjs` | **新增** —— 同上 |
 | `selfcheck.ps1` | S14/S15/S18 的硬编码用户路径修复 |
+| `screenshot.ps1` | 截图脚本 |
 | `make-launch-spec.mjs` | 可选：删掉了一处同用户的候选路径（有回退，不拷也能工作） |
+| **`node_modules\ws`** | **relay 的裸包依赖。** 漏掉它，脚本全部就位、全部能解析，然后中继以 `Cannot find package 'ws'` 死掉 |
 
-⚠️ **三个 `.mjs` 是新的相对导入**：只拷 `relay.mjs` 会让从机的中继**起不来**（`ERR_MODULE_NOT_FOUND`），
-而症状是"从机连不上"，与真正的网络故障难以区分。拷贝后先跑一次
-`node relay.mjs --print-pairing`（需要 `--token`）确认它至少能加载。
+⚠️ **两类导入都会让中继起不来，而症状都是"从机连不上"**，与真正的网络故障难以区分：
+
+1. **相对导入** —— 三个新 `.mjs`。只拷 `relay.mjs` ⇒ `ERR_MODULE_NOT_FOUND: ./prune-shots.mjs`
+2. **裸包导入** —— `ws`。漏掉 `node_modules` ⇒ `ERR_MODULE_NOT_FOUND: Cannot find package 'ws'`
+
+**这就是"部署 = 拷文件"不够用的原因：文件清单看不出裸包依赖。** 所以部署脚本的最后一步是
+**真的运行拷过去的中继**（`--print-pairing` 立即退出，但会走完整个模块图）。
 
 ### 19.2 验证顺序
 
@@ -3043,3 +3052,59 @@ denied task: requests=1 output="The escalation was rejected, so the command did 
 
 用户一直在用的设置页正来自 `desktop`，所以"重启 DSH 生效"指的是它 —— 这一点此前是**假设**，现在是**查过的**。
 `web` profile 不装插件，与本功能无关（但它没有 mediator，若将来从它启动需另行配置）。
+
+#### 第 15 轮：部署变成一条**自己验证**的命令 —— 并立刻抓到 §19 的遗漏
+
+**写这个脚本的动机**：§19 的清单要靠人在从机上手抄，而它的危险点（三个新相对导入）恰恰是
+"抄漏了也看不出来"。所以把清单变成脚本，并且让脚本**运行拷过去的中继**来验收。
+
+`tools\deploy-slave.ps1 -Destination <dir>`：拷 → 逐个解析 → **运行** `--print-pairing` →
+校验 `.ps1` 的 ASCII 与 `param()` 位置。
+
+#### 它第一次演练就抓到了：**`node_modules\ws` 没被拷**
+
+```
+[FAIL] the copied relay starts and prints a pairing string
+       Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws'
+```
+
+**我 §19 的清单是错的** —— 列了七个文件，**一个目录都没列**。照着做会得到一个
+"所有文件都在、所有文件都能解析、然后中继起不来"的从机。
+
+而这正是同一形状**更深一层**：我警告了三个**相对导入**，漏掉了**裸包导入**。
+
+> **文件清单看不出裸包依赖。** 所以验收必须是**运行**，不能是清点。
+
+修正后：
+
+```
+[PASS] node_modules\ws is at the destination
+[PASS] the copied relay starts and prints a pairing string -- dshpair1.eyJ2Ijox...
+RESULT: OK -- the worker-side files are in place and the copied relay runs.
+```
+
+#### 守卫：让脚本的清单**从 relay 的真实导入派生**
+
+新增测试解析 `relay.mjs` 的 import：
+
+| 断言 | 为什么 |
+|---|---|
+| 裸导入恰好是 `['ws']`（排除 `node:`） | 依赖变了就必须同时改部署 |
+| 每个相对导入都出现在部署脚本里 | §19 警告的那一半 |
+| 脚本必须**运行**中继并断言配对串 | 只见"能解析"会放过模块图加载失败 |
+
+变异检验：把 `$depDirs` 清空 → 该测试失败 ✓
+
+#### 顺带核实：门禁注释引用的约束是**真的**
+
+`lib/index.js` 里写着"`tools.restrict()` 直接拒绝上下文全局调用"。此前没验证过。
+在解包产物里找到了原文（`@deepseek-ai/dsh-tools/lib/index.js:2897`）：
+
+```js
+throw new Error('tools.restrict() requires a scoped context (agent.ctx):
+                 a context-global restriction would mask every agent')
+```
+
+引文逐字相符，所以每会话门禁的形状是**API 强制**的，不是随意选择。
+
+（顺带记下：`...\app.asar\dsh\` **不是可 grep 的真实目录**，解包产物在 `.research/asar/`。）

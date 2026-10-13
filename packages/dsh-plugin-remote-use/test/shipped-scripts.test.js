@@ -185,6 +185,42 @@ test('the PACKED tarball can actually run the worker relay', () => {
   }
 })
 
+test('the deployment script copies everything the relay imports, and proves it runs', () => {
+  // THE DEPLOYMENT IS THE ONE THING THAT CANNOT BE TESTED FROM HERE -- the worker is another
+  // machine. So the check is on the script: it must derive its file list from what the relay
+  // ACTUALLY imports, rather than from a list someone maintained by hand.
+  //
+  // It was maintained by hand, and it was wrong: DESIGN section 19 listed every script and no
+  // `node_modules`, so a deployment would have produced a worker whose relay died with
+  // `Cannot find package 'ws'` -- after every file was present and every file parsed. The script's
+  // own rehearsal caught it only because its last step RUNS the copied relay.
+  const script = readFileSync(join(PKG_ROOT, '..', '..', 'tools', 'deploy-slave.ps1'), 'utf8')
+  const relay = readFileSync(join(SLAVE, 'relay.mjs'), 'utf8')
+
+  // Every BARE import (not `node:` and not relative) has to be provided by the deployment.
+  const bare = [...relay.matchAll(/^import .* from '([^'.][^']*)'/gmu)]
+    .map((m) => m[1])
+    .filter((spec) => !spec.startsWith('node:'))
+  assert.deepEqual(bare, ['ws'], `the relay's bare imports changed: ${bare.join(', ')}; update the deployment`)
+  for (const pkg of bare) {
+    assert.match(script, new RegExp(`node_modules`, 'u'), 'the deployment must carry node_modules')
+    assert.ok(script.includes(`'ws'`) || script.includes('ws\\package.json'),
+      `the deployment does not verify that ${pkg} is present`)
+  }
+
+  // Every RELATIVE import has to be copied too -- the other half of the same failure.
+  const relative = [...relay.matchAll(/^import .* from '\.\/([^']+)'/gmu)].map((m) => m[1])
+  assert.ok(relative.length >= 3, `expected the relay's new relative imports, got ${relative.join(', ')}`)
+  for (const dep of relative) {
+    assert.ok(script.includes(`'${dep}'`), `${dep} is imported by the relay but not copied by the deployment`)
+  }
+
+  // And it must not declare success without running the result. A parse check passes on a module
+  // graph that cannot load.
+  assert.match(script, /--print-pairing/u, 'the deployment must RUN the copied relay, not just parse it')
+  assert.match(script, /ERR_MODULE_NOT_FOUND|dshpair1/u, 'the run check must assert the relay produced a pairing string')
+})
+
 test('param() is the first statement in the scripts that take parameters', () => {
   // PowerShell rejects `param()` after any executable statement, and PS 5.1 reports it as a
   // confusing "invalid assignment operator" at the lines that FOLLOW. The deploy gate catches it
