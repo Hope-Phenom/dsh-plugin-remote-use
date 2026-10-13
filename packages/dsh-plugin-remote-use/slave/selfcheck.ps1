@@ -153,15 +153,37 @@ Add-Check 'S11' 'no auto-lock policy' 'warning' $(if ($null -eq $il) { 'pass' } 
 $qe = (Get-ItemProperty 'HKCU:\Console' -Name QuickEdit -ErrorAction SilentlyContinue).QuickEdit
 Add-Check 'S12' 'console QuickEdit off' 'blocking' $(if ("$qe" -eq '0') { 'pass' } else { 'fail' }) '0' "$qe" 'HKCU Console QuickEdit=0 and InsertMode=0'
 # S14 DSH installed
-$dsh = 'C:\Users\worker\AppData\Local\Programs\DeepSeek Harness'
+# The path is DERIVED, not hardcoded. It used to be 'C:\Users\worker\...', which is the reference
+# worker's user: on any other machine this check reported "not installed" while DSH was running --
+# a false negative that, together with S15, drove the verdict to `blocked` on a machine that had
+# just completed a task. A readiness report that fails on a working machine teaches the operator
+# to ignore it.
+$dshCandidates = @(
+  (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'),
+  (Join-Path $env:ProgramFiles 'DeepSeek Harness'),
+  (Join-Path ${env:ProgramFiles(x86)} 'DeepSeek Harness'),
+  'C:\Program Files\DeepSeek Harness'
+) | Where-Object { $_ -and $_ -ne '' }
 $ver = ''
-$exe = Get-ChildItem $dsh -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($exe) { $ver = $exe.VersionInfo.FileVersion }
+foreach ($candidate in $dshCandidates) {
+  if (-not (Test-Path $candidate)) { continue }
+  $exe = Get-ChildItem $candidate -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($exe) { $ver = $exe.VersionInfo.FileVersion; break }
+}
 Add-Check 'S14' 'DSH installed' 'blocking' $(if ($ver) { 'pass' } else { 'fail' }) 'installed' $ver 'install DSH and match the master version'
 # S15 credentials
-$cred = 'C:\Users\worker\.dsh\.credentials.yaml'
-$hasCred = Test-Path $cred
-Add-Check 'S15' 'model credentials present' 'blocking' $(if ($hasCred) { 'pass' } else { 'fail' }) 'exists' $(if ($hasCred) { 'exists' } else { 'missing' }) 'sign in to DSH on the worker'
+# Same correction, and the same reason. The report names WHICH path it looked at, so a genuine
+# "signed out" is distinguishable from "looked in the wrong place".
+$credCandidates = @(
+  (Join-Path $env:USERPROFILE '.dsh\.credentials.yaml'),
+  (Join-Path $env:APPDATA 'dsh\.credentials.yaml')
+) | Where-Object { $_ -and $_ -ne '' }
+$credFound = ''
+foreach ($candidate in $credCandidates) {
+  if (Test-Path $candidate) { $credFound = $candidate; break }
+}
+$hasCred = $credFound -ne ''
+Add-Check 'S15' 'model credentials present' 'blocking' $(if ($hasCred) { 'pass' } else { 'fail' }) 'exists' $(if ($hasCred) { $credFound } else { 'missing in: ' + ($credCandidates -join '; ') }) 'sign in to DSH on the worker'
 # S16 disk space
 $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
 $freeGB = if ($d) { [math]::Round($d.FreeSpace / 1GB, 1) } else { 0 }

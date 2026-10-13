@@ -77,3 +77,12 @@ desktop.ini
 # 截图证据（体积大且含桌面内容，按需单独保管）
 .research/*.png
 .research/slave-config/
+
+# The worker self-check writes its report next to the script. It is a GENERATED artifact that
+# names the machine it ran on, and `package.json` ships `slave/` -- so a stale report would travel
+# inside the plugin and a worker could serve another machine's readiness. Regenerated on every run.
+packages/dsh-plugin-remote-use/slave/selfcheck.json
+packages/dsh-plugin-remote-use/slave/selfcheck.txt
+packages/dsh-plugin-remote-use/slave/shots/
+packages/dsh-plugin-remote-use/slave/pairing.txt
+packages/dsh-plugin-remote-use/slave/screenshot-report.txt

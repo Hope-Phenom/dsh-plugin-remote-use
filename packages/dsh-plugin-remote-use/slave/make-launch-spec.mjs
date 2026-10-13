@@ -33,7 +33,6 @@ const PERMISSION_MODE = arg('permission-mode', '')
 // C:\Windows\system32\config\systemprofile, so environment-derived candidates miss.
 const CANDIDATES = [
   arg('install', ''),
-  'C:\\Users\\worker\\AppData\\Local\\Programs\\DeepSeek Harness',
   join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness'),
   'C:\\Program Files\\DeepSeek Harness',
 ].filter((p) => typeof p === 'string' && p !== '')

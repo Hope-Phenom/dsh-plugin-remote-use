@@ -2768,3 +2768,51 @@ RESULT: OK -- this machine works as its own worker.
 
 **探针里我自己的一个 bug，恰好证明了修正 1 生效**：我传了一个硬编码凭据去连，得到 401 ——
 因为 `arm()` 现在生成的是新凭据。**监听器正确地拒绝了错误的凭据。**
+
+#### 第 10 轮：从机自检里的硬编码用户路径（两处假阴性）
+
+第 9 轮注意到 `verdict=blocked` 却有任务跑完，这一轮追到底了。
+
+`slave/selfcheck.ps1` 里：
+
+```powershell
+$dsh  = 'C:\Users\worker\AppData\Local\Programs\DeepSeek Harness'   # S14 DSH installed
+$cred = 'C:\Users\worker\.dsh\.credentials.yaml'                    # S15 model credentials
+```
+
+**`sheng` 是参考从机的用户。** 在任何别的机器上这两项**无论真假都会失败**。实测在本机：
+
+| 检查 | 修复前 | 真相 |
+|---|---|---|
+| S14 DSH installed | `fail`（空） | `0.2.0-rc.2`，DSH 正跑着 |
+| S15 model credentials | `fail`（missing） | `C:\Users\you\.dsh\.credentials.yaml` 存在，任务刚跑完 |
+
+**两个假阴性把 `blockingFailures` 从 2 抬到 4，verdict 变成 `blocked`。**
+
+**危害不是"报告不好看"**：一个在能工作的机器上报 `blocked` 的就绪报告，会**教操作者忽略它**；
+而如果将来有门禁依赖 `verdict === 'ready'`，一台正常的机器会被拒。
+
+**修法**：从环境变量派生，并列出全部候选。S14 遍历 `LOCALAPPDATA` / `Program Files`(x86) 候选；
+S15 遍历 `USERPROFILE\.dsh\.credentials.yaml` 与 `APPDATA\dsh\...`，且在 `actual` 里**写出它找了哪些路径** ——
+这样"真的没登录"和"找错地方了"能区分开。
+
+**修复后实测**：
+
+```
+S14 DSH installed: pass  actual=0.2.0-rc.2
+S15 model credentials present: pass  actual=C:\Users\you\.dsh\.credentials.yaml
+blockingFailures: 4 -> 2
+```
+
+**剩下的两项是真实的**，`blocked` 现在诚实：
+
+| 检查 | 实际 | 后果 |
+|---|---|---|
+| S9 sleep/hibernate | `standby=3600/600` | 从机会睡，掉线 |
+| S12 console QuickEdit | `1` | 控制台选区会**阻塞** —— 真实的 GUI 自动化隐患 |
+
+顺带清掉了 `make-launch-spec.mjs` 里同一用户的残留候选（有回退所以能工作，但**正是这类残留
+造成了这个 bug**），并把 `slave/` 下的生成物（自检报告、截图、配对文件）写进 `.gitignore`：
+`package.json` 的 `files` 包含 `slave/`，**一份陈旧的、指名别的机器的就绪报告会随插件一起发布**。
+
+**这一轮的教训**：硬编码的**用户路径**不会报错，它只会让检查**安静地给出错误答案**。

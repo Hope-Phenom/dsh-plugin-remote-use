@@ -100,6 +100,20 @@ line(`  selfcheck: ${JSON.stringify(report).slice(0, 200)}`)
 check('a worker self-check ran through the listener (the ACP agent answered)',
   report !== null && report.verdict !== undefined, String(report?.error ?? report?.verdict ?? ''))
 
+// What the verdict actually rests on. The reference worker reports `ready`; this machine reported
+// `blocked` with four failures WHILE A TASK STILL COMPLETED. A readiness report that does not
+// predict the thing it is named after is worth looking at, not averaging away, so the failing
+// checks are printed in full.
+if (Array.isArray(report?.checks)) {
+  const blocking = report.checks.filter((c) => c?.blocking === true)
+  line(`  checks: ${report.checks.length} total, ${blocking.length} blocking; verdict=${report.verdict}`)
+  for (const c of report.checks) {
+    const failed = c?.blocking === true || c?.status === 'fail' || c?.ok === false
+    if (!failed) continue
+    line(`    ${c?.blocking === true ? 'BLOCKING' : 'warn    '} ${String(c?.id ?? c?.name ?? '?')} | expected=${String(c?.expected ?? '').slice(0, 40)} actual=${String(c?.actual ?? c?.detail ?? '').slice(0, 70)}`)
+  }
+}
+
 // And a real prompt, which is the thing the feature exists for.
 let result = null
 try {
