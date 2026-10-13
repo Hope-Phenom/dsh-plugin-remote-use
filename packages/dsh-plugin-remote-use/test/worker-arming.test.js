@@ -161,6 +161,34 @@ test('a restart whose listener cannot rebind does NOT claim to be armed', () => 
   assert.match(arming.status().lastError, /could not restore the listener/)
 })
 
+test('A RESTORE RE-RUNS THE SANDBOX GATE, and refuses when it no longer passes', () => {
+  // The sandbox is the mediator wired into the acp profile, and the mediator is materialized out
+  // of the DSH bundle -- so a DSH upgrade invalidates it, and so does deleting the directory.
+  // Skipping the gate here would let a machine armed last week go on accepting remote execution
+  // after its confinement broke, which is exactly what decision 4 exists to prevent.
+  const stored = { armed: true, bindAddress: '192.168.1.100', port: 7331, token: 'kept-token', armedAt: 1 }
+  let probes = 0
+  const { arming, calls } = makeArming({
+    stored,
+    probe: () => { probes += 1; return { ok: false, reason: 'the mediator drives the previous runner' } },
+  })
+  assert.equal(probes, 1, 'the gate must actually run')
+  assert.equal(arming.status().armed, false, 'it must NOT come back armed')
+  assert.equal(calls.start.length, 0, 'and nothing may be listening')
+  assert.match(arming.status().lastError, /sandbox no longer contains/)
+  // The credential is KEPT: the refusal is about confinement, not about revoking the pairing.
+  // Throwing it away would make the operator re-pair after fixing the mediator.
+  assert.equal(arming.status().tokenSet, true)
+})
+
+test('a DISARMED stored state costs no probe at boot', () => {
+  // The gate is only paid for by a machine that believes it is accepting remote execution.
+  let probes = 0
+  const { arming } = makeArming({ stored: { armed: false, bindAddress: '', port: 7331, token: 't', armedAt: 0 }, probe: () => { probes += 1; return { ok: true, reason: '' } } })
+  assert.equal(probes, 0, 'a disarmed machine must not pay for a probe on every DSH start')
+  assert.equal(arming.status().armed, false)
+})
+
 test('disarm keeps the credential for a restart unless asked to forget it', () => {
   const { arming, calls } = makeArming()
   arming.arm({ bindAddress: '192.168.1.100' })

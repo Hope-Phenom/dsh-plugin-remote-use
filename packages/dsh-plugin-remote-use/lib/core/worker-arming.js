@@ -111,17 +111,35 @@ export class WorkerArming {
     if (typeof stored?.bindAddress === 'string') this.bindAddress = stored.bindAddress
     if (Number.isFinite(stored?.port)) this.port = Number(stored.port)
     if (stored?.armed === true && this.token !== '' && this.bindAddress !== '') {
-      this.armed = true
-      this.armedAt = Number.isFinite(stored.armedAt) ? Number(stored.armedAt) : this.now()
-      try {
-        this.start(this.bindAddress, this.port, this.token)
-        this.log.info(`worker role restored: listening on ${this.bindAddress}:${this.port}`)
-      } catch (error) {
-        // A failed rebind must NOT leave the object claiming to be armed: the operator would see
-        // "accepting remote execution" while nothing is listening.
+      // THE GATE IS RE-RUN ON RESTORE, not skipped because it passed once.
+      //
+      // The sandbox is not a property of this plugin -- it is the mediator wired into the acp
+      // profile, and the mediator is materialized OUT of the DSH bundle. A DSH upgrade therefore
+      // invalidates it (the shim would drive the previous version's runner), and so does deleting
+      // the directory. Without this check, a machine that was armed last week would silently go on
+      // accepting remote execution after its confinement broke -- which is the exact situation
+      // decision 4 exists to prevent.
+      //
+      // It costs a probe, and only when the stored state says armed: a disarmed machine (the
+      // default) pays nothing at boot.
+      this.lastProbe = this.probe()
+      if (this.lastProbe.ok !== true) {
         this.armed = false
-        this.lastError = `could not restore the listener: ${error instanceof Error ? error.message : String(error)}`
+        this.lastError = `refused to restore remote execution: the sandbox no longer contains this machine (${this.lastProbe.reason})`
         this.log.warn(this.lastError)
+      } else {
+        this.armed = true
+        this.armedAt = Number.isFinite(stored.armedAt) ? Number(stored.armedAt) : this.now()
+        try {
+          this.start(this.bindAddress, this.port, this.token)
+          this.log.info(`worker role restored: listening on ${this.bindAddress}:${this.port}`)
+        } catch (error) {
+          // A failed rebind must NOT leave the object claiming to be armed: the operator would
+          // see "accepting remote execution" while nothing is listening.
+          this.armed = false
+          this.lastError = `could not restore the listener: ${error instanceof Error ? error.message : String(error)}`
+          this.log.warn(this.lastError)
+        }
       }
     }
   }

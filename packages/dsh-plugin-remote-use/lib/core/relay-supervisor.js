@@ -44,6 +44,9 @@ export class RelaySupervisor {
     // The ACP spec file goes in the system temp directory: it carries an argv env, not a secret,
     // and it must not be written next to the operator's plugin install.
     this.tempDir = deps.tempDir ?? join(tmpdir(), 'dsh-plugin-remote-use')
+    // How many captures the worker keeps. Read at start time rather than captured once, so a
+    // change on the settings page applies to the next arming instead of the next DSH restart.
+    this.keepShots = deps.keepShots ?? (() => 20)
     this.specFile = ''
     const log = deps.log ?? {}
     this.log = { info: log.info ?? (() => {}), warn: log.warn ?? (() => {}), error: log.error ?? (() => {}) }
@@ -110,6 +113,10 @@ export class RelaySupervisor {
       // string from the RPC instead. Caught by running the supervised listener and looking at
       // the repository.
       '--pairing-file', '',
+      // A capture is a full-resolution PNG (~9.5 MB measured). Without this the worker kept
+      // every one of them, and the page's setting would only govern the HOST side -- the
+      // larger of the two accumulations would be the one the operator could not control.
+      '--keep-shots', String(this.keepShots()),
     ]
 
     const child = this.spawn(process.execPath, args, {

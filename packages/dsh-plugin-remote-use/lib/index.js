@@ -278,6 +278,8 @@ export function apply(ctx, config) {
   const acpProfile = join(resolveDshHome(), 'profiles', 'acp', 'cordis.patch.yml')
   const supervisor = new RelaySupervisor({
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
+    // Read at start time, so a change on the settings page governs the next arming.
+    keepShots: () => cfg.keepShots,
     launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp' }),
   })
   const arming = new WorkerArming({

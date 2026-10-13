@@ -79,6 +79,41 @@ test('start builds an argv that never carries the install path as a string', () 
   }
 })
 
+test('the worker keeps the same number of screenshots the page is set to', () => {
+  // Without this the page's setting governed only the HOST side, and the larger accumulation --
+  // a full-resolution PNG per capture, kept forever on the worker -- was the one the operator
+  // could not control.
+  const { supervisor, calls, dir } = makeSupervisor()
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    const args = calls[0].args
+    assert.equal(args.includes('--keep-shots'), true)
+    assert.equal(args[args.indexOf('--keep-shots') + 1], '20', 'the default when nothing is configured')
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the retention is read when the listener starts, not when the supervisor was built', () => {
+  // A change on the settings page has to apply to the NEXT arming. Capturing the value once would
+  // make the setting appear to work only after a DSH restart.
+  const { supervisor, calls, dir } = makeSupervisor()
+  let keep = 5
+  supervisor.keepShots = () => keep
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    assert.equal(calls[0].args[calls[0].args.indexOf('--keep-shots') + 1], '5')
+    supervisor.stop()
+    keep = 2
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    assert.equal(calls[1].args[calls[1].args.indexOf('--keep-shots') + 1], '2', 'the second arming must see the new value')
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the relay is told NOT to write a pairing file beside itself', () => {
   // Found by running the supervised listener for real and then looking at the repository: the
   // relay's default is `join(HERE, 'pairing.txt')`, and when the plugin spawns it HERE is the
