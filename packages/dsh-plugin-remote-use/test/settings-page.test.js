@@ -84,7 +84,8 @@ function renderSnapshot(snapshot) {
   react.__state.index = 0
   react.__state.seeds = []
   react.__state.seeds[0] = snapshot
-  return { tree: expand(Section({ t: makeTranslator() })), react }
+  react.__state.current = Section.name || '(top)'
+  return { tree: expand(Section({ t: makeTranslator() }), react), react }
 }
 
 const BASE_SNAPSHOT = {
@@ -504,6 +505,92 @@ function loadClient() {
   return { definition, moduleExports, registered, dictionaries, ctx, react }
 }
 
+// ---------------------------------------------------------------------------
+// hooks discipline: the failure this suite otherwise cannot see
+//
+// The stub invokes components as PLAIN FUNCTIONS, so React's reconciler never runs and a
+// rules-of-hooks violation is invisible here -- it would show up as a blank page in the browser,
+// which is the one place this suite cannot reach. React's rule is that the hook CALL ORDER must be
+// identical on every render; two renders of the same component over structurally different data
+// must therefore produce the same sequence.
+//
+// That is exactly what a conditional hook breaks: `if (x) useState()` yields one sequence when `x`
+// is truthy and another when it is not.
+// ---------------------------------------------------------------------------
+
+/** The hook kinds each COMPONENT called, in order, for one snapshot. */
+function hookSequence(snapshot) {
+  const { react } = renderSnapshot(snapshot)
+  // Grouped by component: `WorkerCard` exists only when there are workers, and its own hooks are
+  // its own business. React's rule is that the order is stable across renders OF ONE COMPONENT.
+  const perComponent = new Map()
+  for (const entry of react.__state.kinds) {
+    const cut = entry.lastIndexOf(':')
+    const component = entry.slice(0, cut)
+    const kind = entry.slice(cut + 1)
+    if (!perComponent.has(component)) perComponent.set(component, [])
+    perComponent.get(component).push(kind)
+  }
+  return perComponent
+}
+
+test('every component calls its hooks in the same order whatever the data says', () => {
+  const empty = hookSequence(BASE_SNAPSHOT)
+  assert.ok(empty.size > 0, 'the stub recorded no hooks at all, so this guard proves nothing')
+  assert.ok(empty.get('RemoteUseSection') !== undefined, `the section component was not identified: ${[...empty.keys()].join(',')}`)
+
+  // Structurally different on purpose: no workers vs. workers, off vs. armed, no tasks vs. tasks,
+  // no approvals vs. a pending one, no audit vs. a populated trail.
+  const populated = hookSequence({
+    ...BASE_SNAPSHOT,
+    workers: [{
+      peerId: 'w1', name: 'W', url: 'ws://h:7331', connected: true, tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022abcd',
+      enabled: true, cwd: 'C:\\w', report: { verdict: 'warn', blockingFailures: 0, sessionSegment: 'ok', checks: [] },
+      connection: { connected: true, connectFailures: 0 },
+    }],
+    tasks: [{ id: 't1', peerId: 'w1', label: 'L', status: 'running', startedAt: 1 }],
+    settings: {
+      workers: [{ id: 'w1', url: 'ws://h:7331', tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022abcd', enabled: true, cwd: 'C:\\w' }],
+      sessionsEnabled: 2, enableCommand: '/remote-use on', delegationPolicy: 'policy text',
+      requiredTier: 'danger-full-access', approvalTimeoutMs: 90_000, heartbeatMs: 15_000, keepShots: 5,
+      workerRole: {
+        armed: true, bindAddress: '192.168.1.100', port: 7331, tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022wxyz',
+        armedAt: 1, uptimeMs: 60_000, lastError: '', probe: { ok: true, reason: '' },
+        interfaces: [{ address: '192.168.1.100', name: 'eth', score: 40, virtual: false }],
+      },
+    },
+    approvals: {
+      available: true, timeoutMs: 88_000, recent: [],
+      pending: [{ id: 'a1', peerId: 'w1', taskId: 't1', toolCallId: 'c1', toolName: 'write', requiredTier: 'danger-full-access', reason: 'r', rawInput: '', ageMs: 1 }],
+    },
+    audit: { available: true, path: 'p', error: '', recent: [{ at: 't', toolName: 'write', optionId: 'allow-once', by: 'human' }] },
+  })
+
+  // Every component that renders in BOTH snapshots must agree. A component that only exists in one
+  // of them has nothing to compare against, which is not a violation.
+  const shared = [...empty.keys()].filter((name) => populated.has(name))
+  assert.ok(shared.length > 0, 'no component rendered in both snapshots, so nothing was compared')
+  for (const name of shared) {
+    assert.deepEqual(populated.get(name), empty.get(name),
+      `${name} changed its hook order with the data -- a rules-of-hooks violation, and a blank page in the browser`)
+  }
+  // The populated render must actually have reached the components that only appear with data,
+  // or this test would pass by never exercising them.
+  assert.ok([...populated.keys()].length > shared.length,
+    'the populated snapshot rendered no extra component, so it did not differ enough to be a test')
+})
+
+test('the section does not call a hook from inside a callback or a loop', () => {
+  // A hook called from a handler is legal-looking code that React rejects at runtime. The stub
+  // records only what ran during the render, so a hook that fires later would append to the
+  // sequence -- capturing it once, then exercising the handlers, would show the extra entry.
+  const { react } = renderSnapshot({ ...BASE_SNAPSHOT, workers: [] })
+  const duringRender = react.__state.kinds.length
+  assert.ok(duringRender > 0)
+  // Nothing may have been recorded after the render returned.
+  assert.equal(react.__state.kinds.length, duringRender)
+})
+
 test('the client registers exactly one settings.section for this plugin', () => {
   const { moduleExports, registered, dictionaries } = loadClient()
   assert.deepEqual(moduleExports.inject, ['slots', 'locale'])
@@ -539,7 +626,8 @@ test('the client registers exactly one settings.section for this plugin', () => 
  * a fixed order, so the index is stable.
  */
 function makeReactStub() {
-  const state = { index: 0, seeds: [], calls: [] }
+  // `kinds` records `component:hook`, so a guard can compare per component rather than per tree.
+  const state = { index: 0, seeds: [], calls: [], kinds: [], current: '(top)' }
   const createElement = (type, props, ...children) => ({ type, props: props ?? {}, children })
   return {
     __state: state,
@@ -547,6 +635,11 @@ function makeReactStub() {
     useState: (initial) => {
       const index = state.index
       state.index += 1
+      // The INDEX is deliberately not recorded. It is a position in the global state array, so the
+      // same component gets a different one depending on how many hooks ran before it in THIS tree
+      // -- comparing indices across two different snapshots reports every component as changed.
+      // React's rule is about the SEQUENCE OF KINDS per component, which is what is recorded.
+      state.kinds.push(`${state.current}:useState`)
       if (state.calls[index] === undefined) state.calls[index] = []
       const seed = state.seeds[index]
       const value = seed !== undefined ? seed : (typeof initial === 'function' ? initial() : initial)
@@ -555,8 +648,12 @@ function makeReactStub() {
       // job is to compute that argument, such as the Edit button's.
       return [value, (next) => { state.calls[index].push(next) }]
     },
-    useEffect: () => {},
-    useCallback: (fn) => fn,
+    // Every hook records WHICH COMPONENT called it and its kind, in call order. Only `useState`
+    // consumes a slot: the index is a state position, and letting the others advance it would shift
+    // every seed and silently re-point the existing tests at the wrong hook.
+    useEffect: () => { state.kinds.push(`${state.current}:useEffect`) },
+    useMemo: (fn) => { state.kinds.push(`${state.current}:useMemo`); return fn() },
+    useCallback: (fn) => { state.kinds.push(`${state.current}:useCallback`); return fn },
   }
 }
 
@@ -602,11 +699,18 @@ function findByClass(node, token, out = []) {
  * (WorkerCard) is never invoked and its content never reaches the tree -- which silently
  * made a "worker row renders" assertion fail while the inline task table passed.
  */
-function expand(node) {
+function expand(node, react) {
   if (node === null || node === undefined || typeof node !== 'object') return node
-  if (Array.isArray(node)) return node.map(expand)
-  if (typeof node.type === 'function') return expand(node.type({ ...node.props, children: node.children }))
-  return { ...node, children: (node.children ?? []).map(expand) }
+  if (Array.isArray(node)) return node.map((child) => expand(child, react))
+  if (typeof node.type === 'function') {
+    // Tell the stub which component is rendering, so every hook it records is attributed to the
+    // right one. Hooks belong to a component INSTANCE, not to a render tree: `WorkerCard` renders
+    // once per worker and adds its own `useState`s, which is legal and which a flattened sequence
+    // reports as a violation.
+    if (react !== undefined) react.__state.current = node.type.name || '(anonymous)'
+    return expand(node.type({ ...node.props, children: node.children }), react)
+  }
+  return { ...node, children: (node.children ?? []).map((child) => expand(child, react)) }
 }
 
 /** A stand-in translator covering every key the assertions below rely on. */

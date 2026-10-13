@@ -3421,3 +3421,39 @@ plugin-live  exit 0（全绿）
 | 2e 本机角色 | 状态可读 ✓ · **永不含 token** ✓ · 接口列出 ✓ · 默认未布防 ✓ |
 
 无副作用：端口空闲、无计划任务残留、`settings.json` mtime 未变（仍是 10:51）、临时目录已清。
+
+#### 第 21 轮：补上"只在浏览器里崩"的那类缺陷的守卫
+
+**动机**：`settings-page.test.js` 确实**加载了真的 client.js**（`new Function('window', source)`，
+取 `registered[0].component`），但它用 `expand(Section(...))` **把组件当普通函数调用** ——
+绕过了 React 的协调器。于是**hooks 规则违反在这个测试里是隐形的**，而它在浏览器里的表现是**白屏**，
+恰好是这套测试够不到的地方。
+
+##### 加守卫的过程本身有三步错，每步都靠实验纠正
+
+| 我的判据 | 结果 | 为什么错 |
+|---|---|---|
+| 整棵树的 hook 序列必须一致 | 报 `RemoteUseSection` 违规 | **子组件**（`WorkerCard`）有条件渲染，各自有自己的槽位，React 允许 |
+| 按组件比对，但用 `useState#N` | 报 `AdvancedSettings` 违规 | 编号是**全局**状态数组位置，同一组件在不同树里编号不同 |
+| 按组件比对**种类**序列 | ✅ 通过，且变异检验能抓住 | 这才是 React 的规则：**同一组件**的**种类**顺序必须稳定 |
+
+第二次那个 `AdvancedSettings` 尤其值得记：它**只有一个 `useState`**，无条件调用 ——
+**不可能违规**。是我的判据在说谎，而它说得很像真的。
+
+##### 变异检验
+
+在 `AdvancedSettings` 里插入 `if (settings.keepShots !== undefined) React.useState(0)`：
+
+```
+✖ every component calls its hooks in the same order whatever the data says
+```
+
+**能抓住** ✓ —— 所以这道守卫不是空的。
+
+##### 它现在钉住的性质
+
+每个组件（有数据 / 无数据、关 / 布防、有任务 / 无任务、有待批 / 无待批、有审计 / 无审计）
+**hook 种类序列必须相同**。任何条件调用的 hook 都会让两侧长度或顺序不同而被抓住。
+
+顺带说明：`react-dom/server` 在离线环境不可用（提取产物里没有 react，客户端 React 来自 Web 应用自己的
+bundle），所以**真协调器渲染无法离线进行** —— 这也是这道静态守卫值得存在的原因。
