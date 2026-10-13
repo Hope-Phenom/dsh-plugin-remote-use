@@ -12,9 +12,14 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as acp from '@agentclientprotocol/sdk'
 
 import { AcpBridge, DEFAULT_APPROVAL_TIMEOUT_MS, mapStopReason } from '../lib/bridge/acp-bridge.js'
+// The adapter under test lives with the wiring it exists for.
+import { asBridgeOption } from '../lib/index.js'
 
 // ACP 硬编码的两个审批档（DESIGN §2.3 / §13.3 第 5 步）。
 const PERMISSION_OPTIONS = [
@@ -380,6 +385,72 @@ test('审批：onApproval 的被调用，且命中缓存时带上 toolName/rawIn
   assert.equal(bridge.stats.approvals, 1)
   assert.equal(bridge.stats.approvalTimeouts, 0)
   await bridge.dispose()
+})
+
+test('审批：构造函数级回调必须经 asBridgeOption 适配，否则 allow-once 永远到不了 agent', async () => {
+  // REGRESSION CONTEXT: `index.js` used to pass the review-engine decider STRAIGHT IN as the
+  // bridge's `onApproval`. The decider answers with a rich object ({optionId, source, reason,
+  // needsHuman}) because the provider wants those fields; the bridge compares its answer to
+  // the STRING 'allow-once'. An object is never that string, so this path silently rejected
+  // every request. Fail closed, but wrong, and unreachable by the end-to-end tests, which all
+  // go through the provider.
+  const rawInput = { file_path: 'C:\\work\\a.txt' }
+
+  /** Run one task on a FRESH agent/bridge pair and report the option the agent saw. */
+  const optionSeenBy = async (onApproval) => {
+    const agent = createFakeAgent({
+      onPrompt: async (ctx, seen, api) => {
+        const sessionId = ctx.params.sessionId
+        await api.notify(toolCall('call_9', 'write', rawInput), sessionId)
+        seen.permissionOutcomes.push(
+          await api.requestPermission({
+            sessionId,
+            toolCall: { toolCallId: 'call_9' },
+            options: PERMISSION_OPTIONS,
+          }),
+        )
+        return { stopReason: 'end_turn' }
+      },
+    })
+    const bridge = new AcpBridge({ stream: agent.clientStream, onApproval })
+    await bridge.connect()
+    await bridge.startTask({ cwd: 'C:\\work', prompt: 'write a file' })
+    await bridge.dispose()
+    return agent.seen.permissionOutcomes.at(-1).outcome.optionId
+  }
+
+  /** A decider shaped exactly like `makeApprovalDecider`'s, answering ALLOW. */
+  const richDecider = () => ({ optionId: 'allow-once', source: 'policy', reason: 'allowed path', needsHuman: false })
+
+  // The shape that shipped: an object is never the allow string, so the request is refused.
+  assert.equal(await optionSeenBy(richDecider), 'reject-once',
+    'the unadapted decider IS the bug being guarded against')
+  // Adapted: the same decision finally reaches the agent.
+  assert.equal(await optionSeenBy(asBridgeOption(richDecider)), 'allow-once')
+})
+
+test('index.js 的构造函数级 onApproval 确实经过适配（源码级接线守卫）', () => {
+  // The behavioural test above proves the ADAPTER works. It cannot prove the WIRING uses it:
+  // the constructor-level callback belongs to a bridge that PeerConnection builds lazily and
+  // that is never driven without a per-task callback, so no runtime test reaches it. A
+  // source-level guard is the honest option here, and it fails loudly on a revert.
+  const here = dirname(fileURLToPath(import.meta.url))
+  const source = readFileSync(join(here, '..', 'lib', 'index.js'), 'utf8')
+  assert.match(source, /onApproval:\s*asBridgeOption\(/u,
+    'the bridge fallback must adapt the decider to the optionId contract')
+  assert.equal(/onApproval:\s*makeApprovalDecider\(/u.test(source), false,
+    'passing the raw decider makes the bridge compare an object to the string "allow-once"')
+})
+
+test('asBridgeOption 只交出两个 ACP optionId 之一，其余一律回落为拒绝', async () => {  // The bridge validates against the options it was offered, so the adapter normalises to
+  // exactly the two ACP ids rather than forwarding whatever a future decision shape holds.
+  assert.equal(await asBridgeOption(() => ({ optionId: 'allow-once' }))({}), 'allow-once')
+  assert.equal(await asBridgeOption(() => ({ optionId: 'reject-once' }))({}), 'reject-once')
+  assert.equal(await asBridgeOption(() => ({ optionId: 'allow-always' }))({}), 'reject-once')
+  assert.equal(await asBridgeOption(() => ({}))({}), 'reject-once')
+  assert.equal(await asBridgeOption(() => undefined)({}), 'reject-once')
+  // Async deciders are the whole point: the human-approval path will hold them open.
+  assert.equal(await asBridgeOption(async () => ({ optionId: 'allow-once' }))({}), 'allow-once')
 })
 
 // ------------------------------------------------------------------ 6

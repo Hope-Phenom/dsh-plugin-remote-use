@@ -27,7 +27,7 @@ import { PeerConnection, httpBaseOf } from './bridge/peer-connection.js'
 import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
-import { decideApproval, inferRequiredTier } from './core/review-engine.js'
+import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
 import {
   mergeSettings,
   publicWorker,
@@ -279,9 +279,18 @@ export function apply(ctx, config) {
           else if (evt.kind === 'tool_call_update') cache.update(evt.tool.toolCallId, entry)
         },
         // Constructor-level fallback. `RemoteProvider` passes a per-task decider to
-        // `startTask`, and that one wins when present; this keeps the bridge honest if
-        // some other caller uses it without one (fail closed either way).
-        onApproval: makeApprovalDecider({ cfg, worker, memories, log }),
+        // `startTask`, and that one wins when present; this keeps the bridge honest if some
+        // other caller uses the bridge without one.
+        //
+        // ⚠️ The decider is ADAPTED, never passed through. It returns a rich decision
+        // ({optionId, source, reason, needsHuman}) because the provider wants the extra
+        // fields for its audit line, while `AcpBridge`'s contract is
+        // `Promise<'allow-once'|'reject-once'>`. Handing the decider over directly made
+        // `normalizeSelected` compare an OBJECT against the string 'allow-once' -- never
+        // true -- so this path silently rejected everything. Fail closed, but wrong, and it
+        // left `allow-once` unreachable for any caller that did not come through the
+        // provider, which is the only path the end-to-end security tests exercise.
+        onApproval: asBridgeOption(makeApprovalDecider({ cfg, worker, memories, log })),
       }),
     })
 
@@ -711,6 +720,32 @@ export function makeApprovalDecider(deps) {
     // optionId is already reject-once in that case, so this is fail-closed by
     // construction -- never an implicit allow.
     return decision
+  }
+}
+
+/**
+ * Adapt a review-engine decider to `AcpBridge`'s optionId contract.
+ *
+ * WHY THIS EXISTS: the decider answers with a rich object (`{optionId, source, reason,
+ * needsHuman}`) because the provider wants those fields for its audit line, while the bridge
+ * wants the optionId STRING. `AcpBridge.normalizeSelected` compares its input against
+ * `'allow-once'`, so handing the decider over unchanged compared an object to a string, which
+ * is never true, and every request silently fell back to the rejection option.
+ *
+ * Fail closed, so never a security hole -- but wrong, and it made `allow-once` unreachable
+ * for any caller that did not go through the provider (the only path the end-to-end tests
+ * cover).
+ *
+ * The result is normalised to exactly one of the two ACP option ids rather than passed
+ * through, so a future decision shape cannot smuggle anything else to the bridge.
+ *
+ * @param {(ask: object) => Promise<{ optionId?: string }> | { optionId?: string }} decide
+ * @returns {(ask: object) => Promise<string>}
+ */
+export function asBridgeOption(decide) {
+  return async (ask) => {
+    const decision = await decide(ask)
+    return decision?.optionId === OPTION.ALLOW_ONCE ? OPTION.ALLOW_ONCE : OPTION.REJECT_ONCE
   }
 }
 
