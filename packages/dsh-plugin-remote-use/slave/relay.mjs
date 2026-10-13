@@ -38,6 +38,7 @@ import { WebSocketServer } from 'ws'
 // Sibling file, not a package: it ships next to this one so a worker needs no install step.
 import { RELAY_SHOT_PATTERN, pruneShots } from './prune-shots.mjs'
 import { encodePairing } from './pairing.mjs'
+import { bestAddress } from './net-address.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -91,59 +92,13 @@ const KEEP_SHOTS = Number(arg('keep-shots', '20'))
  */
 const ADVERTISE_HOST = arg('advertise-host', '')
 
-/** Interface names that are virtual adapters on Windows, with the switch that owns them. */
-const VIRTUAL_ADAPTER = /(hyper-v|vethernet|wsl|docker|vmware|virtualbox|vbox|loopback|tailscale|zerotier|tap|tun)/iu
-
-/** `a.b.c.d` -> a number, or -1 when it is not a dotted quad. */
-function ipv4Value(address) {
-  const parts = String(address).split('.')
-  if (parts.length !== 4) return -1
-  let value = 0
-  for (const part of parts) {
-    const n = Number(part)
-    if (!Number.isInteger(n) || n < 0 || n > 255) return -1
-    value = (value * 256) + n
-  }
-  return value
-}
-
-/**
- * How good an advertised address is. Higher wins.
- *
- * Private ranges beat anything else because a peer on the LAN can reach them; the classic
- * `192.168.0.0/16` beats `10/8` beats the `172.16/12` block, which is where container and
- * switch addresses usually land.
- */
-function addressScore(address, name) {
-  if (VIRTUAL_ADAPTER.test(String(name))) return -1
-  const value = ipv4Value(address)
-  if (value < 0 || address === '127.0.0.1') return -1
-  if (address.startsWith('192.168.')) return 40
-  if (address.startsWith('10.')) return 30
-  if (/^172\.(1[6-9]|2\d|3[01])\./u.test(address)) return 20
-  if (address.startsWith('169.254.')) return 0 // link-local: a sign nothing else is configured
-  return 10
-}
-
 function advertisableHost() {
   if (ADVERTISE_HOST !== '') return ADVERTISE_HOST
   if (HOST !== '0.0.0.0' && HOST !== '::' && HOST !== '') return HOST
 
-  let best = ''
-  let bestScore = 0
-  for (const [name, list] of Object.entries(networkInterfaces())) {
-    for (const info of list ?? []) {
-      if (info.family !== 'IPv4' || info.internal === true) continue
-      const score = addressScore(info.address, name)
-      if (score > bestScore) {
-        bestScore = score
-        best = info.address
-      }
-    }
-  }
-  // Nothing to advertise: loopback at least keeps the string self-consistent, and the logged
-  // warning is what tells the operator to pass --advertise-host.
-  return best === '' ? '127.0.0.1' : best
+  // Shared with the plugin's arming path so the two cannot disagree about which address is the
+  // real LAN one. See slave/net-address.mjs for why the first non-internal IPv4 is not enough.
+  return bestAddress(networkInterfaces()) || '127.0.0.1'
 }
 
 /**
