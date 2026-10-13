@@ -2,6 +2,7 @@
 
 > 本文是并行实现的**唯一接口约定**。各模块的测试与实现必须严格按此签名，不得自行改动。
 > 设计依据：[DESIGN.md](DESIGN.md)。协议细节见 DESIGN §13。
+> 用法说明见仓库根目录的 [README.md](../README.md)；踩坑与教训见 [PITFALLS.md](PITFALLS.md)。
 
 ---
 
