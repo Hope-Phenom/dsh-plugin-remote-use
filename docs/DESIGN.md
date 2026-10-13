@@ -3825,3 +3825,52 @@ unit 447/447（新增 4 条）· smoke ALL CHECKS PASSED · live 对着真从机
   [PASS] selfcheck.ps1 is ASCII-only / has param() first
 RESULT: OK    exit=0
 ```
+
+#### 第 30 轮：#3 并发 session
+
+**此前从未跑过两个并发任务。** 新探针 `.research/probe-concurrency.mjs` 挂载真插件、发两个**真任务**。
+
+##### 场景 A：同一 worker，两个并发任务 —— **必须串行**
+
+`serialQueue` 默认 1，`RemoteProvider.start` 在 `#acquire()` **之后**才发布运行。实测：
+
+```
+A: admitted +1.0s   ended +11.2s
+B: admitted +11.2s  ended +21.7s      ← 恰好在 A 结束那一刻被接纳
+[PASS] the second task was NOT admitted before the first ended
+[PASS] both came back with their own markers
+[PASS] no cross-talk（两个方向）
+tasks: 2
+```
+
+##### 场景 B：两个 worker（真从机 + 回环节点）—— **必须并行**
+
+```
+A: admitted +2.2s  ended +12.8s
+B: admitted +2.4s  ended +14.3s      ← 两者都在对方结束前被接纳
+[PASS] both were admitted before either ended (they really overlapped)
+```
+
+##### 三次测量错误，每次都被"换个角度看同一份数据"纠正
+
+1. **用秒表断言串行** —— "墙钟 > 单任务 1.5 倍"。但第二个任务的时长 **包含等待**，
+   而 agent 自己的耗时从 20s 到 110s 波动，比例毫无意义。
+   改为记录**三个时刻**（调用/准入/结束），断言 **`B.准入 ≥ A.结束`** —— 精确、不受波动影响。
+2. **断言"两个 worker 并行"却测到串行** —— 回环节点**冷启动**要先拉 ACP 子进程，
+   而 `start()` 在准入前会先 `await selfcheck()`。所以第二次准入晚 5.6s，被读成"没并行"。
+   **那是在测冷连接耗时。** 给任务加一个长于任何合理连接时间的 sleep 后，两者准入只差 0.2s。
+3. **marker 文件读回为空** —— 路径用的是**主机**的 temp 目录，而任务跑在**从机**上。
+   改成让任务**回显** marker：一次真正的往返，且不假设两边共享文件系统。
+
+##### 第四次：同一个陷阱的第三次出现
+
+探针最初只挂载了 **1** 个 worker。原因是**操作者的 settings 文件覆盖了传入的配置** ——
+`apply()` 的优先级是 `defaults < profile 补丁 < settings 文件`，而 `workers` 是替换语义。
+
+**这个陷阱已经在 `plugin-smoke`、`plugin-live`、现在这里出现三次。** 产品把这件事**记在日志里**
+（`settings file applies: workers, ...`），而这次是我的探针没读那行日志 —— 产品是对的。
+
+##### 顺带确认的设计事实
+
+审批路径查的是**每个 bridge 自己的**工具调用缓存（不是全局那张），所以并发任务**不会**串台到审批显示；
+全局缓存只用于策略的 `allowedTools` 匹配与页面统计。这一条推翻了我原本的猜想。
