@@ -124,6 +124,12 @@ window.__ModuleLoader__.load({
       auditByDisposed: '插件已卸载',
       // --- pairing ---
       btnAdd: '添加工作节点',
+      btnPair: '粘贴配对串',
+      btnPairSave: '配对',
+      pairDone: '配对完成，工作节点已配置并连接。',
+      fieldPairing: '配对串',
+      fieldPairingHint: '由工作节点生成（relay 的 --print-pairing，或 relay 旁边的 pairing.txt）。它包含工作节点令牌，请当作密码对待：用掉后本框即清空，且绝不会回传到浏览器。',
+      fieldPairingPlaceholder: 'dshpair1.…',
       btnEdit: '编辑',
       btnDelete: '删除',
       btnSave: '保存',
@@ -258,6 +264,12 @@ window.__ModuleLoader__.load({
       auditByDisposed: 'plugin unloaded',
       // --- pairing ---
       btnAdd: 'Add worker',
+      btnPair: 'Paste a pairing string',
+      btnPairSave: 'Pair',
+      pairDone: 'Paired. The worker is configured and connected.',
+      fieldPairing: 'Pairing string',
+      fieldPairingHint: 'Produced by the worker (relay --print-pairing, or pairing.txt beside the relay). It contains the worker token, so treat it like a password: it is cleared from this box once used, and never sent back to the browser.',
+      fieldPairingPlaceholder: 'dshpair1.\u2026',
       btnEdit: 'Edit',
       btnDelete: 'Delete',
       btnSave: 'Save',
@@ -704,6 +716,9 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState({ kind: 'idle', text: '' })
       /** null = no form; `{ draft, isNew }` = the add/edit form is open. */
       const [editing, setEditing] = React.useState(null)
+      /** The paste-a-pairing-string panel. Closed by default: it is the shortcut, not the path. */
+      const [pairingOpen, setPairingOpen] = React.useState(false)
+      const [pairingText, setPairingText] = React.useState('')
 
       const call = React.useCallback(async (action, payload) => {
         const response = await fetch(ROUTE, {
@@ -821,6 +836,24 @@ window.__ModuleLoader__.load({
         if (by === 'disposed') return t('auditByDisposed')
         return String(by ?? '')
       }, [t])
+
+      const onPair = React.useCallback(async () => {
+        setBusy('pair')
+        setStatus({ kind: 'idle', text: '' })
+        try {
+          await call('worker.pair', { pairing: pairingText })
+          // Clear the field on success: the string is a live credential and there is no reason
+          // to leave it sitting in a form.
+          setPairingText('')
+          setPairingOpen(false)
+          setStatus({ kind: 'ok', text: t('pairDone') })
+          await refresh()
+        } catch (error) {
+          setStatus({ kind: 'err', text: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setBusy('')
+        }
+      }, [call, refresh, pairingText, t])
 
       const onAction = React.useCallback(async (action, peerId) => {
         setBusy(action)
@@ -958,6 +991,12 @@ window.__ModuleLoader__.load({
               type: 'button', className: 'ru-btn primary', disabled: anyBusy || editing !== null,
               onClick: () => setEditing({ draft: { enabled: true, serialQueue: 1 }, isNew: true }),
             }, t('btnAdd')),
+            // The shortcut past the form. It sits beside "add" because that is the same job:
+            // one paste instead of a url and a bearer token typed off another machine's screen.
+            h('button', {
+              type: 'button', className: 'ru-btn', disabled: anyBusy || editing !== null,
+              onClick: () => setPairingOpen((open) => !open),
+            }, t('btnPair')),
             h('button', {
               type: 'button', className: 'ru-btn', disabled: anyBusy || workers.length === 0,
               onClick: async () => {
@@ -972,7 +1011,32 @@ window.__ModuleLoader__.load({
                   setBusy('')
                 }
               },
-            }, busy === 'all' ? t('busy') : t('btnAll')))),
+            }, busy === 'all' ? t('busy') : t('btnAll'))),
+
+          // The shortcut past the form: one paste instead of a url and a bearer token typed by
+          // hand off another machine's screen.
+          pairingOpen ? h('div', { className: 'ru-card', style: { marginTop: '10px' } },
+            h('label', { className: 'ru-field' },
+              h('span', { className: 'ru-field-label' }, t('fieldPairing')),
+              h('textarea', {
+                className: 'ru-input ru-textarea',
+                rows: '3',
+                placeholder: t('fieldPairingPlaceholder'),
+                value: pairingText,
+                onChange: (event) => setPairingText(event.target.value),
+              }),
+              h('span', { className: 'ru-field-hint' }, t('fieldPairingHint'))),
+            h('div', { className: 'ru-actions' },
+              h('button', {
+                type: 'button', className: 'ru-btn primary',
+                disabled: anyBusy || pairingText.trim() === '',
+                onClick: () => void onPair(),
+              }, busy === 'pair' ? t('busy') : t('btnPairSave')),
+              h('button', {
+                type: 'button', className: 'ru-btn',
+                disabled: anyBusy,
+                onClick: () => { setPairingOpen(false); setPairingText('') },
+              }, t('btnCancel')))) : null),
 
         status.text === '' ? null : h('div', { className: `ru-msg ${status.kind === 'err' ? 'err' : status.kind === 'ok' ? 'ok' : 'mute'}` }, status.text),
 

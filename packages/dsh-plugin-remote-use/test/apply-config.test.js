@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply } from '../lib/index.js'
+import { encodePairing } from '../slave/pairing.mjs'
 import { settingsPath } from '../lib/core/settings-store.js'
 
 // ---------------------------------------------------------------------------
@@ -494,6 +495,62 @@ test('the page is told how many sessions have remote work on, and by which comma
 
     const after = await get(h.routes[0])
     assert.equal(after.body.settings.sessionsEnabled, 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pairing from a pasted string
+//
+// The string carries a bearer token, so the refusals matter more than the happy path: a bad
+// paste must be rejected outright rather than producing a worker that looks right and cannot
+// connect.
+// ---------------------------------------------------------------------------
+
+test('worker.pair fills url, token and name from one paste', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const pairing = encodePairing({
+      url: 'ws://192.168.1.101:7331', token: 'tok-secret-value', name: 'worker-pc', cwd: 'C:\\dsh-remote\\p0work',
+    })
+    const { status, body } = await post(h.routes[0], 'worker.pair', { pairing })
+    assert.equal(status, 200, JSON.stringify(body))
+    assert.equal(body.ok, true)
+
+    const added = body.settings.workers.find((w) => w.url === 'ws://192.168.1.101:7331')
+    assert.ok(added !== undefined, 'the worker must be configured')
+    assert.equal(added.tokenSet, true)
+    // The token itself must never travel back to the browser.
+    assert.equal('token' in added, false)
+    assert.equal(JSON.stringify(body).includes('tok-secret-value'), false)
+  })
+})
+
+test('a corrupt pairing string is refused, and nothing is configured', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const good = encodePairing({ url: 'ws://h:1', token: 't' })
+    for (const bad of [good.slice(0, good.length - 5), 'nonsense', '', `${good}x`]) {
+      const { status, body } = await post(h.routes[0], 'worker.pair', { pairing: bad })
+      assert.equal(status, 400, `${JSON.stringify(bad).slice(0, 30)} must be refused`)
+      assert.equal(body.ok, false)
+      // The refusal must not leak the token it was given.
+      assert.equal(String(body.error).includes('tok'), false)
+    }
+    const after = await get(h.routes[0])
+    // `mountWithGate` already configures w1, so the assertion is that nothing was ADDED: a
+    // refused paste must not leave a half-configured worker behind.
+    assert.deepEqual(after.body.settings.workers.map((w) => w.id), ['w1'], 'a refused paste must change nothing')
+  })
+})
+
+test('the pairing action never carries the token into the log', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const pairing = encodePairing({ url: 'ws://192.168.1.101:7331', token: 'tok-secret-value', name: 'w' })
+    await post(h.routes[0], 'worker.pair', { pairing })
+    const logged = h.logs.map(([, message]) => String(message)).join('\n')
+    assert.equal(logged.includes('tok-secret-value'), false, 'the token must not be logged')
+    assert.match(logged, /192\.168\.1\.101:7331/, 'the host may be logged, for the audit line')
   })
 })
 

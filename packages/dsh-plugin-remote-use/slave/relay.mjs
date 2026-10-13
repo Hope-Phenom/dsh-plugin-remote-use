@@ -29,13 +29,15 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, readFileSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { networkInterfaces } from 'node:os'
 import { timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 // Sibling file, not a package: it ships next to this one so a worker needs no install step.
 import { RELAY_SHOT_PATTERN, pruneShots } from './prune-shots.mjs'
+import { encodePairing } from './pairing.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -70,6 +72,114 @@ const SCREENSHOT_REPORT = join(dirname(SCREENSHOT_SCRIPT), 'screenshot-report.tx
  * host is the thing that went away. A negative value disables pruning.
  */
 const KEEP_SHOTS = Number(arg('keep-shots', '20'))
+
+/**
+ * The address to advertise in a pairing string.
+ *
+ * `--host 0.0.0.0` (the default) means "listen everywhere", which is not an address a master
+ * can dial. So the advertised host is either an explicit `--advertise-host`, or the machine's
+ * best guess at its LAN address.
+ *
+ * WHY "BEST GUESS" RATHER THAN "FIRST IPv4": a Windows machine with Hyper-V, WSL, Docker or
+ * VirtualBox installed has several non-internal IPv4 addresses, and they are enumerated in no
+ * useful order. Picking the first one produced `172.20.0.1` on the development host -- a
+ * Hyper-V switch that no peer can reach -- so the pairing string was well-formed and useless.
+ * The heuristic below prefers an ordinary LAN address and skips interfaces whose names give
+ * them away as virtual.
+ *
+ * It is still a heuristic, which is why `--advertise-host` exists and why the choice is logged.
+ */
+const ADVERTISE_HOST = arg('advertise-host', '')
+
+/** Interface names that are virtual adapters on Windows, with the switch that owns them. */
+const VIRTUAL_ADAPTER = /(hyper-v|vethernet|wsl|docker|vmware|virtualbox|vbox|loopback|tailscale|zerotier|tap|tun)/iu
+
+/** `a.b.c.d` -> a number, or -1 when it is not a dotted quad. */
+function ipv4Value(address) {
+  const parts = String(address).split('.')
+  if (parts.length !== 4) return -1
+  let value = 0
+  for (const part of parts) {
+    const n = Number(part)
+    if (!Number.isInteger(n) || n < 0 || n > 255) return -1
+    value = (value * 256) + n
+  }
+  return value
+}
+
+/**
+ * How good an advertised address is. Higher wins.
+ *
+ * Private ranges beat anything else because a peer on the LAN can reach them; the classic
+ * `192.168.0.0/16` beats `10/8` beats the `172.16/12` block, which is where container and
+ * switch addresses usually land.
+ */
+function addressScore(address, name) {
+  if (VIRTUAL_ADAPTER.test(String(name))) return -1
+  const value = ipv4Value(address)
+  if (value < 0 || address === '127.0.0.1') return -1
+  if (address.startsWith('192.168.')) return 40
+  if (address.startsWith('10.')) return 30
+  if (/^172\.(1[6-9]|2\d|3[01])\./u.test(address)) return 20
+  if (address.startsWith('169.254.')) return 0 // link-local: a sign nothing else is configured
+  return 10
+}
+
+function advertisableHost() {
+  if (ADVERTISE_HOST !== '') return ADVERTISE_HOST
+  if (HOST !== '0.0.0.0' && HOST !== '::' && HOST !== '') return HOST
+
+  let best = ''
+  let bestScore = 0
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    for (const info of list ?? []) {
+      if (info.family !== 'IPv4' || info.internal === true) continue
+      const score = addressScore(info.address, name)
+      if (score > bestScore) {
+        bestScore = score
+        best = info.address
+      }
+    }
+  }
+  // Nothing to advertise: loopback at least keeps the string self-consistent, and the logged
+  // warning is what tells the operator to pass --advertise-host.
+  return best === '' ? '127.0.0.1' : best
+}
+
+/**
+ * The pairing string for this relay, or '' when it cannot be produced.
+ *
+ * Returns '' rather than a plausible-looking string when there is no token: an unauthenticated
+ * relay would otherwise emit a pairing string that pairs a master to an open worker.
+ */
+function pairingString() {
+  if (TOKEN === '') return ''
+  return encodePairing({
+    url: `ws://${advertisableHost()}:${PORT}`,
+    token: TOKEN,
+    name: arg('pairing-name', ''),
+  })
+}
+
+/** Where the pairing string is left for an operator who cannot read this process's console. */
+const PAIRING_FILE = join(HERE, 'pairing.txt')
+
+/**
+ * `--print-pairing`: print the pairing string and exit.
+ *
+ * This is the path a person actually uses -- they are already on the worker to start it, so
+ * printing costs nothing and beats going to fetch a file. It deliberately does NOT print the
+ * token in any other form: one line of output, one paste at the master.
+ */
+if (argv.includes('--print-pairing')) {
+  const pairing = pairingString()
+  if (pairing === '') {
+    process.stderr.write('cannot build a pairing string: this relay has no --token, so a master would pair with an unauthenticated worker\n')
+    process.exit(2)
+  }
+  process.stdout.write(`${pairing}\n`)
+  process.exit(0)
+}
 
 /** Plugin RPC namespace. Anything here is handled locally, never forwarded to ACP. */
 const PLUGIN_PREFIX = 'dsh-remote/'
@@ -226,6 +336,15 @@ async function handleLocalRpc(msg) {
       } catch (e) {
         return fail(-32603, `self-check failed: ${e instanceof Error ? e.message : String(e)}`)
       }
+    }
+
+    case `${PLUGIN_PREFIX}pairing`: {
+      // The master asking for a pairing string, e.g. to re-pair after a settings reset. It is
+      // already authenticated -- this RPC arrives over the token-checked WebSocket -- so
+      // returning the credential here is not a new exposure.
+      const pairing = pairingString()
+      if (pairing === '') return fail(-32603, 'this relay has no token, so it cannot produce a pairing string')
+      return reply({ ok: true, pairing })
     }
 
     case `${PLUGIN_PREFIX}screenshot`: {
@@ -542,4 +661,20 @@ server.listen(PORT, HOST, () => {
   log(`       ${LAUNCH.args.join(' ')}`)
   log(`self-check script: ${SELFCHECK_SCRIPT} (cache ${SELFCHECK_CACHE_MS}ms)`)
   if (TOKEN === '') log('WARNING: auth disabled')
+  // Leave the pairing string where an operator can find it. It is written on every start so it
+  // cannot go stale against a rotated token -- a pairing string with the OLD token fails with
+  // an authentication error that looks like a network problem.
+  const pairing = pairingString()
+  if (pairing === '') {
+    log('no pairing string: this relay has no token, so a pairing string would pair a master with an unauthenticated worker')
+  } else {
+    try {
+      writeFileSync(PAIRING_FILE, `${pairing}\n`, { encoding: 'utf8', mode: 0o600 })
+      log(`pairing string written to ${PAIRING_FILE}  (${advertisableHost()}:${PORT})`)
+    } catch (error) {
+      // Not fatal: `--print-pairing` covers the case where the file cannot be written.
+      log(`could not write ${PAIRING_FILE}: ${error instanceof Error ? error.message : String(error)}`)
+      log('run the relay with --print-pairing to get the string instead')
+    }
+  }
 })

@@ -272,6 +272,35 @@ test('the role block reports the per-session switch and names the real control',
   assert.match(textOf(on.tree).join(' '), /SESSIONS-ON-3/)
 })
 
+test('the pairing panel is closed until asked for', () => {
+  // Closed by default: pasting a credential is the shortcut, not the standing path, and a
+  // credential box that is always on screen invites leaving a token in it.
+  const { tree, react } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: { workers: [], sessionsEnabled: 0, enableCommand: '/remote-use on' },
+  })
+  const toggles = findButton(tree, 'BTN-PAIR')
+  assert.equal(toggles.length, 1, 'the pairing toggle must exist')
+
+  // AdvancedSettings already renders a textarea (the delegation policy), so identify the
+  // pairing box by its placeholder instead of counting textareas.
+  const areas = []
+  const collect = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(collect); return }
+    if (node.type === 'textarea' && node.props.placeholder === 'dshpair1.') areas.push(node)
+    if (Array.isArray(node.children)) node.children.forEach(collect)
+  }
+  collect(tree)
+  assert.equal(areas.length, 0, 'no paste box until the panel is opened')
+
+  // Opening is a state change; the recorded setter shows it is a toggle, not a one-way open.
+  toggles[0].props.onClick()
+  const opened = lastSet(react, 5)
+  assert.equal(typeof opened, 'function', 'the setter must be a functional update')
+  assert.equal(opened(false), true, 'it toggles')
+})
+
 test('the icon is the stroke-only style of the existing set, and self-contained', () => {
   const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
   // Inlined as a data URL, so an external reference could never resolve.
@@ -505,10 +534,11 @@ function makeTranslator() {
       groupDanger: 'GROUP-DANGER', groupWorkers: 'GROUP-WORKERS', groupRole: 'GROUP-ROLE',
       roleMaster: 'ROLE-MASTER', tokenStored: 'STORED {hint}', tokenMissing: 'NOT-SET',
       fieldCwd: 'F-CWD', fieldEnabled: 'F-ENABLED',
-      btnAllow: 'BTN-ALLOW', btnDeny: 'BTN-DENY',
+      btnAllow: 'BTN-ALLOW', btnDeny: 'BTN-DENY', btnPair: 'BTN-PAIR', btnPairSave: 'BTN-PAIR-SAVE',
       approvalsBudget: 'BUDGET-{s}', auditNote: 'AUDIT-AT-{p}',
       fieldKeepShots: 'F-KEEPSHOTS', fieldPolicy: 'F-POLICY', fieldSessions: 'F-SESSIONS',
       sessionsOn: 'SESSIONS-ON-{n}', sessionsNone: 'SESSIONS-NONE', switchHint: 'SWITCH {cmd}',
+      fieldPairing: 'F-PAIRING', fieldPairingHint: 'PAIR-HINT', fieldPairingPlaceholder: 'dshpair1.', pairDone: 'PAIR-DONE',
       approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
       auditNone: 'AUDIT-NONE',
       auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',

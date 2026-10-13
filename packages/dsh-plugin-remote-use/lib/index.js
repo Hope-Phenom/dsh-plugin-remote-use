@@ -30,6 +30,8 @@ import { TaskMemory } from './core/task-memory.js'
 import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
 import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
 import { AuditLog } from './core/audit-log.js'
+// Decoding lives with the relay that encodes, so the two can never disagree about the format.
+import { decodePairing, deriveWorkerId, describePairing } from '../slave/pairing.mjs'
 import {
   mergeSettings,
   publicWorker,
@@ -671,6 +673,7 @@ export function apply(ctx, config) {
       queue,
       audit,
       sessionsEnabled: () => enabledAgents.size,
+      log,
       currentSettings,
       persistSettings,
       settingsPath: stored.file,
@@ -960,6 +963,9 @@ export function makeSettingsRoute(deps) {
   // How many sessions currently have remote work switched on. Injected rather than imported:
   // the enabled set belongs to `apply()`'s scope, one level up.
   const sessionsEnabled = typeof deps.sessionsEnabled === 'function' ? deps.sessionsEnabled : () => 0
+  // The route logs sparingly, but pairing is security-relevant and wants a trace. Injected
+  // rather than imported, and defaulted so this function stays usable on its own in tests.
+  const log = deps.log ?? { info: () => {}, warn: () => {}, error: () => {} }
   const currentSettings = deps.currentSettings ?? (() => ({ workers: [] }))
   const persistSettings = deps.persistSettings ?? (() => ({ ok: false, error: 'this build cannot persist settings' }))
   const settingsFile = deps.settingsPath ?? ''
@@ -1146,6 +1152,41 @@ export function makeSettingsRoute(deps) {
             if (edited.error !== '') return send(400, { ok: false, error: edited.error })
             const applied = persistSettings({ ...currentSettings(), workers: edited.workers })
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
+            return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
+          case 'worker.pair': {
+            // Pair from a pasted pairing string: url, token and name all arrive at once, so an
+            // operator never types a bearer token by hand.
+            //
+            // The string is a CREDENTIAL, so it is decoded here and immediately reduced to a
+            // worker entry -- it is never logged, echoed back, or put in an error message. A
+            // bad string is refused rather than partially applied: a worker that connects to
+            // the right host with the wrong token fails much later, far from the paste.
+            const decoded = decodePairing(body?.pairing)
+            if (decoded.ok !== true) return send(400, { ok: false, error: decoded.error })
+
+            const incoming = { ...decoded.worker }
+            // Pairing is a paste; asking the operator to also invent an id would defeat the
+            // point, so one is derived from the worker's own name (or its host) unless the
+            // page supplied one.
+            if (typeof body?.id === 'string' && body.id !== '') incoming.id = body.id
+            if (incoming.id === undefined || incoming.id === '') {
+              const derived = deriveWorkerId(decoded.worker)
+              if (derived === '') {
+                return send(400, { ok: false, error: 'could not derive a worker id; supply one explicitly' })
+              }
+              incoming.id = derived
+            }
+            // The pasted string knows url/token/name; the operator may still want a local cwd.
+            if (typeof body?.cwd === 'string' && body.cwd !== '') incoming.cwd = body.cwd
+
+            const edited = upsertWorker(currentSettings().workers, incoming)
+            if (edited.error !== '') return send(400, { ok: false, error: edited.error })
+            const applied = persistSettings({ ...currentSettings(), workers: edited.workers })
+            if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
+            // Report the host only, never the token.
+            log.info(`paired worker from a pairing string: ${describePairing(body?.pairing)}`)
             return send(200, { ok: true, applied, settings: publicSettings() })
           }
 
