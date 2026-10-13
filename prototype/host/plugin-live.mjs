@@ -223,7 +223,7 @@ if (shotTool !== undefined) {
 // 2b. Per-session enablement: installing the plugin must not route every
 //     session through a worker.
 // ---------------------------------------------------------------------------
-console.log('\n=== 2b. per-session enablement (default off) ===')
+console.log('\n=== 2d. per-session enablement (default off) ===')
 
 const makeLiveAgent = (id) => {
   const agent = { id }
@@ -287,6 +287,97 @@ const offResult = command.handler({ commandId: 'live-2', agent: agentA, rawInput
 check('/remote-use off succeeds', offResult.kind === 'success')
 check('the restriction comes back',
   agentA.__denied.size === 4 && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')))
+
+// ---------------------------------------------------------------------------
+// 2c. Human approval, end to end, against the real worker
+//
+// This is the only check that proves the FEATURE rather than its parts: an escalation the
+// review engine refuses to justify must land in the page's queue, and approving it there must
+// let the worker finish something it would otherwise have been refused. Everything else --
+// route shape, queue semantics, audit rows -- is unit-tested, and four earlier bugs in this
+// project were all "the parts pass but the assembly never runs".
+//
+// A SKIP is reported honestly rather than counted as a pass: whether the worker's agent
+// chooses to ask for a wider tier is up to the model, so a run where it simply stays inside
+// its workspace proves nothing either way.
+// ---------------------------------------------------------------------------
+console.log('\n=== 2c. human approval against the real worker ===')
+
+/** Invoke the mounted settings route the way the web server does. */
+const callRoute = async (method, payload) => {
+  const route = mounted.routes[0]
+  const body = payload === undefined ? '' : JSON.stringify(payload)
+  const req = {
+    method,
+    on: (event, handler) => {
+      if (event === 'data' && body !== '') handler(Buffer.from(body))
+      if (event === 'end') handler()
+      return req
+    },
+  }
+  const text = await new Promise((resolve) => {
+    route.handler(req, { writeHead: () => {}, end: (s) => resolve(String(s)) })
+  })
+  return JSON.parse(text)
+}
+
+// The switch is per session, and section 2b left this one OFF at the end.
+command.handler({ commandId: 'live-3', agent: agentA, rawInput: 'on', attachments: [] })
+check('the session is enabled again for the approval probe', agentA.__denied.size === 0)
+
+const APPROVAL_PROMPT = [
+  '用 pwsh 工具把文本 approved-once 写入文件 C:\\dsh-remote\\approval-probe.txt。',
+  '该路径在当前工作目录之外，如果沙箱拒绝，请直接申请更高权限继续，不要改写到别处。',
+  '完成后只回复 DONE。',
+].join(' ')
+
+const approvalRun = await provider.start({
+  label: 'plugin-live-approval',
+  prompt: [{ type: 'text', text: APPROVAL_PROMPT }],
+  parent: { id: 'plugin-live-approval-parent' },
+})
+
+let approved = 0
+let sawPending = 0
+const deadline = Date.now() + 60_000
+while (Date.now() < deadline) {
+  const snapshot = await callRoute('GET')
+  const pending = snapshot?.approvals?.pending ?? []
+  if (pending.length > 0) {
+    sawPending = pending.length
+    console.log(`  queued: tool=${pending[0].toolName} tier=${pending[0].requiredTier} reason=${String(pending[0].reason).slice(0, 70)}`)
+    const decided = await callRoute('POST', { action: 'approvals.decide', id: pending[0].id, decision: 'allow' })
+    check('the route accepted the approval', decided.ok === true && decided.optionId === 'allow-once', JSON.stringify(decided))
+    approved += 1
+    continue
+  }
+  // Stop once the task settles and nothing is queued.
+  const settled = await Promise.race([
+    approvalRun.result.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 1_500)),
+  ])
+  if (settled && approved > 0) break
+  if (settled) break
+  await new Promise((r) => setTimeout(r, 500))
+}
+
+const approvalResult = await approvalRun.result
+console.log(`  stopReason = ${approvalResult.stopReason}`)
+console.log(`  output     = ${JSON.stringify(approvalResult.output?.[0]?.text ?? '').slice(0, 200)}`)
+
+if (sawPending === 0) {
+  console.log('  SKIP: the worker never asked for a wider tier, so there was nothing to approve.')
+} else {
+  check('an escalation reached the approval queue', sawPending > 0)
+  check('a human decision was delivered to the worker', approved > 0)
+  check('the task finished rather than being refused by the engine',
+    approvalResult.stopReason === 'completed', String(approvalResult.stopReason))
+  // The audit trail must show the human decision, which is what makes it auditable later.
+  const after = await callRoute('GET')
+  const humanRows = (after?.audit?.recent ?? []).filter((r) => r.by === 'human')
+  check('the trail records who decided', humanRows.length > 0, `rows=${(after?.audit?.recent ?? []).length}`)
+  console.log(`  audit: ${(after?.audit?.recent ?? []).slice(0, 3).map((r) => `${r.toolName}:${r.optionId}:${r.by}`).join(', ')}`)
+}
 
 // ---------------------------------------------------------------------------
 // 3. Teardown
