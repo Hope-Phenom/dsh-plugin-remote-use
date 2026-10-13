@@ -2624,3 +2624,29 @@ ctx.systemPrompt.section({
 用 `$out = foreach (...) { ... }; Set-Content -Value $out -NoNewline` 做行级改写，会把**整个文件压成一行**
 （数组被无分隔符拼接）。这与之前 `-replace` + `Set-Content` 造成内容重复是同一条教训：
 **行级改写不要用字符串拼接，用能保住结构的方式**。本次已改用 `edit`。
+
+#### 第 5 轮：接入 apply() 与路由
+
+| 项 | 状态 |
+|---|---|
+| `workerRole` 纳入 settings 的托管键 | ✅ |
+| `apply()` 创建 `RelaySupervisor` + `WorkerArming` | ✅ |
+| 路由动作 `worker.arm` / `worker.disarm` | ✅ |
+| GET 暴露角色状态（**只有掩码，永不含 token**） | ✅ |
+| 设置页布防 UI | ⛔ 待做 |
+
+**两条测试接缝的补充**：
+
+1. **门禁的拒绝路径是真路由 + 真探测测的**：测试 harness 的临时 `DSH_HOME` 里没有 acp profile，
+   所以 `worker.arm` 必然被拒 —— 断言 409 且错误信息**指向沙箱而不是地址**。
+   成功路径在 `worker-arming.test.js` 里用注入的探测覆盖。
+   变异检验：把 `probe` 恒为 ok → 该测试失败 ✓（也据此发现 spawn 的监听器会挂住测试进程）
+
+2. **共享 harness 的状态泄漏**：`withEnv` 只在测试**开始**删除 settings 文件，而
+   `delegationPolicy: ''` 那条测试是同步的、没包 `withEnv` —— 它读到前面测试留下的文件，
+   于是**通过与否取决于谁先跑**。已把它包进 `withEnv`，让它声明自己需要干净状态。
+
+**一处必须记下的操作失误**：清理残留进程时用了 `'relay\.mjs|acp'` 这个**过宽的过滤**，
+误杀了两个 **JetBrains Rider 的 ACP agent**（与本项目无关）。清理过滤器必须匹配**具体路径**，
+不能匹配"看起来相关"的关键词。已改为只匹配 `dsh-plugin-remote-use\slave\relay.mjs` 与本机
+acp profile 的 cli.js。

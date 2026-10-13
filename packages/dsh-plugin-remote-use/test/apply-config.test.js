@@ -564,6 +564,58 @@ test('removing an unknown worker is a 404, not a silent success', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// the worker role: refusing to arm is the property that matters
+//
+// The success path is covered in test/worker-arming.test.js with an injected probe. What is
+// asserted here is the REFUSAL, through the real route and the real probe: this harness's
+// DSH_HOME is a temp directory with no acp profile, so the sandbox gate cannot pass, and arming
+// must be refused rather than granted.
+// ---------------------------------------------------------------------------
+
+test('the page can read the worker role, and it never carries the token', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const { status, body } = await get(h.routes[0])
+    assert.equal(status, 200)
+    const role = body.settings.workerRole
+    assert.ok(role !== null && typeof role === 'object', 'the page must be able to report the state on load')
+    assert.equal(role.armed, false, 'the default is off')
+    assert.equal(role.tokenSet, false)
+    assert.equal('token' in role, false, 'the raw credential must never be part of the settings payload')
+    // The interface list is what the page offers as a choice, and it includes everything so the
+    // page can explain why a virtual adapter is not recommended.
+    assert.equal(Array.isArray(role.interfaces), true)
+  })
+})
+
+test('ARMING IS REFUSED when the sandbox does not contain this machine', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    // Any address will do: the sandbox blocker is the one under test, and it is checked before
+    // anything starts. This harness has no acp profile, so the probe cannot pass.
+    const { status, body } = await post(h.routes[0], 'worker.arm', { bindAddress: '127.0.0.1' })
+    assert.equal(status, 409, `expected a refusal, got ${status} ${JSON.stringify(body)}`)
+    assert.equal(body.ok, false)
+    assert.match(String(body.error), /sandbox/u, 'the refusal must name the sandbox, not blame the address')
+    assert.equal(Array.isArray(body.blockers), true)
+
+    // And nothing was armed.
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.workerRole.armed, false)
+  })
+})
+
+test('disarming is safe when nothing was armed', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const { status, body } = await post(h.routes[0], 'worker.disarm', {})
+    assert.equal(status, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.workerRole.armed, false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // the route must address the worker the way `apply()` actually publishes it
 //
 // REPORTED SYMPTOM: pressing the page's "Test link" and "Screenshot" buttons answered
@@ -755,12 +807,18 @@ test('a failed restriction does not abort startup, and the guard still protects'
   assert.match(h.guardReason({ name: 'remote_agents', agent: broken }), /off for this session/)
 })
 
-test('setting delegationPolicy to empty keeps the tools gated but injects no policy', () => {
-  const h = mountWithGate({ delegationPolicy: '' })
-  const agent = h.createAgent('a1')
-  runCommand(h, agent, 'on')
-  // No section registered at all, so nothing can render.
-  assert.equal(h.sections.some((s) => s.name === 'remote-use:policy'), false)
-  // The switch still governs execution.
-  assert.equal(h.guardReason({ name: 'remote_agents', agent }), undefined)
+test('setting delegationPolicy to empty keeps the tools gated but injects no policy', async () => {
+  // Wrapped in `withEnv` because this test asserts an EMPTY policy takes effect, and the
+  // settings file outranks the profile config. Any earlier test that saved settings leaves a
+  // file behind, and its `delegationPolicy` (the default) would override the empty one passed
+  // here -- so the test would pass or fail depending on what ran before it.
+  await withEnv(async () => {
+    const h = mountWithGate({ delegationPolicy: '' })
+    const agent = h.createAgent('a1')
+    runCommand(h, agent, 'on')
+    // No section registered at all, so nothing can render.
+    assert.equal(h.sections.some((s) => s.name === 'remote-use:policy'), false)
+    // The switch still governs execution.
+    assert.equal(h.guardReason({ name: 'remote_agents', agent }), undefined)
+  })
 })

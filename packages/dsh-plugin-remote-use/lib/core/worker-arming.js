@@ -28,6 +28,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { assertBindable, candidateAddresses } from '../../slave/net-address.mjs'
+import { encodePairing } from '../../slave/pairing.mjs'
 import { probeSandbox } from './sandbox-probe.js'
 
 /** Port used when the operator does not name one. Matches the reference worker's relay. */
@@ -205,7 +206,9 @@ export class WorkerArming {
     this.lastError = ''
     this.#persist()
     this.log.info(`worker role armed on ${bindAddress}:${port}`)
-    return { ok: true, token }
+    // Both forms, ONCE. The caller shows them and keeps neither; every later read of the status
+    // carries only the mask.
+    return { ok: true, token, pairing: this.pairingString() }
   }
 
   /**
@@ -233,6 +236,19 @@ export class WorkerArming {
     this.#persist()
     if (wasArmed) this.log.info(`worker role disarmed (${opts.forget === true ? 'credential discarded' : 'credential kept'})`)
     return { ok: this.lastError === '', wasArmed }
+  }
+
+  /**
+   * The pairing string for the credential in force, or '' when disarmed.
+   *
+   * Returned alongside the token at arm time and never again. The string carries the credential
+   * in recoverable form, so treating it as re-readable would undo decision 3 -- the point of
+   * "shown once" is that the secret is not sitting in a page that can be screenshotted or left
+   * open. Re-issuing is a deliberate act: `disarm({ forget: true })` then `arm()`.
+   */
+  pairingString() {
+    if (!this.armed || this.token === '') return ''
+    return encodePairing({ url: `ws://${this.bindAddress}:${this.port}`, token: this.token })
   }
 
   /** Whether a presented credential is the one in force. */

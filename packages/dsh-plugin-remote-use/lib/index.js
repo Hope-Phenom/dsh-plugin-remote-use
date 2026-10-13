@@ -29,7 +29,13 @@ import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
 import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
 import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
+import { dirname, join } from 'node:path'
+import { networkInterfaces } from 'node:os'
 import { AuditLog } from './core/audit-log.js'
+import { WorkerArming } from './core/worker-arming.js'
+import { RelaySupervisor } from './core/relay-supervisor.js'
+import { probeSandbox } from './core/sandbox-probe.js'
+import { resolveAcpLaunchSpec } from './core/self-acp-spec.js'
 // Decoding lives with the relay that encodes, so the two can never disagree about the format.
 import { decodePairing, deriveWorkerId, describePairing } from '../slave/pairing.mjs'
 import {
@@ -37,6 +43,7 @@ import {
   publicWorker,
   readSettings,
   removeWorker as removeWorkerFromList,
+  resolveDshHome,
   upsertWorker,
   writeSettings,
 } from './core/settings-store.js'
@@ -257,6 +264,39 @@ export function apply(ctx, config) {
   // Refuse anything still waiting when the plugin unloads, rather than leaving the worker
   // blocked until its bridge timeout.
   ctx.effect(() => () => queue.dispose())
+
+  /**
+   * The worker role: this machine accepting remote execution.
+   *
+   * Created here rather than lazily because the page must be able to REPORT the state on first
+   * load. An operator who cannot see whether a listener is open has no way to tell whether they
+   * left one open.
+   *
+   * The supervisor is handed in as `start`/`stop` so the state machine owns the decisions and the
+   * listener owns none -- see `core/worker-arming.js`.
+   */
+  const acpProfile = join(resolveDshHome(), 'profiles', 'acp', 'cordis.patch.yml')
+  const supervisor = new RelaySupervisor({
+    log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
+    launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp' }),
+  })
+  const arming = new WorkerArming({
+    interfaces: () => networkInterfaces(),
+    // The WORKER runs under the acp profile, so that is the profile whose sandbox has to
+    // contain -- not the desktop one the interactive session uses. Checking the wrong file
+    // would pass on a machine whose remote execution is unconfined.
+    probe: () => probeSandbox({ profile: acpProfile }),
+    start: (bindAddress, port, token) => supervisor.start(bindAddress, port, token),
+    stop: () => supervisor.stop(),
+    // Persisted through the same settings path as everything else, so it survives a restart and
+    // appears in the documented precedence order.
+    persist: (state) => { persistSettings({ ...currentSettings(), workerRole: state }) },
+    log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
+    stored: cfg.workerRole,
+  })
+  // Stop the listener on unload WITHOUT persisting: a teardown write would clear the stored
+  // credential and silently invalidate a pairing the operator had already distributed.
+  ctx.effect(() => () => { supervisor.stop() })
 
   // Validate our frozen capability mirror against the live package. A mismatch means
   // DSH changed the contract and our advertisement is no longer honest.
@@ -480,6 +520,9 @@ export function apply(ctx, config) {
       // disk and then read back as `undefined`, so the page shows the default again -- the
       // setting appears to work once and silently revert. Caught by the round-trip test.
       delegationPolicy: cfg.delegationPolicy,
+      // Same rule: `WorkerArming.persist` writes this through `persistSettings`, so omitting it
+      // here would make arming appear to succeed and then vanish on the next read.
+      workerRole: cfg.workerRole,
     }
   }
 
@@ -673,6 +716,9 @@ export function apply(ctx, config) {
       queue,
       audit,
       sessionsEnabled: () => enabledAgents.size,
+      armingStatus: () => arming.status(),
+      armWorker: (request) => arming.arm(request),
+      disarmWorker: (opts) => arming.disarm(opts),
       log,
       currentSettings,
       persistSettings,
@@ -729,6 +775,10 @@ export function normalizeConfig(config) {
     // the operator switching the injection OFF, which must survive. `??` would be wrong here
     // in the other direction; the check is deliberately about the type.
     delegationPolicy: typeof config?.delegationPolicy === 'string' ? config.delegationPolicy : DEFAULT_DELEGATION_POLICY,
+    // The worker role is carried through as an opaque blob rather than normalised field by
+    // field: `WorkerArming` owns its shape and validates it on construction. Rebuilding it here
+    // would be a second place that has to agree about the layout of a credential.
+    workerRole: config?.workerRole !== null && typeof config?.workerRole === 'object' ? config.workerRole : {},
   }
 }
 
@@ -963,6 +1013,10 @@ export function makeSettingsRoute(deps) {
   // How many sessions currently have remote work switched on. Injected rather than imported:
   // the enabled set belongs to `apply()`'s scope, one level up.
   const sessionsEnabled = typeof deps.sessionsEnabled === 'function' ? deps.sessionsEnabled : () => 0
+  // The worker role lives in apply()'s scope; the route reports it and drives it through these.
+  const armingStatus = typeof deps.armingStatus === 'function' ? deps.armingStatus : () => null
+  const armWorker = typeof deps.armWorker === 'function' ? deps.armWorker : () => ({ ok: false, error: 'this build cannot arm the worker role' })
+  const disarmWorker = typeof deps.disarmWorker === 'function' ? deps.disarmWorker : () => ({ ok: false, error: 'this build cannot disarm the worker role' })
   // The route logs sparingly, but pairing is security-relevant and wants a trace. Injected
   // rather than imported, and defaulted so this function stays usable on its own in tests.
   const log = deps.log ?? { info: () => {}, warn: () => {}, error: () => {} }
@@ -996,6 +1050,9 @@ export function makeSettingsRoute(deps) {
       // `/remote-use on`. Passed in as a getter: the enabled set lives in `apply()`, and this
       // function is a different scope.
       sessionsEnabled: sessionsEnabled(),
+      // The worker role as the PAGE sees it. WorkerArming.status() already carries only a
+      // masked credential; nothing here may add the raw one.
+      workerRole: armingStatus(),
       // The page cannot drive the switch itself -- it has no session identity, and the switch
       // is per session -- so it points at the real control instead of faking a toggle.
       enableCommand: `/${ENABLE_COMMAND} on`,
@@ -1213,6 +1270,27 @@ export function makeSettingsRoute(deps) {
             const applied = persistSettings(next)
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
             return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
+          case 'worker.arm': {
+            // Decision 4 is enforced inside `arm()`: if the sandbox does not contain this
+            // machine the call is refused, not warned about.
+            //
+            // The token comes back HERE and only here. It is returned once so the operator can
+            // paste it into a pairing; every later read of the page sees the mask instead.
+            const result = armWorker({ bindAddress: body?.bindAddress, port: body?.port })
+            if (result.ok !== true) {
+              return send(409, { ok: false, error: result.error, blockers: result.blockers ?? [] })
+            }
+            log.info('worker role armed by the page')
+            return send(200, { ok: true, token: result.token, pairing: result.pairing, workerRole: armingStatus() })
+          }
+
+          case 'worker.disarm': {
+            // The local emergency stop. It never contacts a master and never waits on one.
+            const result = disarmWorker({ forget: body?.forget === true })
+            log.info(`worker role disarmed by the page (forget=${body?.forget === true})`)
+            return send(200, { ok: true, workerRole: armingStatus(), error: result?.ok === false ? String(result.error ?? '') : '' })
           }
 
           case 'approvals.decide': {

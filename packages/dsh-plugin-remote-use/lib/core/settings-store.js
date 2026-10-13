@@ -37,6 +37,10 @@ export const MANAGED_KEYS = [
   // once and then reverts.
   'keepShots',
   'delegationPolicy',
+  // The worker role: whether this machine accepts remote execution, on which interface, and
+  // the credential a paired master presents. It holds a secret, so anything that renders it
+  // for the page must go through the mask (see core/worker-arming.js).
+  'workerRole',
 ]
 
 /** Fields of one worker the page may write. */
