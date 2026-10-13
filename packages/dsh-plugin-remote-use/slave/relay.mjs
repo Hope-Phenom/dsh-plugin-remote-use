@@ -246,12 +246,8 @@ async function runSelfCheck(maxAgeMs) {
   }
 
   const run = await new Promise((resolve) => {
-    const isWin = process.platform === 'win32'
-    const ps = isWin
-      ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SELFCHECK_SCRIPT],
-        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-      : spawn('pwsh', ['-NoProfile', '-File', SELFCHECK_SCRIPT],
-        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const ps = spawn(PS_EXE, [...PS_BASE_ARGS, '-File', SELFCHECK_SCRIPT],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
     ps.stdout.on('data', (d) => { out += d.toString('utf8') })
     ps.on('error', (e) => resolve({ error: e.message, out }))
@@ -355,6 +351,49 @@ let capturing
  *
  * @returns {Promise<{path:string,width:number,height:number,bytes:number,displays:string[],capturedAt:string}>}
  */
+/**
+ * The PowerShell to run the helper scripts with, and the arguments that must precede `-File`.
+ *
+ * WHY `pwsh` IS PREFERRED, measured on this machine and not assumed:
+ *
+ * `screenshot.ps1` and `selfcheck.ps1` are launched by this relay, and on Windows they used to be
+ * launched with `powershell.exe` (5.1). That works when the scripts sit on a plain local volume.
+ * It does NOT work when they sit on the F: ReFS volume this project is developed on:
+ *
+ *   powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\...\screenshot.ps1
+ *     -> "The file ... is not digitally signed. You cannot run this script on the current system."
+ *
+ * The SAME file, the SAME arguments, from C:\Temp, runs. And `-ExecutionPolicy Bypass` does not
+ * help -- a WDAC/AppLocker-style rule blocks PowerShell 5.1 by PATH, independently of the
+ * execution policy. `pwsh` (7) is not subject to it and runs the identical script.
+ *
+ * The consequence was worse for the self-check than for the screenshot. The screenshot returned a
+ * loud 500; the self-check returned a FALLBACK REPORT (`{ verdict: 'blocked', checks: [{ id: 'S0',
+ * actual: 'Unexpected end of JSON input' }] }`), which is report-shaped enough that a caller
+ * checking `report.verdict !== undefined` saw a successful self-check. That is how it went unnoticed
+ * for eleven rounds.
+ *
+ * So: prefer `pwsh` when it exists, fall back to `powershell.exe` (which is what a worker without
+ * PowerShell 7 installed has).
+ */
+const PS_EXE = (() => {
+  if (process.platform !== 'win32') return 'pwsh'
+  const pf = process.env.ProgramFiles ?? 'C:\\Program Files'
+  const candidates = [
+    join(pf, 'PowerShell', '7', 'pwsh.exe'),
+    join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'pwsh.exe'),
+  ]
+  for (const c of candidates) {
+    try { if (statSync(c).isFile()) return c } catch { /* not there */ }
+  }
+  return 'pwsh' // on PATH, or it fails loudly rather than silently using the blocked one
+})()
+
+/** `-ExecutionPolicy Bypass` is kept for the 5.1 fallback, where it does help. */
+const PS_BASE_ARGS = process.platform === 'win32'
+  ? ['-NoProfile', '-ExecutionPolicy', 'Bypass']
+  : ['-NoProfile']
+
 async function captureScreenshot() {
   if (capturing !== undefined) return await capturing
   capturing = (async () => {
@@ -378,10 +417,12 @@ async function captureScreenshot() {
       // frame AND can take focus, corrupting exactly the GUI measurements a screenshot
       // exists to support. An earlier capture of this worker had the script's own
       // PowerShell window in it.
-      const args = isWin
-        ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', SCREENSHOT_SCRIPT, '-Out', out]
-        : ['-NoProfile', '-File', SCREENSHOT_SCRIPT, '-Out', out]
-      const ps = spawn(isWin ? 'powershell.exe' : 'pwsh', args, {
+      // `-WindowStyle Hidden` stays: a visible console is captured into the frame AND can take
+      // focus, corrupting the very measurements a screenshot exists to support.
+      const args = process.platform === 'win32'
+        ? [...PS_BASE_ARGS, '-WindowStyle', 'Hidden', '-File', SCREENSHOT_SCRIPT, '-Out', out]
+        : [...PS_BASE_ARGS, '-File', SCREENSHOT_SCRIPT, '-Out', out]
+      const ps = spawn(PS_EXE, args, {
         windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
       })
       let text = ''

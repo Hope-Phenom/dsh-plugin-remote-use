@@ -114,6 +114,27 @@ test('the retention is read when the listener starts, not when the supervisor wa
   }
 })
 
+test('the captures do NOT go inside the plugin', () => {
+  // Without `--shot-dir` the relay defaults to `join(HERE, 'shots')` -- HERE being the relay
+  // script's own directory, i.e. the plugin's installation. On this project's `link:` install that
+  // is the operator's source checkout, which is how it was noticed: a successful capture created
+  // `packages/dsh-plugin-remote-use/slave/shots/` with a 4.4 MB PNG in it.
+  const { supervisor, calls, dir } = makeSupervisor()
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    const args = calls[0].args
+    assert.equal(args.includes('--shot-dir'), true, 'the relay must be told where to write')
+    const shotDir = args[args.indexOf('--shot-dir') + 1]
+    assert.ok(typeof shotDir === 'string' && shotDir.length > 0)
+    // The package directory is the thing that must not be written to.
+    assert.equal(shotDir.includes('dsh-plugin-remote-use\\slave'), false, `captures must not land in the package: ${shotDir}`)
+    assert.equal(/[\\/]node_modules[\\/]/u.test(shotDir), false, `captures must not land in node_modules: ${shotDir}`)
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the relay is told NOT to write a pairing file beside itself', () => {
   // Found by running the supervised listener for real and then looking at the repository: the
   // relay's default is `join(HERE, 'pairing.txt')`, and when the plugin spawns it HERE is the

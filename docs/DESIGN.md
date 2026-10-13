@@ -3108,3 +3108,71 @@ throw new Error('tools.restrict() requires a scoped context (agent.ctx):
 引文逐字相符，所以每会话门禁的形状是**API 强制**的，不是随意选择。
 
 （顺带记下：`...\app.asar\dsh\` **不是可 grep 的真实目录**，解包产物在 `.research/asar/`。）
+
+#### 第 16 轮：第一次真正截图，抓到两个缺陷（其中一个是**静默**的）
+
+动机：第 15 轮的教训是"验收必须运行"。部署脚本验证了中继**能起**，但**截图捕获在这台机器上从没跑过**
+（第 9 轮只验证了未授权时返回 401）。而主机现在能当从机，所以这半条路径必须验。
+
+##### 缺陷 1：`powershell.exe`（5.1）在这台机器的 `F:` 上**被策略禁止运行脚本**
+
+```
+/screenshot failed: capture produced no image (exit 1)
+  The file ...\screenshot.ps1 is not digitally signed.
+```
+
+对照实验（**同一文件内容、同一命令行**）：
+
+| 解释器 | `F:` (ReFS) | `C:` (NTFS) |
+|---|---|---|
+| `pwsh` 7 | **能跑** | 能跑 |
+| `powershell.exe` 5.1 | **被拒** | 能跑 |
+
+**`-ExecutionPolicy Bypass` 无效** —— 这是 WDAC/AppLocker 类规则，**按路径**拦 PowerShell 5.1，
+独立于执行策略。`pwsh` 不受影响。
+
+**而自检的后果比截图严重得多**：截图返回响亮的 500；**自检返回的是一份"看起来像报告"的兜底对象**
+
+```json
+{ "verdict": "blocked", "checks": [{ "id": "S0", "actual": "Unexpected end of JSON input" }] }
+```
+
+调用方只要检查 `report.verdict !== undefined` 就会**认为自检成功**。第 9 轮起我一直在看这行输出，
+**看了七轮都没看出它是失败**。
+
+**修法**：`relay.mjs` 现在优先用 `pwsh`（存在时），回退到 `powershell.exe`。
+
+##### 缺陷 2：截图写进了**插件自己的安装目录**
+
+```
+插件目录 slave\shots : True     <- 不该
+     shot-1791873338626-1.png  4.43 MB
+```
+
+`RelaySupervisor` 不传 `--shot-dir`，relay 于是用 `join(HERE,'shots')` —— `HERE` 是脚本自己的目录，
+也就是**插件安装目录**。在 `link:` 安装下就是操作者的源码检出。
+
+与之前修掉的 `pairing.txt` **同一缺陷**，用**同一方法**发现（真跑一次、看目录树），
+区别只是**截图路径此前从未被执行过**。
+
+**修法**：supervisor 传 `--shot-dir` 指向 `%TEMP%\dsh-plugin-remote-use\shots`。
+
+##### 验证
+
+```
+HTTP 200   3640x2068   4.33 MB   displays=2   1541 ms
+  插件目录 slave\shots : False   <- 必须
+  临时目录 shots       : True    <- 必须
+```
+
+几何与主机真实布局一致（虚拟屏 3640×2068 = 2048×1152 + 1080×1920）。
+
+新增测试断言 `--shot-dir` 存在且**不指向包内**；变异检验：删掉该参数 → 测试失败 ✓
+
+##### 我这轮又犯了同一个测量错误（第三次）
+
+第一遍我用 `pwsh -File screenshot.ps1 | Select-Object -First 4` 检查产物，报告"产出: 无"，
+于是以为截图失败了。实际脚本写了 `RESULT: OK` 和 4841115 字节 ——
+**`Select-Object -First` 会提前终止管道并杀掉上游进程**。
+
+> 三次了：**我用一个近似代替了那个真正会给出答案的东西，而近似总是给出我想要的答案。**

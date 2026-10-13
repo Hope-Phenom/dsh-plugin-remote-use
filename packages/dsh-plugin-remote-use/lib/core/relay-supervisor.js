@@ -47,6 +47,10 @@ export class RelaySupervisor {
     // How many captures the worker keeps. Read at start time rather than captured once, so a
     // change on the settings page applies to the next arming instead of the next DSH restart.
     this.keepShots = deps.keepShots ?? (() => 20)
+    // A per-installation directory under the OS temp root, NOT the package. A capture is a
+    // transient full-resolution PNG that is pruned on a budget, so temp is where it belongs;
+    // what matters is that it is outside the plugin.
+    this.shotDir = deps.shotDir ?? join(tmpdir(), 'dsh-plugin-remote-use', 'shots')
     this.specFile = ''
     const log = deps.log ?? {}
     this.log = { info: log.info ?? (() => {}), warn: log.warn ?? (() => {}), error: log.error ?? (() => {}) }
@@ -117,6 +121,13 @@ export class RelaySupervisor {
       // every one of them, and the page's setting would only govern the HOST side -- the
       // larger of the two accumulations would be the one the operator could not control.
       '--keep-shots', String(this.keepShots()),
+      // Where the captures go. WITHOUT THIS the relay uses `join(HERE, 'shots')` -- HERE being the
+      // relay script's own directory, i.e. the plugin's INSTALLATION. On a `link:` install that is
+      // the operator's source checkout, and on a real install it is a directory the plugin has no
+      // business growing. Same defect as the `--pairing-file` one above, found the same way -- by
+      // running the supervised listener and looking at the tree -- because the capture path had
+      // never actually been exercised on this machine until it was.
+      '--shot-dir', this.shotDir,
     ]
 
     const child = this.spawn(process.execPath, args, {
