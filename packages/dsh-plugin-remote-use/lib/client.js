@@ -177,7 +177,17 @@ window.__ModuleLoader__.load({
       fieldIdHint: '插件内部使用，也是 profile 补丁里的键；保存后不建议再改。',
       fieldName: '显示名称',
       fieldUrl: '中继地址',
-      fieldUrlHint: '从机中继的 WebSocket 地址，例如 ws://192.168.1.101:7331。',
+      // Recommends a HOSTNAME, not an IP.
+      //
+      // It used to show `ws://192.168.1.101:7331` -- one particular machine's address, from DHCP.
+      // An operator following that hint writes an address that rots the next time the worker
+      // reboots and gets a different lease, and the symptom is "the worker is unreachable", which
+      // looks exactly like the worker being powered off. A name survives that, as long as the
+      // master can resolve it (measured: this works end to end over LLMNR).
+      //
+      // Note the asymmetry with the pairing string, which always carries an IP because the relay
+      // advertises its own address -- a pasted pairing string does NOT survive the worker moving.
+      fieldUrlHint: '从机中继的 WebSocket 地址。建议用主机名（例如 ws://worker-pc:7331），这样从机换 IP 后仍然可用；用 IP 的话每次换地址都要改。',
       fieldToken: '访问令牌',
       fieldTokenHint: '留空表示保持原令牌不变。令牌只写入主机，不会回传到本页面。',
       fieldTokenNew: '访问令牌（必填）',
@@ -344,7 +354,7 @@ window.__ModuleLoader__.load({
       fieldIdHint: 'Used internally and as the profile-patch key; best left alone once saved.',
       fieldName: 'Display name',
       fieldUrl: 'Relay address',
-      fieldUrlHint: 'The worker relay\u2019s WebSocket address, e.g. ws://192.168.1.101:7331.',
+      fieldUrlHint: 'The worker relay\u2019s WebSocket address. Prefer a HOSTNAME (e.g. ws://worker-pc:7331): it survives the worker getting a new IP from DHCP, whereas an address literal has to be edited every time the lease changes.',
       fieldToken: 'Access token',
       fieldTokenHint: 'Leave blank to keep the stored token. It is written on the host only and never returned to this page.',
       fieldTokenNew: 'Access token (required)',
