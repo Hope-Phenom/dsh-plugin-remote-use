@@ -116,8 +116,15 @@ function pairingString() {
   })
 }
 
-/** Where the pairing string is left for an operator who cannot read this process's console. */
-const PAIRING_FILE = join(HERE, 'pairing.txt')
+/**
+ * Where the pairing string is left for an operator who cannot read this process's console.
+ *
+ * `--pairing-file ''` disables it. That matters when the relay is spawned by the plugin rather
+ * than run by hand: `HERE` is then the plugin's own `slave/` directory, and writing there means
+ * an installed plugin modifies its own installation -- which on a `link:` install is the
+ * operator's source checkout. Found by running the supervised listener and looking at the repo.
+ */
+const PAIRING_FILE = arg('pairing-file', join(HERE, 'pairing.txt'))
 
 /**
  * `--print-pairing`: print the pairing string and exit.
@@ -619,8 +626,14 @@ server.listen(PORT, HOST, () => {
   // Leave the pairing string where an operator can find it. It is written on every start so it
   // cannot go stale against a rotated token -- a pairing string with the OLD token fails with
   // an authentication error that looks like a network problem.
-  const pairing = pairingString()
-  if (pairing === '') {
+  //
+  // `--pairing-file ''` skips this entirely, which is what the plugin does: it spawns this relay
+  // from inside the plugin's own directory, and a relay that wrote next to itself would have an
+  // installed plugin modifying its installation.
+  const pairing = PAIRING_FILE === '' ? '' : pairingString()
+  if (PAIRING_FILE === '') {
+    // Nothing to do, and deliberately not logged as a problem.
+  } else if (pairing === '') {
     log('no pairing string: this relay has no token, so a pairing string would pair a master with an unauthenticated worker')
   } else {
     try {
