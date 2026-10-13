@@ -91,6 +91,14 @@ window.__ModuleLoader__.load({
       shotDone: '截图已保存：{p}',
       busy: '处理中…',
       screenshotHint: '截图保存在主机临时目录，可在会话中引用该路径。',
+      fieldSessions: '本机会话状态',
+      fieldKeepShots: '每个工作节点保留的截图数',
+      fieldKeepShotsHint: '保留最新的若干张。全分辨率截图约 9.5 MB，这一项决定了长时间 GUI 验证会占用多少磁盘。填负数表示全部保留。',
+      fieldPolicy: '委派策略文案',
+      fieldPolicyHint: '在会话启用远程工作期间注入，用来告诉模型何时该把工作交给工作节点。清空表示不注入；无论哪种情况工具仍然受开关约束。',
+      sessionsOn: '当前有 {n} 个会话启用了远程工作',
+      sessionsNone: '当前没有会话启用远程工作',
+      switchHint: '按会话生效且不持久化：在需要使用工作节点的会话里输入 {cmd}。',
       // --- approvals ---
       groupApprovals: '等待你批准的请求',
       approvalsNone: '当前没有等待批准的请求。',
@@ -217,6 +225,14 @@ window.__ModuleLoader__.load({
       shotDone: 'Screenshot saved: {p}',
       busy: 'Working\u2026',
       screenshotHint: 'Screenshots land in the host temp directory; reference that path from the session.',
+      fieldSessions: 'Local sessions',
+      fieldKeepShots: 'Screenshots kept per worker',
+      fieldKeepShotsHint: 'Newest first. A full-resolution capture is roughly 9.5 MB, so this bounds what a long GUI run costs on disk. Negative keeps everything.',
+      fieldPolicy: 'Delegation policy',
+      fieldPolicyHint: 'Injected while a session has remote work switched on. It is what tells the model when to hand work to a worker. Clear it to inject nothing; the tools stay gated either way.',
+      sessionsOn: '{n} session(s) have remote work on',
+      sessionsNone: 'No session has remote work on right now',
+      switchHint: 'Per session, and not persisted: type {cmd} in the session that should use a worker.',
       // --- approvals ---
       groupApprovals: 'Approvals waiting on you',
       approvalsNone: 'Nothing is waiting for approval.',
@@ -345,6 +361,7 @@ window.__ModuleLoader__.load({
       '.ru-inline{flex-direction:row;align-items:center;gap:7px}',
       '.ru-input{font:inherit;font-size:12px;padding:5px 8px;border-radius:var(--dsw-radius-sm);border:0.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);width:100%}',
       '.ru-input:disabled{opacity:.6}',
+      '.ru-textarea{font-family:ui-monospace,Consolas,monospace;line-height:1.5;resize:vertical}',
       '.ru-input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color);outline-offset:1px}',
       '.ru-source{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6;word-break:break-all}',
     ].join('')
@@ -597,6 +614,8 @@ window.__ModuleLoader__.load({
         requiredTier: settings.requiredTier ?? 'workspace-write',
         approvalTimeoutMs: settings.approvalTimeoutMs ?? 90000,
         heartbeatMs: settings.heartbeatMs ?? 15000,
+        keepShots: settings.keepShots ?? 20,
+        delegationPolicy: settings.delegationPolicy ?? '',
       })
       const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.value }))
       const number = (key, labelKey, hintKey, min) => h('label', { className: 'ru-field' },
@@ -615,6 +634,19 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ru-field-hint' }, t('fieldTierHint'))),
         number('approvalTimeoutMs', 'fieldApprovalTimeout', 'fieldApprovalTimeoutHint', 1000),
         number('heartbeatMs', 'fieldHeartbeat', 'fieldHeartbeatHint', 0),
+        // A screenshot is a full-resolution PNG (~9.5 MB measured), so this is the difference
+        // between a session-long GUI run costing hundreds of megabytes and costing a bounded
+        // amount. Negative disables pruning, for an operator who archives them elsewhere.
+        number('keepShots', 'fieldKeepShots', 'fieldKeepShotsHint', -1),
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldPolicy')),
+          h('textarea', {
+            className: 'ru-input ru-textarea',
+            rows: '7',
+            value: form.delegationPolicy,
+            onChange: set('delegationPolicy'),
+          }),
+          h('span', { className: 'ru-field-hint' }, t('fieldPolicyHint'))),
         h('div', { className: 'ru-actions', style: { marginTop: '8px' } },
           h('button', {
             type: 'button', className: 'ru-btn', disabled: busy !== '',
@@ -622,6 +654,10 @@ window.__ModuleLoader__.load({
               requiredTier: form.requiredTier,
               approvalTimeoutMs: Number(form.approvalTimeoutMs) || 90000,
               heartbeatMs: Number(form.heartbeatMs) || 0,
+              keepShots: Number.isFinite(Number(form.keepShots)) ? Number(form.keepShots) : 20,
+              // An empty string is a real choice -- it switches the injected prompt off while
+              // leaving the tools gated -- so it is sent as-is rather than coerced.
+              delegationPolicy: String(form.delegationPolicy),
             }),
           }, busy === 'policy' ? t('busy') : t('btnSave'))),
       )
@@ -862,7 +898,22 @@ window.__ModuleLoader__.load({
           h('h3', { className: 'ru-group-title' }, t('groupRole')),
           h('div', { className: 'ru-role' },
             h('span', { className: 'ru-badge ok' }, t('roleMaster')),
-            h('span', { className: 'ru-note' }, t('roleNote')))),
+            h('span', { className: 'ru-note' }, t('roleNote'))),
+          // The switch itself is per session, and this page has no session identity -- so it
+          // reports the state and names the real control rather than offering a toggle it
+          // could not actually drive.
+          snapshot === null
+            ? null
+            : h('div', { className: 'ru-kv', style: { marginTop: '6px' } },
+              h('span', { className: 'ru-k' }, t('fieldSessions')),
+              h('span', { className: 'ru-v' },
+                Number(snapshot?.settings?.sessionsEnabled ?? 0) > 0
+                  ? fmt(t('sessionsOn'), { n: Number(snapshot.settings.sessionsEnabled) })
+                  : t('sessionsNone'))),
+          snapshot === null
+            ? null
+            : h('p', { className: 'ru-note dim' },
+              fmt(t('switchHint'), { cmd: String(snapshot?.settings?.enableCommand ?? '/remote-use on') }))),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupWorkers')),

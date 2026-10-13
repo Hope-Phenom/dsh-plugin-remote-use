@@ -164,6 +164,14 @@ export const Config = Schema !== null
     /** How long the page's explicit "re-check now" may spend. */
     selfcheckBudgetMs: Schema.number().default(25000),
     /**
+     * How many screenshots to keep on disk PER WORKER, newest first.
+     *
+     * A worker screenshot is a full-resolution PNG -- ~9.5 MB measured on the reference
+     * worker -- and every capture used to be kept forever. Set 0 to keep none, or a negative
+     * number to disable pruning entirely (for an operator who archives them elsewhere).
+     */
+    keepShots: Schema.number().default(20),
+    /**
      * The division-of-labour policy injected while a session has remote work switched on.
      * Empty string disables the injection entirely (the tools are still gated).
      */
@@ -181,6 +189,7 @@ export const Config = Schema !== null
     heartbeatMs: 15_000,
     reportBudgetMs: 4_000,
     selfcheckBudgetMs: 25_000,
+    keepShots: 20,
     delegationPolicy: DEFAULT_DELEGATION_POLICY,
     _defaults: WORKER_DEFAULTS,
   }
@@ -290,6 +299,7 @@ export function apply(ctx, config) {
       // Probe the link periodically so a relay restart is noticed between calls instead of
       // failing the next one. 0 disables probing.
       heartbeatMs: cfg.heartbeatMs,
+      keepShots: cfg.keepShots,
       createBridge: () => new AcpBridge({
         url: worker.url,
         token: worker.token,
@@ -463,12 +473,23 @@ export function apply(ctx, config) {
       requiredTier: cfg.requiredTier,
       approvalTimeoutMs: cfg.approvalTimeoutMs,
       heartbeatMs: cfg.heartbeatMs,
+      keepShots: cfg.keepShots,
+      // MUST be listed here. A key the route can SAVE but this function omits is written to
+      // disk and then read back as `undefined`, so the page shows the default again -- the
+      // setting appears to work once and silently revert. Caught by the round-trip test.
+      delegationPolicy: cfg.delegationPolicy,
     }
   }
 
-  /** The policy fields a running approval decider captured at construction. */
+  /**
+   * The policy fields a running worker captured at construction.
+   *
+   * A change to any of these needs a REBUILD rather than a mutation: `PeerConnection` reads
+   * `heartbeatMs` and `keepShots` once, and the approval decider captures the tier policy once.
+   * Omitting one here means the page accepts the edit and nothing happens until a restart.
+   */
   function policyStamp(settings) {
-    return `${settings.requiredTier}|${settings.approvalTimeoutMs}|${settings.heartbeatMs}`
+    return `${settings.requiredTier}|${settings.approvalTimeoutMs}|${settings.heartbeatMs}|${settings.keepShots}`
   }
 
   /**
@@ -649,6 +670,7 @@ export function apply(ctx, config) {
       // worker and a trail that restarted per worker would not be a trail.
       queue,
       audit,
+      sessionsEnabled: () => enabledAgents.size,
       currentSettings,
       persistSettings,
       settingsPath: stored.file,
@@ -697,6 +719,9 @@ export function normalizeConfig(config) {
     heartbeatMs: Number.isFinite(config?.heartbeatMs) ? Math.max(0, Number(config.heartbeatMs)) : 15_000,
     reportBudgetMs: Number.isFinite(config?.reportBudgetMs) ? Math.max(1, Number(config.reportBudgetMs)) : 4_000,
     selfcheckBudgetMs: Number.isFinite(config?.selfcheckBudgetMs) ? Math.max(1, Number(config.selfcheckBudgetMs)) : 25_000,
+    // NOT clamped at 0: a negative value is the documented way to disable pruning, and each
+    // capture may free tens of megabytes.
+    keepShots: Number.isFinite(config?.keepShots) ? Number(config.keepShots) : 20,
     // `undefined` means "not configured" and takes the default; an explicit empty string is
     // the operator switching the injection OFF, which must survive. `??` would be wrong here
     // in the other direction; the check is deliberately about the type.
@@ -932,6 +957,9 @@ function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
  */
 export function makeSettingsRoute(deps) {
   const { peers, registry, cache, queue, audit } = deps
+  // How many sessions currently have remote work switched on. Injected rather than imported:
+  // the enabled set belongs to `apply()`'s scope, one level up.
+  const sessionsEnabled = typeof deps.sessionsEnabled === 'function' ? deps.sessionsEnabled : () => 0
   const currentSettings = deps.currentSettings ?? (() => ({ workers: [] }))
   const persistSettings = deps.persistSettings ?? (() => ({ ok: false, error: 'this build cannot persist settings' }))
   const settingsFile = deps.settingsPath ?? ''
@@ -951,6 +979,20 @@ export function makeSettingsRoute(deps) {
       requiredTier: settings.requiredTier,
       approvalTimeoutMs: settings.approvalTimeoutMs,
       heartbeatMs: settings.heartbeatMs,
+      keepShots: settings.keepShots,
+      // The delegation policy is editable from the page because getting the wording right is
+      // an operator judgement rather than a code change: it is the text that tells the model
+      // when to hand work to a worker at all. An empty string is a MEANINGFUL value (inject
+      // nothing) and must survive the round trip.
+      delegationPolicy: typeof settings.delegationPolicy === 'string' ? settings.delegationPolicy : DEFAULT_DELEGATION_POLICY,
+      // Per session and not persisted, so the page can say how many sessions currently have
+      // remote work switched on instead of leaving the operator to remember where they typed
+      // `/remote-use on`. Passed in as a getter: the enabled set lives in `apply()`, and this
+      // function is a different scope.
+      sessionsEnabled: sessionsEnabled(),
+      // The page cannot drive the switch itself -- it has no session identity, and the switch
+      // is per session -- so it points at the real control instead of faking a toggle.
+      enableCommand: `/${ENABLE_COMMAND} on`,
     }
   }
 
@@ -1123,6 +1165,10 @@ export function makeSettingsRoute(deps) {
             if (incoming.requiredTier !== undefined) next.requiredTier = String(incoming.requiredTier)
             if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
             if (Number.isFinite(incoming.heartbeatMs)) next.heartbeatMs = Number(incoming.heartbeatMs)
+            if (Number.isFinite(incoming.keepShots)) next.keepShots = Number(incoming.keepShots)
+            // An empty string is a real choice here: it switches the prompt injection off while
+            // leaving the tools gated. `??` would drop it, so the check is about the type.
+            if (typeof incoming.delegationPolicy === 'string') next.delegationPolicy = incoming.delegationPolicy
             const applied = persistSettings(next)
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
             return send(200, { ok: true, applied, settings: publicSettings() })

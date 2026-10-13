@@ -27,7 +27,17 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
 /** Keys the settings page owns and may write. Anything else in the file is ignored. */
-export const MANAGED_KEYS = ['workers', 'approvalTimeoutMs', 'requiredTier', 'heartbeatMs']
+export const MANAGED_KEYS = [
+  'workers',
+  'approvalTimeoutMs',
+  'requiredTier',
+  'heartbeatMs',
+  // Added along with the page controls for them. A key the page can SAVE but that is not
+  // managed here would be dropped on the next read -- the quiet way a setting seems to work
+  // once and then reverts.
+  'keepShots',
+  'delegationPolicy',
+]
 
 /** Fields of one worker the page may write. */
 export const WORKER_KEYS = ['id', 'name', 'url', 'token', 'cwd', 'enabled', 'serialQueue']

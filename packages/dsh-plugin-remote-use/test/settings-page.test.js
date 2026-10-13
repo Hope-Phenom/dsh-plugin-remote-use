@@ -216,6 +216,62 @@ test('a snapshot with no approval fields at all still renders (older host)', () 
   assert.match(textOf(tree).join(' '), /APPROVALS-UNAVAILABLE/)
 })
 
+test('the advanced block exposes the delegation policy and the screenshot budget', () => {
+  // Both are operator judgements rather than code changes: the policy text is what tells the
+  // model when to delegate at all, and the screenshot budget decides what a long GUI run costs
+  // on disk (a full-resolution capture measured ~9.5 MB).
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: {
+      workers: [],
+      requiredTier: 'workspace-write',
+      approvalTimeoutMs: 90_000,
+      heartbeatMs: 15_000,
+      keepShots: 7,
+      delegationPolicy: 'POLICY-BODY',
+      sessionsEnabled: 0,
+      enableCommand: '/remote-use on',
+    },
+  })
+
+  const areas = []
+  const inputs = []
+  const walk = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (node.type === 'textarea') areas.push(node)
+    if (node.type === 'input') inputs.push(node)
+    if (Array.isArray(node.children)) node.children.forEach(walk)
+  }
+  walk(tree)
+
+  assert.equal(areas.length, 1, 'exactly one textarea: the policy editor')
+  assert.equal(areas[0].props.value, 'POLICY-BODY', 'it must start from the stored policy')
+  assert.equal(typeof areas[0].props.onChange, 'function')
+  // The screenshot budget is a number input seeded from the settings, not from a default.
+  const numeric = inputs.filter((n) => n.props.type === 'number').map((n) => String(n.props.value))
+  assert.ok(numeric.includes('7'), `keepShots must be seeded, got ${numeric.join(',')}`)
+  assert.ok(numeric.includes('90000'), 'approvalTimeoutMs must still be seeded')
+})
+
+test('the role block reports the per-session switch and names the real control', () => {
+  // The page has no session identity, so it cannot offer a working toggle. Showing the state
+  // and the command is the honest version of this control.
+  const off = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: { workers: [], sessionsEnabled: 0, enableCommand: '/remote-use on' },
+  })
+  const offText = textOf(off.tree).join(' ')
+  assert.match(offText, /SESSIONS-NONE/)
+  assert.match(offText, /\/remote-use on/, 'the page must name the control that actually works')
+
+  const on = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: { workers: [], sessionsEnabled: 3, enableCommand: '/remote-use on' },
+  })
+  assert.match(textOf(on.tree).join(' '), /SESSIONS-ON-3/)
+})
+
 test('the icon is the stroke-only style of the existing set, and self-contained', () => {
   const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
   // Inlined as a data URL, so an external reference could never resolve.
@@ -451,6 +507,8 @@ function makeTranslator() {
       fieldCwd: 'F-CWD', fieldEnabled: 'F-ENABLED',
       btnAllow: 'BTN-ALLOW', btnDeny: 'BTN-DENY',
       approvalsBudget: 'BUDGET-{s}', auditNote: 'AUDIT-AT-{p}',
+      fieldKeepShots: 'F-KEEPSHOTS', fieldPolicy: 'F-POLICY', fieldSessions: 'F-SESSIONS',
+      sessionsOn: 'SESSIONS-ON-{n}', sessionsNone: 'SESSIONS-NONE', switchHint: 'SWITCH {cmd}',
       approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
       auditNone: 'AUDIT-NONE',
       auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',

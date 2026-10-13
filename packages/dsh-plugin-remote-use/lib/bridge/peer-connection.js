@@ -26,6 +26,7 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { DEFAULT_KEEP_SHOTS, pruneShots } from '../core/shot-gc.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -85,6 +86,8 @@ export class PeerConnection {
     this.httpBase = opts.httpBase ?? ''
     this.token = opts.token ?? ''
     this.shotDir = opts.shotDir ?? defaultShotDir()
+    /** How many of this worker's screenshots to keep on disk. See core/shot-gc.js. */
+    this.keepShots = Number.isFinite(opts.keepShots) ? Number(opts.keepShots) : DEFAULT_KEEP_SHOTS
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
     this.heartbeatMs = Number.isFinite(opts.heartbeatMs) ? Math.max(0, Number(opts.heartbeatMs)) : DEFAULT_HEARTBEAT_MS
     this.heartbeatTimeoutMs = Number.isFinite(opts.heartbeatTimeoutMs)
@@ -272,6 +275,12 @@ export class PeerConnection {
     const localPath = join(this.shotDir, `${this.peerId}-${stamp}.png`)
     writeFileSync(localPath, buf)
 
+    // Housekeeping. A worker screenshot is a full-resolution PNG (~9.5 MB measured), so an
+    // afternoon of GUI verification fills a disk. This runs AFTER the file is safely written
+    // and never throws: failing to delete an older capture must not fail this one. The outcome
+    // is reported so the page can show that space was reclaimed.
+    const pruned = pruneShots(this.shotDir, this.peerId, this.keepShots)
+
     const num = (name) => {
       const v = Number(res.headers.get(name))
       return Number.isFinite(v) ? v : 0
@@ -284,6 +293,9 @@ export class PeerConnection {
       displays: num('x-shot-displays'),
       capturedAt: res.headers.get('x-shot-captured-at') ?? '',
       elapsedMs: num('x-shot-ms'),
+      // Reported rather than silent: an operator who wonders where the disk went should be
+      // able to see that the plugin is reclaiming its own files, and how many it kept.
+      pruned,
     }
   }
 

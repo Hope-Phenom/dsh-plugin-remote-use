@@ -429,6 +429,74 @@ test('a new worker without a token is refused rather than silently broken', asyn
   })
 })
 
+// ---------------------------------------------------------------------------
+// keeping shots, and the delegation policy the page can now edit
+// ---------------------------------------------------------------------------
+
+test('the page can read and write keepShots', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const before = await get(h.routes[0])
+    assert.equal(typeof before.body.settings.keepShots, 'number')
+
+    const saved = await post(h.routes[0], 'settings.save', { settings: { keepShots: 3 } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.keepShots, 3)
+
+    // It must survive the round trip through the settings file, which is the only reason to
+    // have a page control at all. A key the page can save but the store drops would look like
+    // it worked once and then reverted.
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.keepShots, 3)
+  })
+})
+
+test('keepShots may be NEGATIVE, which is how an operator disables pruning', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { keepShots: -1 } })
+    assert.equal(saved.body.settings.keepShots, -1)
+  })
+})
+
+test('the delegation policy round-trips, and an EMPTY one survives', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    // A default is present without any configuration.
+    const before = await get(h.routes[0])
+    assert.ok(String(before.body.settings.delegationPolicy).length > 0)
+
+    // An empty string means "inject nothing" -- a real choice, and the one a `??` or `||`
+    // check would silently replace with the default.
+    const cleared = await post(h.routes[0], 'settings.save', { settings: { delegationPolicy: '' } })
+    assert.equal(cleared.body.ok, true)
+    assert.equal(cleared.body.settings.delegationPolicy, '')
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.delegationPolicy, '', 'the cleared policy must persist')
+
+    // And a custom one comes back verbatim.
+    const custom = await post(h.routes[0], 'settings.save', { settings: { delegationPolicy: 'CUSTOM POLICY TEXT' } })
+    assert.equal(custom.body.settings.delegationPolicy, 'CUSTOM POLICY TEXT')
+  })
+})
+
+test('the page is told how many sessions have remote work on, and by which command', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const before = await get(h.routes[0])
+    assert.equal(before.body.settings.sessionsEnabled, 0, 'the default is OFF, per session')
+    assert.match(String(before.body.settings.enableCommand), /^\/remote-use on$/)
+
+    // The count lives in apply()'s scope while the route is a separate function, so it has to
+    // be injected as a getter -- reading it directly threw a ReferenceError that the route
+    // turned into a 502 on every page load.
+    runCommand(h, h.createAgent('a1'), 'on')
+
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.sessionsEnabled, 1)
+  })
+})
+
 test('removing an unknown worker is a 404, not a silent success', async () => {
   await withEnv(async () => {
     const { ctx, routes } = makeContext()

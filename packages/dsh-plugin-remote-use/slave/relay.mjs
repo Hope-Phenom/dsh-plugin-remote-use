@@ -24,6 +24,7 @@
  *   node relay.mjs --port 7331 --token <secret> --cmd-file <agent-spec.json>
  *                  [--selfcheck-script selfcheck.ps1] [--selfcheck-cache-ms 30000]
  *                  [--screenshot-script screenshot.ps1] [--shot-dir <dir>]
+ *                  [--keep-shots <n>]
  *                  [--allow-no-auth] [--verbose]
  */
 import { spawn } from 'node:child_process'
@@ -33,6 +34,8 @@ import { dirname, join } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
+// Sibling file, not a package: it ships next to this one so a worker needs no install step.
+import { RELAY_SHOT_PATTERN, pruneShots } from './prune-shots.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -57,6 +60,16 @@ const SCREENSHOT_SCRIPT = arg('screenshot-script', join(HERE, 'screenshot.ps1'))
 const SHOT_DIR = arg('shot-dir', join(HERE, 'shots'))
 /** The capture script writes its geometry report here; it sits next to the script. */
 const SCREENSHOT_REPORT = join(dirname(SCREENSHOT_SCRIPT), 'screenshot-report.txt')
+/**
+ * How many captures to keep on the worker, newest first.
+ *
+ * WHY THE WORKER PRUNES ITS OWN: a capture is a full-resolution PNG (measured ~9.5 MB on the
+ * reference worker), and this directory had reached 56.9 MB across six captures before anyone
+ * looked. The host keeps its own copies too and could try to delete these over HTTP, but a
+ * worker that cleans up after itself needs no new protocol surface and keeps working when the
+ * host is the thing that went away. A negative value disables pruning.
+ */
+const KEEP_SHOTS = Number(arg('keep-shots', '20'))
 
 /** Plugin RPC namespace. Anything here is handled locally, never forwarded to ACP. */
 const PLUGIN_PREFIX = 'dsh-remote/'
@@ -268,6 +281,14 @@ async function captureScreenshot() {
       throw new Error(`screenshot script not found at ${SCREENSHOT_SCRIPT}; pass --screenshot-script`)
     }
     try { mkdirSync(SHOT_DIR, { recursive: true }) } catch { /* exists */ }
+
+    // Prune BEFORE capturing, not after. `GET /screenshot?fresh=1` captures and then reads the
+    // file straight away, so a prune running afterwards could delete the very image the host
+    // is about to download whenever the budget is 0. Trimming first makes that impossible: the
+    // new file does not exist yet. The directory therefore holds up to KEEP_SHOTS + 1 files
+    // between a capture and the next one, which is the price of never racing the download.
+    const pruned = pruneOldShots()
+
     const out = join(SHOT_DIR, `shot-${Date.now()}-${++shotSeq}.png`)
 
     const run = await new Promise((resolve) => {
@@ -311,9 +332,24 @@ async function captureScreenshot() {
       bytes: stat.size,
       displays,
       capturedAt: new Date().toISOString(),
+      pruned,
     }
   })().finally(() => { capturing = undefined })
   return await capturing
+}
+
+/**
+ * Delete all but the newest `KEEP_SHOTS` captures this relay wrote.
+ *
+ * The rules live in `prune-shots.mjs`, which exists as its own file so they can be tested:
+ * this relay is a long-lived script with no harness of its own. The `--shot-dir` is
+ * configurable, so being explicit about which filenames may be deleted is what keeps a
+ * mistyped path from becoming data loss.
+ *
+ * @returns {{removed: number, kept: number, freedBytes: number}}
+ */
+function pruneOldShots() {
+  return pruneShots(SHOT_DIR, KEEP_SHOTS, RELAY_SHOT_PATTERN)
 }
 
 // ---------------------------------------------------------------------------
