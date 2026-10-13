@@ -6,6 +6,14 @@
 # Output goes NEXT TO THIS SCRIPT ($PSScriptRoot), not to a fixed absolute path: the
 # relay reads the JSON from the script's own directory, so keeping them colocated makes
 # the pair relocatable and removes a silent mismatch when either is moved.
+#
+# `param()` must be the FIRST statement after the comments: PowerShell rejects it after any
+# assignment, and PS 5.1 reports that as a confusing "invalid assignment operator" further down.
+param(
+  # The GUI application under test, for S18. Empty means "this worker does not verify a specific
+  # app", which is reported as unconfigured rather than missing.
+  [string]$App = ''
+)
 $ErrorActionPreference = 'Continue'
 if ([string]::IsNullOrEmpty($PSScriptRoot)) { $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $outFile = Join-Path $PSScriptRoot 'selfcheck.json'
@@ -192,8 +200,25 @@ Add-Check 'S16' 'free disk space' 'warning' $(if ($freeGB -ge 50) { 'pass' } els
 $gpu = (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name + ' ' + $_.DriverVersion }) -join ' ; '
 Add-Check 'S17' 'GPU model/driver (reported)' 'info' 'pass' 'n/a' $gpu '-'
 # S18 target app present
-$app = 'C:\dsh-remote\avalonia-demo\avalonia-demo\bin\Debug\net10.0\avalonia-demo.exe'
-Add-Check 'S18' 'target app present' 'warning' $(if (Test-Path $app) { 'pass' } else { 'warn' }) 'exists' $(if (Test-Path $app) { 'present' } else { 'missing' }) 'sync the app build output'
+#
+# The path is CONFIGURABLE, and the check says which path it looked at.
+#
+# It used to be hardcoded to the reference worker's build output
+# ('C:\dsh-remote\avalonia-demo\...\avalonia-demo.exe'), so on every other machine it reported
+# 'missing' -- the same defect class as S14/S15: a check that names a specific machine's layout
+# and then reports the absence of that layout as a fault of the machine under test. It is a
+# `warning` rather than `blocking`, so the verdict was unaffected, but a report that warns about
+# something that is not wrong teaches the operator to stop reading the warnings.
+#
+# Unconfigured is not the same as missing, so it is reported as such. Pass -App <path>, or set
+# DSH_SELFCHECK_APP, to check for a specific application.
+$app = if (-not [string]::IsNullOrEmpty($App)) { $App } else { [string]$env:DSH_SELFCHECK_APP }
+if ([string]::IsNullOrEmpty($app)) {
+  Add-Check 'S18' 'target app present' 'warning' 'warn' 'configured app exists' 'not configured (pass -App or set DSH_SELFCHECK_APP)' 'set the app under test if this worker verifies one'
+} else {
+  $appThere = Test-Path $app
+  Add-Check 'S18' 'target app present' 'warning' $(if ($appThere) { 'pass' } else { 'warn' }) 'exists' $(if ($appThere) { 'present: ' + $app } else { 'missing at: ' + $app }) 'sync the app build output' 
+}
 
 $blocking = @($checks | Where-Object { $_.severity -eq 'blocking' -and $_.status -eq 'fail' })
 $warn = @($checks | Where-Object { $_.severity -in @('blocking', 'warning') -and $_.status -eq 'warn' })
