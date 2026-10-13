@@ -188,7 +188,19 @@ if (route !== undefined) {
     check('the link actually connected (this is the bug that shipped)', w?.connection?.connected === true,
       JSON.stringify(w?.connection))
     check('no connect failures', (w?.connection?.connectFailures ?? 1) === 0)
-    check('self-check reports ready', w?.report?.verdict === 'ready', String(w?.report?.verdict))
+    // WARNINGS ARE ADVISORY, and this harness has to agree with the product about that.
+    //
+    // It used to demand `verdict === 'ready'`, which the worker self-check only produces when there
+    // are ZERO warnings -- so a worker whose blocking checks all pass, with three advisory notes,
+    // read as a harness failure. The product's own gate (`remote-provider`) blocks on
+    // `status === 'fail'` and ignores warnings entirely, so the two disagreed and only one was right.
+    //
+    // The distinctions worth keeping are the ones that change what can be done: `blocked` (a
+    // blocking check failed) and `partial` (a check could not be evaluated at all) both mean the
+    // worker is unusable. `warn` does not.
+    const verdict = w?.report?.verdict
+    check('the self-check is neither blocked nor partial', verdict !== 'blocked' && verdict !== 'partial',
+      `${String(verdict)} | failed=${String((w?.report?.checks ?? []).filter((c) => c.status === 'fail').map((c) => c.id).join(','))}`)
     check('no blocking findings', (w?.report?.blockingFailures ?? 1) === 0)
   }
 }

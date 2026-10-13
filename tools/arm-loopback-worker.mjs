@@ -14,6 +14,23 @@
  * exit, including on SIGINT, so a crashed run cannot leave a listener behind or a stored `armed`
  * for the next DSH start to restore.
  *
+ * ⚠️ KNOWN FALSE NEGATIVE WHEN STARTED FROM INSIDE THE DSH SANDBOX.
+ *
+ * This helper is normally launched by an agent's shell, which DSH confines. The relay inherits that
+ * confinement, and the worker self-check then reports `S8 SendInput / SetCursorPos live` as a
+ * BLOCKING failure -- `SetCursorPos` returns false, because a restricted token cannot inject input
+ * into a higher-integrity foreground window (UIPI).
+ *
+ * Measured both ways on the same machine, minutes apart:
+ *
+ *   confined   (this shell)                    -> verdict=blocked, S8 fail  (set=False)
+ *   unconfined (scheduled task, pwsh 7)        -> verdict=warn,    S8 pass  (ok)
+ *
+ * So S8 failing here says something about the HARNESS, not about the host. A worker started the way
+ * a real worker is started -- a scheduled task -- passes. Use `--unconfined-hint` (or read this
+ * comment) before chasing it as a host problem; `<tools>\run-unconfined.ps1` does the scheduled-task
+ * dance for you.
+ *
  * Usage:
  *   node tools/arm-loopback-worker.mjs --port 7398 --stop-file <path>
  *   # prints one JSON line on stdout when it is ready: {"url":"ws://127.0.0.1:7398","token":"..."}

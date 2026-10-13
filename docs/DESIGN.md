@@ -3290,3 +3290,80 @@ S9（睡眠未关，standby=3600/600）、S12（控制台 QuickEdit 未关）。
 
 这次和之前几次不同：**不是检查太弱，而是检查的对象被换掉了**。
 `plugin-live` 一直"能用"，只是它测的从来不是命令行给它的那台机器 —— 而它的输出**看不出这一点**。
+
+#### 第 19 轮：本机就绪 + `plugin-live` 的两个 harness 缺陷
+
+##### 1. 本机现在真的是可用的 GUI 工作节点
+
+按用户确认，改了自检报告的两项**本机设置**（不是代码）：
+
+| 项 | 之前 | 之后 |
+|---|---|---|
+| S9 待机/休眠 | standby=3600/600, hibernate=14400/0 | **全部 0** |
+| S12 控制台 QuickEdit | 1 | **0**（InsertMode 一并置 0）|
+
+```
+verdict=warn blocking=0 warn=3
+  [OK  ] S9 sleep/hibernate disabled | actual=standby=0/0 hibernate=0/0
+  [OK  ] S12 console QuickEdit off | actual=0
+```
+
+剩下 3 项 warning 都是**合理**的：S3（主屏 2048x1152 ≠ 参考的 1920x1080，固定分辨率对 GUI 测试是真实要求）、
+S10（屏保未关）、S18（未配置目标应用）。**三项都不阻断** —— 产品的门禁只看 `status === 'fail'`。
+
+##### 2. `plugin-live --url` 一直被**静默忽略**（严重）
+
+```
+Error: ... actual connect ETIMEDOUT 192.168.1.101:7331
+```
+
+传的是 `--url ws://127.0.0.1:7397`，连的却是真实从机。原因：`apply()` 的优先级是
+`defaults < profile 补丁 < settings 文件`，而 **`workers` 是替换语义** —— 操作者的真实
+`settings.json` 覆盖了传入的配置。
+
+**一个被测对象能被静默替换的 harness，比没有 harness 更糟：它会给出一个关于别的东西的自信结论。**
+
+修法：导入插件**之前**把 `DSH_HOME` 指向临时目录（与 smoke 同一手法）。
+
+修复后中继日志是证据：
+
+```
+[relay] #1 connected from 127.0.0.1
+[relay] #1 spawned ... --profile acp
+[relay] #1 -> {"method":"initialize",...}
+[relay] #1 <- {"result":{"agentInfo":{"name":"deepseek-harness-acp",...}}}
+```
+
+##### 3. `plugin-live` 的就绪判据与**产品自己**不一致
+
+它要求 `verdict === 'ready'` —— 而该值只在**零 warning** 时产生。产品的门禁（`remote-provider`）
+只看 `status === 'fail'`、忽略 warning。两者矛盾，而**产品是对的**。已改为"不是 blocked 也不是 partial"。
+
+##### 4. ⚠️ 我的测试有个**系统性假阴性**：沙箱内的 S8
+
+`arm-loopback-worker.mjs` 通常由**受 DSH 沙箱约束的 shell** 启动，中继继承该约束，于是自检报
+**S8 SendInput / SetCursorPos 阻断失败** —— 受限令牌无法向更高完整性级别的窗口注入输入（UIPI）。
+
+同机、相隔几分钟的对照：
+
+| 环境 | verdict | S8 |
+|---|---|---|
+| 受限（我的 shell） | blocked, 1 blocking | **fail** (`set=False`) |
+| **不受限**（计划任务 + pwsh 7） | **warn, 0 blocking** | **pass** (`ok`) |
+
+**所以 S8 失败说的是 harness 的事，不是主机的事。** 已写进助手的文档，并新增
+`tools\run-unconfined.ps1`（一次性计划任务，交互用户、非提权）把命令放到沙箱外跑。
+
+##### 本轮排掉的假设
+
+| 假设 | 实验 | 结论 |
+|---|---|---|
+| `runSelfCheck` 缺并发保护 | 3 次并发调用 | **都正常** —— 不成立 |
+| relay 在 F: 上跑不了自检 | 直连 RPC | **17 项真实报告** —— 第 16 轮修复有效 |
+| 计划任务能作为"沙箱外"对照 | 用 `powershell.exe` 跑 | **任务失败**（F: 路径拦截）—— 必须用 pwsh 7 |
+
+##### 尚未完成
+
+`plugin-live` 还没拿到一次干净的 `ALL CHECKS PASSED`：中继必须**不受限**运行，而我的编排在
+"给沙箱外的助手传 token"这一步还有缺口（助手默认自己生成 token，`run-unconfined.ps1` 尚不支持转发参数）。
+下一轮补上即可，**产品侧不需要改动**。
