@@ -38,7 +38,15 @@ window.__ModuleLoader__.load({
       roleNote: '本机作为主机向工作节点派单。切换为工作节点（对称配对）尚未实现。',
       groupWorkers: '工作节点',
       loading: '正在读取工作节点状态…',
-      noWorkers: '尚未配置工作节点。请在 profile 补丁中配置后重启。',
+      // Points at the step that is actually missing, which is NOT where a worker is configured.
+      //
+      // Workers live here, in this page, and are written to the settings file. What a page cannot do
+      // is give the MODEL something to call: a plugin cannot append tool rows at runtime, so each
+      // worker also needs its own loader row in the profile patch (DESIGN section 5.7, U2). The
+      // previous wording sent the operator to the patch to configure the WORKER -- which this page
+      // already does -- and never mentioned the tool row. Following it ended with a configured
+      // worker, a restart, and still no `subagent_remote`, which reads as a broken plugin.
+      noWorkers: '尚未配置工作节点。在这里添加即可；但模型要能调用它，还需要在 profile 补丁中为该节点加一行工具行（每个节点一行），然后重启。',
       reportPending: '就绪报告未在限时内取得 —— 工作节点可能不可达。连接状态见下。',
       verdictReady: '就绪',
       verdictBlocked: '不可用',
@@ -205,7 +213,7 @@ window.__ModuleLoader__.load({
       roleNote: 'This machine dispatches to workers. Switching it into worker mode (symmetric pairing) is not implemented yet.',
       groupWorkers: 'Workers',
       loading: 'Reading worker state\u2026',
-      noWorkers: 'No workers configured. Add one to the profile patch and restart.',
+      noWorkers: 'No workers yet. Add one here; for the model to be able to call it, the profile patch also needs one tool row per worker, then a restart.',
       reportPending: 'The readiness report did not arrive in time \u2014 the worker is probably unreachable. Link state below.',
       verdictReady: 'ready',
       verdictBlocked: 'unavailable',
