@@ -3785,3 +3785,43 @@ verdict === 'ready' ? 就绪 : verdict === 'unknown' ? 未知 : 不可用
 ```
 unit 447/447（新增 4 条）· smoke ALL CHECKS PASSED · live 对着真从机 ALL CHECKS PASSED
 ```
+
+#### 第 29 轮：#4 `deploy-slave.ps1` 的远程模式
+
+**问题**：脚本只做本地 `Copy-Item`，验证也在**主机上**跑。要部署到别的机器只能给 UNC 目标，
+而那时"运行拷过去的中继"检查是**在本机**执行的 —— 验证的是**正确的字节、错误的机器**
+（不同的 node 版本、不同的 OS 状态、不同的 `node_modules` 解析根）。
+而它要抓的那个失败（`Cannot find package 'ws'`）恰恰**可能因机器而异**。
+
+**修法**：加 `-Remote <sshHost>`：`scp` 过去，然后**在目标机上**验证（`node --check` + 运行 `--print-pairing`），
+并且**检查远程退出码**。
+
+##### 测试过程里抓到的三个问题（都是"跑一次才知道"）
+
+1. **scp 全部失败，而我把错误吞掉了** —— `2>&1 | Out-Null` 让七行只剩 `exit 1`，无从下手。
+   根因：脚本传的是 `C:\dsh-remote\...`，而**远程那端是 shell**，反斜杠被吃掉 →
+   改成传给远程的路径一律用正斜杠（`cmd /c` 的检查仍用反斜杠，因为那给的是 cmd）。
+2. **`param()` 检查用远程 PowerShell 一行流做，引号被 bash 吃坏** —— 两项都以**目标机自己的解析错误**
+   失败（`行:1 字符:102`），完全没提到脚本。
+   改成**把文件拉回来检查**：检查的仍是目标的字节（scp 返回的就是那些字节），但不再有 shell 插手的余地。
+3. **我在 ASCII-only 的 `.ps1` 注释里写了中文报错** —— 被 `.research\deploy-ps1.ps1` 门禁当场拒绝（21 个非 ASCII 字节）。
+   门禁的作用正在于此。
+
+##### 负向测试（**关键**）
+
+| 用例 | 结果 |
+|---|---|
+| 在目标上删掉 `prune-shots.mjs`（相对导入） | `[FAIL] ... exists at the destination` + `[FAIL] the deployed relay starts` → **exit 1** |
+| 在目标上删掉 `node_modules/ws`（裸包） | `[FAIL] node_modules\ws is at the destination` + 运行失败 → **exit 1** |
+| 目标不可达 | 打印真实 ssh 错误、6.7 秒内 **exit 1**（不挂起） |
+
+第一条正是**这次真实部署时发生过的事**（三个新模块不在）—— 现在它会被拦住，而不是等到"从机连不上"。
+
+##### 正向
+
+```
+--- run the deployed relay (this is the check the file list cannot make) ---
+  [PASS] the deployed relay starts and prints a pairing string -- dshpair1...  ← 在从机上跑出来的
+  [PASS] selfcheck.ps1 is ASCII-only / has param() first
+RESULT: OK    exit=0
+```

@@ -8,16 +8,33 @@
 #
 # It refuses to declare success until the copied relay actually loads out of the destination.
 #
+# TWO MODES, and which one you want matters:
+#
+#   local   -Destination <dir>                        copy within this machine
+#   remote  -Remote <sshHost> -Destination <dir>      scp, then verify ON THE TARGET
+#
+# WHY THE REMOTE MODE EXISTS: the first version only did `Copy-Item`, so deploying to another machine
+# meant a UNC destination -- and its "run the copied relay" check then executed LOCALLY against a
+# share. That verifies the module graph of the right bytes on the WRONG machine: a different node
+# build, a different OS state, and a different `node_modules` resolution root. The failure this
+# script exists to catch (`cannot find package 'ws'`) can differ between the two.
+#
+# So in remote mode the verification runs over SSH, on the worker, and its EXIT CODES are checked. A
+# deployment that cannot prove the target runs the result has not been verified -- and the earlier
+# `find-slave.ps1` reported success for a hosts write it had not made, which is the same mistake.
+#
 #   -Destination <dir>   where the worker keeps its scripts (e.g. C:\dsh-remote\plugin-slave)
+#   -Remote <sshHost>    deploy to that host (an ssh config alias is fine)
 #   -Source <dir>        defaults to this repository's package
 #   -VerifyOnly          do not copy; only check what is already at -Destination
-#   -KeepRunning         leave the relay running for a moment after --print-pairing fails? (diagnostics)
+#   -ProbePort <n>       port used for the --print-pairing run (default 7394)
 #
 # ASCII-ONLY, because Windows PowerShell 5.1 reads BOM-less files as ANSI and a non-ASCII byte
 # inside a string literal breaks parsing. `param()` is the first statement for the same reason it is
 # everywhere else in this project.
 param(
   [Parameter(Mandatory = $true)][string]$Destination,
+  [string]$Remote = '',
   [string]$Source = '',
   [switch]$VerifyOnly,
   [int]$ProbePort = 7394
@@ -44,11 +61,13 @@ if ([string]::IsNullOrEmpty($Source)) {
   $Source = Join-Path (Split-Path -Parent $here) 'packages\dsh-plugin-remote-use\slave'
 }
 $Source = (Resolve-Path -LiteralPath $Source).Path
-$Destination = [System.IO.Path]::GetFullPath($Destination)
+# In remote mode the destination is a path ON THE TARGET, so it must not be resolved locally.
+$remoteMode = $Remote -ne ''
+if (-not $remoteMode) { $Destination = [System.IO.Path]::GetFullPath($Destination) }
 
 Write-Host "source      : $Source"
-Write-Host "destination : $Destination"
-Write-Host "mode        : $(if ($VerifyOnly) { 'verify only' } else { 'copy and verify' })"
+Write-Host "destination : $(if ($remoteMode) { "$Remote`:$Destination" } else { $Destination })"
+Write-Host "mode        : $(if ($remoteMode) { 'REMOTE (scp, verify on the target)' } elseif ($VerifyOnly) { 'verify only' } else { 'copy and verify (local)' })"
 Write-Host ''
 
 # The files the worker needs, and why each one is here. A file that is not listed is not copied --
@@ -71,6 +90,9 @@ $files = @(
 $depDirs = @('node_modules')
 
 $failures = 0
+# Forward slashes for anything that crosses into the remote SHELL. Defined here rather than inside
+# the copy branch, because `-VerifyOnly -Remote` needs it too and would otherwise get $null.
+$remotePath = if ($remoteMode) { $Destination -replace '\\', '/' } else { $Destination }
 $check = {
   param($label, $ok, $detail)
   $tag = if ($ok) { 'PASS' } else { 'FAIL' }
@@ -111,75 +133,155 @@ foreach ($d in $depDirs) {
 if (-not $VerifyOnly) {
   Write-Host ''
   Write-Host '--- copy ---'
-  if (-not (Test-Path -LiteralPath $Destination)) {
-    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    Write-Host "  created $Destination"
-  }
-  foreach ($f in $files) {
-    Copy-Item -LiteralPath (Join-Path $Source $f.name) -Destination $Destination -Force
-    Write-Host "  copied $($f.name)"
-  }
-  foreach ($d in $depDirs) {
-    # -Recurse and -Force: a partially copied dependency is the failure this script exists to stop.
-    Copy-Item -LiteralPath (Join-Path $Source $d) -Destination $Destination -Recurse -Force
-    Write-Host "  copied $d\"
+  if ($remoteMode) {
+    # scp rather than a UNC share: the SSH channel is already configured and its key is what proves
+    # which machine this is, so no additional share, credential or firewall rule is needed.
+    #
+    # THE PATH GOES OVER AS FORWARD SLASHES. The remote side of an scp is a SHELL, and the reference
+    # worker's shell is bash: a Windows path with backslashes arrives as `C:dsh-remoteplugin-slave`
+    # after bash eats them, and scp fails with a bare exit 1 and no useful message. Measured -- the
+    # same transfer with forward slashes succeeds. The `cmd /c` checks below keep backslashes,
+    # because those go to cmd rather than to bash -- $remotePath (defined above) is what crosses
+    # into the remote shell.
+    # ...and the directory has to exist first: scp does not create it.
+    & ssh -o BatchMode=yes -o ConnectTimeout=15 $Remote "cmd /c if not exist `"$Destination`" mkdir `"$Destination`"" 2>&1 | Out-Null
+
+    $scpArgs = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20')
+    $ok = $true
+    foreach ($f in $files) {
+      # NOT piped to Out-Null: a failing transfer has to say why. Swallowing scp's stderr is how the
+      # first run of this mode reported seven bare `exit 1` lines with nothing to act on.
+      $err = & scp @scpArgs (Join-Path $Source $f.name) "${Remote}:$remotePath/" 2>&1
+      if ($LASTEXITCODE -ne 0) { $ok = $false; & $check "scp $($f.name)" $false (($err | Select-Object -First 2) -join ' ') }
+      else { Write-Host "  scp $($f.name)" }
+    }
+    foreach ($d in $depDirs) {
+      # -r: a partially copied dependency is exactly what this script exists to prevent.
+      $err = & scp @scpArgs -r (Join-Path $Source $d) "${Remote}:$remotePath/" 2>&1
+      if ($LASTEXITCODE -ne 0) { $ok = $false; & $check "scp $d\" $false (($err | Select-Object -First 2) -join ' ') }
+      else { Write-Host "  scp $d\" }
+    }
+    if (-not $ok) {
+      Write-Host ''
+      Write-Host 'Transfer failed; NOT verifying a partial copy.' -ForegroundColor Red
+      exit 1
+    }
+  } else {
+    if (-not (Test-Path -LiteralPath $Destination)) {
+      New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+      Write-Host "  created $Destination"
+    }
+    foreach ($f in $files) {
+      Copy-Item -LiteralPath (Join-Path $Source $f.name) -Destination $Destination -Force
+      Write-Host "  copied $($f.name)"
+    }
+    foreach ($d in $depDirs) {
+      # -Recurse and -Force: a partially copied dependency is the failure this script exists to stop.
+      Copy-Item -LiteralPath (Join-Path $Source $d) -Destination $Destination -Recurse -Force
+      Write-Host "  copied $d\"
+    }
   }
 }
 
 # ---- verification against what is ACTUALLY at the destination -------------------------------
 Write-Host ''
-Write-Host '--- verify at the destination ---'
+Write-Host "--- verify at the destination $(if ($remoteMode) { "(on $Remote)" } else { '(locally)' }) ---"
+
+# In remote mode every existence check runs on the target too. Checking locally that scp "probably"
+# worked is the same class of shortcut as running the relay on the wrong machine.
+$exists = {
+  param($relPath)
+  if ($remoteMode) {
+    # `cmd /c if exist` keeps this to one remote invocation and a real exit code, and avoids
+    # depending on which shell the target's ssh hands us (the reference worker uses bash).
+    & ssh -o BatchMode=yes -o ConnectTimeout=15 $Remote "cmd /c if exist `"$Destination\$relPath`" (exit 0) else (exit 1)" 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0)
+  }
+  return (Test-Path -LiteralPath (Join-Path $Destination $relPath))
+}
+
 foreach ($f in $files) {
-  & $check "$($f.name) exists at the destination" (Test-Path -LiteralPath (Join-Path $Destination $f.name))
+  & $check "$($f.name) exists at the destination" (& $exists $f.name)
 }
 foreach ($d in $depDirs) {
-  & $check "$d\ws is at the destination" (Test-Path -LiteralPath (Join-Path $Destination "$d\ws\package.json"))
+  & $check "$d\ws is at the destination" (& $exists "$d\ws\package.json")
 }
 
 # Node parses each module. `node --check` reports only the FIRST unexpected token, so this is a
 # syntax gate, not a proof -- the proof is the run below.
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $node) {
+$nodeHere = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $remoteMode -and -not $nodeHere) {
   & $check 'node is on PATH (needed to verify and to run the relay)' $false
 } else {
   foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'make-launch-spec.mjs') {
-    $target = Join-Path $Destination $name
-    if (-not (Test-Path -LiteralPath $target)) { continue }
-    & node --check $target 2>&1 | Out-Null
-    & $check "$name parses" ($LASTEXITCODE -eq 0)
+    if (-not (& $exists $name)) { continue }
+    if ($remoteMode) {
+      & ssh -o BatchMode=yes -o ConnectTimeout=15 $Remote "node --check $Destination/$name" 2>&1 | Out-Null
+    } else {
+      & node --check (Join-Path $Destination $name) 2>&1 | Out-Null
+    }
+    & $check "$name parses (on the target)" ($LASTEXITCODE -eq 0)
   }
 
-  # THE DECISIVE CHECK: run the copied relay. `--print-pairing` exits immediately and exercises the
-  # whole module graph, which is what a missing relative import breaks.
+  # THE DECISIVE CHECK: run the deployed relay. `--print-pairing` exits immediately and exercises the
+  # whole module graph, which is what a missing relative import -- or a missing bare package -- breaks.
+  #
+  # In remote mode this runs ON THE WORKER. That is the whole point of the mode: the answer to "does
+  # this deployment start" depends on the target's node, its node_modules resolution and its OS, so
+  # only the target can answer it.
   Write-Host ''
-  Write-Host '--- run the copied relay (this is the check the file list cannot make) ---'
-  $relay = Join-Path $Destination 'relay.mjs'
-  $out = & node $relay --port $ProbePort --token 'deploy-verify-token' --print-pairing 2>&1
+  Write-Host '--- run the deployed relay (this is the check the file list cannot make) ---'
+  if ($remoteMode) {
+    $out = & ssh -o BatchMode=yes -o ConnectTimeout=30 $Remote "node $Destination/relay.mjs --port $ProbePort --token deploy-verify-token --print-pairing" 2>&1
+  } else {
+    $out = & node (Join-Path $Destination 'relay.mjs') --port $ProbePort --token 'deploy-verify-token' --print-pairing 2>&1
+  }
   $code = $LASTEXITCODE
-  & $check 'the copied relay starts and prints a pairing string' ($code -eq 0 -and ($out -join "`n") -match 'dshpair1\.') ($out | Select-Object -First 3 | Out-String).Trim()
+  & $check 'the deployed relay starts and prints a pairing string' ($code -eq 0 -and ($out -join "`n") -match 'dshpair1\.') ($out | Select-Object -First 3 | Out-String).Trim()
 }
 
 # ---- PowerShell scripts: the deploy gate catches what node cannot ---------------------------
 Write-Host ''
 Write-Host '--- PowerShell scripts ---'
+#
+# IN REMOTE MODE THE FILES ARE PULLED BACK AND CHECKED HERE, rather than checked through a remote
+# PowerShell one-liner. The first version composed `ssh host "powershell -NoProfile -Command \"...\""`
+# with a `$_` and nested quotes inside, and bash on the target mangled it: both checks failed with
+# the target's own PARSE error (a position/character offset, not a message about the script).
+#
+# Pulling the bytes back is not a weaker check. The question is whether the copy ON THE TARGET is
+# ASCII-only and starts with `param()`, and scp returns exactly those bytes; what changes is that no
+# shell gets to reinterpret the command.
+$localForScripts = $Destination
+if ($remoteMode) {
+  $localForScripts = Join-Path ([System.IO.Path]::GetTempPath()) "deploy-slave-check-$PID"
+  New-Item -ItemType Directory -Force -Path $localForScripts | Out-Null
+  foreach ($name in 'selfcheck.ps1', 'screenshot.ps1') {
+    & scp -q -o BatchMode=yes -o ConnectTimeout=20 "${Remote}:$remotePath/$name" $localForScripts 2>&1 | Out-Null
+  }
+}
 foreach ($name in 'selfcheck.ps1', 'screenshot.ps1') {
-  $target = Join-Path $Destination $name
+  $target = Join-Path $localForScripts $name
   if (-not (Test-Path -LiteralPath $target)) { continue }
   $text = Get-Content -LiteralPath $target -Raw
   $bad = @([System.IO.File]::ReadAllBytes($target) | Where-Object { $_ -gt 127 })
   & $check "$name is ASCII-only (PS 5.1 requirement)" ($bad.Count -eq 0) "$($bad.Count) high byte(s)"
   # param() must be the first statement; PS 5.1 reports a violation at the lines that FOLLOW it.
   $paramAt = $text.IndexOf('param(')
+  & $check "$name has param()" ($paramAt -ge 0)
   if ($paramAt -ge 0) {
     $before = $text.Substring(0, $paramAt)
     $offending = @($before -split "`n" | Where-Object { $t = $_.Trim(); $t -ne '' -and -not $t.StartsWith('#') })
     & $check "$name has param() first" ($offending.Count -eq 0) ($offending | Select-Object -First 1)
   }
 }
+if ($remoteMode -and (Test-Path -LiteralPath $localForScripts)) {
+  Remove-Item $localForScripts -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host ''
 if ($failures -eq 0) {
-  Write-Host 'RESULT: OK -- the worker-side files are in place and the copied relay runs.' -ForegroundColor Green
+  Write-Host 'RESULT: OK -- the worker-side files are in place and the deployed relay runs.' -ForegroundColor Green
   Write-Host 'Next: restart the worker relay task, then run prototype\host\plugin-live.mjs from the master.'
   exit 0
 }
