@@ -15,9 +15,30 @@
  * Usage:
  *   node plugin-live.mjs --url ws://192.168.1.101:7331 --token <secret> --cwd C:\dsh-remote\p0work
  */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const INSTALLED = 'C:\\Users\\you\\.dsh\\profiles\\desktop\\node_modules\\dsh-plugin-remote-use\\lib\\index.js'
+
+/**
+ * Isolate the DSH home BEFORE importing the plugin, so `--url` is actually the worker under test.
+ *
+ * WHY THIS MATTERS, and how it was found: `apply()` merges `defaults < profile patch < settings
+ * file`, and `workers` REPLACES. The operator's real settings.json names the reference worker, so
+ * once that file exists it OVERRIDES the `workers` array passed in below -- silently. Running
+ * `--url ws://127.0.0.1:7397` against a live loopback relay therefore connected to
+ * `192.168.1.101:7331` and reported `ETIMEDOUT`, which reads exactly like a product failure and is
+ * actually the harness testing a different machine than the one it was told to test.
+ *
+ * A harness whose subject can be silently replaced is worse than no harness: it reports a
+ * confident result about something else. A temp home also keeps this run out of the operator's
+ * settings and audit trail.
+ */
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'plugin-live-home-'))
+process.env.DSH_HOME = TEST_HOME
+process.on('exit', () => { try { rmSync(TEST_HOME, { recursive: true, force: true }) } catch { /* best effort */ } })
 
 const argv = process.argv.slice(2)
 function arg(name, fallback) {

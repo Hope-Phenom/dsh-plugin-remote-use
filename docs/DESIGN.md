@@ -3236,3 +3236,57 @@ ACP 握手 · **真实 17 项自检** · 任务跑完 · **审批放行（命令
 **审批拒绝（命令确实没执行）** · 本地停止 · 端口释放 · 凭据作废 —— 全部通过。
 
 无副作用：端口空闲、无 marker 遗留、`slave\shots` 不存在、settings 文件未被改动。
+
+#### 第 18 轮：让 `plugin-live` 能在**没有从机**的情况下跑 —— 并因此发现它一直在测错机器
+
+目标要求"三个 harness 必须同步更新并通过"，而 `plugin-live` 本轮从未通过（从机离线）。
+第 4 项让主机能当从机，于是新增 `tools\arm-loopback-worker.mjs`：
+在回环布防、把一行 JSON（url/token）写到 stdout、保持到停止文件出现。
+不写 settings 文件，退出时必定解除布防。
+
+##### 由此暴露的问题：`plugin-live --url` **一直被静默忽略**
+
+```
+Error: remote worker is not ready: S0 worker reachable
+       (expected relay responds, actual connect ETIMEDOUT 192.168.1.101:7331)
+```
+
+我传的是 `--url ws://127.0.0.1:7397`，插件连的却是**真实从机**。原因：
+`apply()` 的优先级是 `defaults < profile 补丁 < settings 文件`，而 **`workers` 是替换语义** ——
+操作者的真实 `settings.json` 里有那个 worker，于是**覆盖**了传入的配置。
+
+**如果我没追到底**，会得到两个都错的结论之一：以为在验证回环从机、其实在测一台离线机器；
+或者把"从机离线"当成"代码坏了"。**一个被测对象能被静默替换的 harness，比没有 harness 更糟 ——
+它会给出一个关于别的东西的自信结论。**
+
+修法：`plugin-live` 在导入插件**之前**把 `DSH_HOME` 指向临时目录（与 smoke 同一手法）。
+顺带也让这个 harness 不再读写操作者的 settings 与审计。
+
+**修复后实测**（中继日志是证据）：
+
+```
+connection: {"connected":true,"connects":1,...}
+[relay] #1 connected from 127.0.0.1
+[relay] #1 spawned ... --profile acp
+[relay] #1 -> {"method":"initialize",...}
+[relay] #1 <- {"result":{"agentInfo":{"name":"deepseek-harness-acp",...}}}
+[relay] #1 plugin reply -> {"verdict":"blocked",...}
+```
+
+ACP 握手完成、真实自检报告返回。剩下的 FAIL 是**这台机器的真实就绪问题**：
+S9（睡眠未关，standby=3600/600）、S12（控制台 QuickEdit 未关）。**不是插件缺陷。**
+
+##### 本轮排掉的两个假设（都做了实验，都没成立）
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| `runSelfCheck` 缺并发保护，两次并发会踩坏报告 | `.research\race-selfcheck.mjs` 三次并发 | **三次都拿到真实报告** —— 不成立 |
+| relay 在 F: 上跑不了自检 | `.research\ask-selfcheck.mjs` 直连 | **17 项真实报告** —— 第 16 轮的修复是好的 |
+
+顺带确认了两处**正确**的设计：插件的 `S0` 是 `name: 'worker reachable'` 并带错误原文
+（信息完整），relay 的降级报告也带 `name`/`actual`。**两处都不是缺陷。**
+
+##### 教训
+
+这次和之前几次不同：**不是检查太弱，而是检查的对象被换掉了**。
+`plugin-live` 一直"能用"，只是它测的从来不是命令行给它的那台机器 —— 而它的输出**看不出这一点**。
