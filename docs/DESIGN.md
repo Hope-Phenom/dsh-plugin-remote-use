@@ -3484,3 +3484,35 @@ noWorkers: '尚未配置工作节点。请在 profile 补丁中配置后重启�
 
 > 第 21 轮我写"我的判据在说谎，而它说得很像真的"。这一轮又出现一次，只是这次错在**检查脚本**而不是守卫。
 > 两次都是同一个动作救回来的：**去看真东西**。
+
+#### 第 23 轮：测了一条**从未被走过**的失败路径 —— 工作节点中途死掉
+
+**为什么挑这条**：其它所有测试都拿一个**活着**的从机在跑。而一个永远不结束的任务不只是"失败" ——
+它会**一直占着委托队列的槽位**，于是一台死掉的从机会把插件一起拖住，直到 DSH 重启。**这比报错糟得多**，
+而这个项目从没验证过它。
+
+新增 `.research/probe-relay-death.mjs`：真中继、真任务，**在 turn 进行中**把中继杀掉。
+
+```
+[PASS] the in-flight task SETTLES instead of hanging -- after 4353 ms
+       outcome: {"stopReason":"error","diagnostic":"ACP connection closed","output":"I'll run the sleep command."}
+[PASS] it did not report success -- error
+[PASS] a connect attempt against the dead worker fails
+[PASS] and the failure is recorded in the stats the page reads
+       {"connected":false,"connects":1,"connectFailures":1,"lastError":"connect ECONNREFUSED 127.0.0.1:7396"}
+[PASS] the link is not reported as connected
+```
+
+**击杀后约 4 毫秒**任务就结束了 —— 既不挂起，也不谎报成功，而且**部分输出被保留**
+（`output: "I'll run the sleep command."`）。
+
+第二组断言查的是**页面看到的东西**：`PeerConnection` 的 `connected` 变成 `false`、
+`connectFailures` 加一、`lastError` 点名 ECONNREFUSED。
+
+> 一条死了却仍显示"已连接"的链路，比没有指示灯更糟 —— 操作者会去重启错的东西。
+
+##### 这轮的取舍
+
+DSH **仍未重启**（主进程已运行 231 分钟，插件端点仍 404），所以真实 GUI 渲染仍然无法验证。
+与其做低价值的清扫，不如去测一条**风险最高且从未覆盖**的路径 —— 结果它是对的，
+而"它是对的"这件事**此前只是假设**。
