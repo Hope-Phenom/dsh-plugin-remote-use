@@ -238,6 +238,9 @@ window.__ModuleLoader__.load({
     const CSS = [
       '.ru-page{display:flex;flex-direction:column;gap:22px;max-width:760px;font-size:13px;line-height:1.5}',
       '.ru-head{display:flex;flex-direction:column;gap:4px}',
+      '.ru-head-row{display:flex;align-items:center;gap:9px}',
+      // `currentColor` so the mark follows the theme and the section's active state.
+      '.ru-mark{color:var(--dsw-alias-brand-primary);flex:none}',
       '.ru-title{margin:0;font-size:16px;font-weight:500;line-height:1.4}',
       '.ru-desc{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}',
       '.ru-group{display:flex;flex-direction:column;border-top:0.5px solid var(--dsw-alias-border-l2);padding-top:14px}',
@@ -553,6 +556,39 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * The plugin's mark, inline.
+     *
+     * WHY IT IS INLINED RATHER THAN READ FROM `assets/icon.svg`: this page is a browser
+     * module with no build step and no access to the package's files, and the entity has to
+     * be self-contained anyway. When the manifest icon changes, this must change with it --
+     * `test/settings-page.test.js` asserts the two stay in step.
+     *
+     * WHY IT IS HERE AT ALL: the Settings NAV icon is not plugin-supplied. DSH's
+     * `navIcon(id)` in dsh-client-ui-settings-general is a hardcoded id -> built-in icon map
+     * with a gear fallback, and a `settings.section` row carries only {id, order, label}.
+     * So a third-party plugin cannot change its nav glyph; the page header is where its own
+     * mark can actually appear.
+     */
+    function RemoteUseIcon(props) {
+      const size = props?.size ?? 20
+      const title = props?.title ?? 'Remote workers'
+      return h('svg', {
+        className: 'ru-mark', width: size, height: size, viewBox: '0 0 64 64',
+        role: 'img', 'aria-label': title, focusable: 'false',
+      },
+      h('g', {
+        fill: 'none', stroke: 'currentColor', strokeWidth: 4,
+        strokeLinecap: 'round', strokeLinejoin: 'round',
+      },
+      h('path', { d: 'M42 30H54V10H28V22' }),
+      h('path', { d: 'M48 30v5' }),
+      h('path', { d: 'M43 35h10' }),
+      h('path', { d: 'M10 22h32v24H10Z' }),
+      h('path', { d: 'M26 46v6' }),
+      h('path', { d: 'M18 52h16' })))
+    }
+
     function RemoteUseSection(props) {
       const { t } = props
       const [snapshot, setSnapshot] = React.useState(null)
@@ -689,10 +725,23 @@ window.__ModuleLoader__.load({
       const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : []
       const anyBusy = busy !== ''
 
+      // The route returns TWO arrays and they are NOT interchangeable:
+      //   workers[]           the live snapshot -- peerId, name, cwd, report, connection
+      //   settings.workers[]  the saved config  -- id, name, url, cwd, enabled, serialQueue,
+      //                                            tokenSet, tokenHint
+      // The card renders the snapshot, because only it carries the readiness report. The FORM
+      // must be seeded from the configuration. Seeding it from the snapshot left id, url and
+      // the token state undefined, so Edit opened an EMPTY form for a worker that was
+      // demonstrably connected and ready.
+      const configWorkers = Array.isArray(snapshot?.settings?.workers) ? snapshot.settings.workers : []
+      const configFor = (peerId) => configWorkers.find((w) => w.id === peerId)
+
       return h('div', { className: 'ru-page' },
         h('style', null, CSS),
         h('div', { className: 'ru-head' },
-          h('h2', { className: 'ru-title' }, t('title')),
+          h('div', { className: 'ru-head-row' },
+            h(RemoteUseIcon, { size: 22 }),
+            h('h2', { className: 'ru-title' }, t('title'))),
           h('p', { className: 'ru-desc' }, t('description'))),
 
         loadError === '' ? null : h('div', { className: 'ru-msg err' },
@@ -721,7 +770,14 @@ window.__ModuleLoader__.load({
                 row,
                 busy: busy === 'stop' ? 'stop' : (busy !== '' && busy !== 'stop' ? busy : ''),
                 onAction: (action, peerId) => void onAction(action, peerId),
-                onEdit: (r) => setEditing({ draft: r, isNew: false }),
+                onEdit: (r) => setEditing({
+                  // Seed from the CONFIGURATION. The snapshot row it was seeded from before
+                  // has no `id`, `url` or token state, so the form came up blank.
+                  draft: configFor(r.peerId) ?? {
+                    id: r.peerId, name: r.name, url: '', cwd: r.cwd, enabled: true, serialQueue: 1,
+                  },
+                  isNew: false,
+                }),
                 onDelete: (r) => void deleteWorker(r),
               }))),
 

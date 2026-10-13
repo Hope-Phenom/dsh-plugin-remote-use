@@ -2054,6 +2054,86 @@ y 8..54，中心正好 `(32,31)`）。两台各自的底座已经足够说明"�
 ⚠️ 注意**不要**用 `--force-device-scale-factor=8` 去看小图标：那会让浏览器以 136px 矢量渲染再缩小显示，
 得到的是"理想情况"而非用户实际看到的像素。
 
+### 15.10 图标"明明对却不显示"——三个层次，前两层的结论都曾经是错的
+
+首次真机使用后：**设置导航图标没变**。
+
+#### 第一层：设置导航的图标**不是插件提供的**（⇒ 改不了）
+
+`dsh-client-ui-settings-general` 的 `navIcon(id)` 是一张**写死的表**：
+
+```js
+if (id === 'account')           return IconUserOutline       // 通用设置
+if (id === 'models')            return IconDataOutline        // 模型
+if (id === 'agent-presets')     return IconAgentPreset        // Agent 预设
+if (id === 'plugins')           return IconPersonalization    // 内置插件
+if (id === 'archived-sessions') return IconArchive
+return IconSettingsOutline                                    // ← 其余全部是齿轮
+```
+
+而 `settings.section` 的行只带 `{ id, order, label }` —— **没有 icon 字段**。
+⇒ **第三方插件无法自定义设置导航的图标**，`package.json` 的 `icon` 在那里根本不被读取。
+
+> ⚠️ 我一开始断言"通知插件有铃铛，所以 manifest 驱动导航"——**那是错的**。
+> 我把自己的预览图当成了用户的实际界面。实际截图里 **费用/通知/远程工作节点/皮肤管理全是同一个齿轮**。
+
+#### 第二层：图标确实被消费，但在**插件管理**页
+
+`dsh-client-ui-plugin-manager`（「已安装 N」那个页面）：
+
+```js
+icon: jsx(PackageArtwork, { src: pkg.meta?.icon }, pkg.meta?.icon)
+```
+
+`dsh-plugin-manager` 通过 `readPluginMeta` 读取它。**这里才是 manifest 图标真正出现的地方。**
+
+#### 第三层：**真正的 bug —— SVG 注释里的双横线**
+
+修好前两层认知后，插件管理页里我的图标**仍是默认星形**，而旁边的通知插件（铃铛）正常。
+
+排查记录（每一步排除一个假设）：
+
+| 假设 | 结论 |
+|---|---|
+| 路径/扩展名/体积不合规 | ❌ 用 DSH 的 `iconOf()` 逐条复现 → **ACCEPTED** |
+| 解析器不对（`createRequire` vs ESM） | ❌ 改用 `import.meta.resolve` → 仍 **ACCEPTED** |
+| junction 安装导致路径问题 | ❌ 同目录的 `dsh-plugin-code-quality` **也是 junction 且正常** |
+| `readPluginMeta` 抛错 | ❌ 标题来自我的 `locale/zh.json` 且**显示正确**，说明它成功了 |
+
+于是转向客户端：`PackageArtwork` 有**两条**回落路径 —— `src === undefined`，
+**或 `<img>` 的 `onError`**。⇒ 说明是**浏览器解码失败**。直接测：
+
+```
+DECODE-FAILED (my-new, 2296 bytes)      ← 我的
+LOADED-OK     (notify-ref, 402 bytes)   ← 通知插件
+```
+
+根因：**我的 SVG 注释里有 3 处 `--`**，而 **XML 规范禁止注释内出现双横线** ⇒
+文档不是良构 XML ⇒ 浏览器 `<img>` 解码器拒绝 ⇒ `PackageArtwork` 静默回落到默认图。
+通知插件的 SVG **完全没有注释**，所以没事。
+
+**这个 bug 全程静默**：文件存在、DSH 校验通过、预览渲染正常、没有任何日志。
+
+#### 教训：两个"权威"被混为一谈
+
+| 谁 | 检查什么 |
+|---|---|
+| `dsh-app-boot` 的 `iconOf()` | 路径、扩展名、体积 —— **不解析文件**，畸形 SVG 照样通过 |
+| **浏览器**的 `<img>` 解码器 | 文档是否良构 |
+
+`icon-check.mjs` 原本只复现前者，于是给出**错误的安全结论**。现在它也检查注释里的双横线，
+并在输出里明确写出这两者的区别。
+
+#### 加的三条测试（都做过变异检验）
+
+| 测试 | 变异检验 |
+|---|---|
+| SVG 必须良构（注释无双横线、标签配平、单一根元素） | 放回一个双横线 → **失败** ✓ |
+| 页内图标与 `assets/icon.svg` 的路径必须一致 | 改一条路径 → **失败** ✓ |
+| manifest 声明满足 `iconOf()` 全部规则 | — |
+
+因为页面读不到包内文件，页内图标只能内联 —— 所以必须有那条"不许漂移"的断言。
+
 ---
 
 ## 16. 对称配对（本机在主/从之间切换）—— 设计，待评审

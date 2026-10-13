@@ -1,29 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Remote workers">
   <!--
-    Two machines, offset in both axes and overlapping front-to-back: the network-neighbourhood
-    convention, which reads as "another computer" rather than "my second monitor".
+    Two machines, offset in both axes and overlapping front to back: the network
+    neighbourhood convention, which reads as "another computer" rather than "my second
+    monitor".
 
-    OCCLUSION WITHOUT A FILL: the obvious way to stack these is to fill the front machine with
-    the background colour so it hides the back one, but this icon set is stroke-only
-    (`fill="none"`) and the Settings page has both dark and light themes, so a hardcoded
+    OCCLUSION WITHOUT A FILL. The obvious way to stack these is to fill the front machine
+    with the background colour so it hides the back one, but this icon set is stroke only
+    (fill="none") and the Settings page has both dark and light themes, so a hardcoded
     background would show as a coloured block on the other one. Instead the back machine's
-    outline is DRAWN ONLY WHERE IT IS VISIBLE: its path starts where the front machine's edge
-    crosses it (42,30), runs around the top, and stops at (28,22) where the front machine
-    covers it. Nothing is hidden, because nothing hidden was drawn.
+    outline is DRAWN ONLY WHERE IT IS VISIBLE: its path starts where the front machine's
+    edge crosses it (42,30), runs around the top, and stops at (28,22) where the front
+    machine covers it. Nothing is hidden, because nothing hidden was drawn.
 
-    Geometry in the 64-unit viewBox, with stroke-width 4 (so every edge overhangs by 2):
+    Geometry in the 64 unit viewBox, with stroke-width 4 (so every edge overhangs by 2):
       back screen    x 28..54, y 10..30
-      back stand     x 48,     y 30..35   -- offset right of centre, or the front machine
-      back foot      x 43..53, y 35          would cover a centred one
-      front screen   x 10..42, y 22..46   -- covers the back machine's lower-left corner
+      back stand     x 48,     y 30..35   (offset right of centre: a centred stand
+      back foot      x 43..53, y 35        would be covered by the front machine)
+      front screen   x 10..42, y 22..46   (covers the back machine's lower left corner)
       front stand    x 26,     y 46..52
       front foot     x 18..34, y 52
-    Span after the stroke: x 8..56, y 8..54 -- centred on (32,31) in the viewBox.
+    Span after the stroke: x 8..56, y 8..54, centred on (32,31) in the viewBox.
 
-    There is deliberately NO connecting cable. An earlier revision drew a right angle off the
-    lower-left corner; at 17 px it read as an unmotivated stray tail rather than a link, and
-    the two feet already say "two computers" without it. Removing it also stopped the
-    composition being pulled down-left.
+    NO CONNECTING CABLE. An earlier revision drew a right angle off the lower left corner.
+    At 17 px it read as an unmotivated stray tail rather than a link, and the two feet
+    already say "two computers" without it. Removing it also stopped the composition being
+    pulled down and left.
+
+    XML HAZARD, and the reason this note is worded the way it is: a double hyphen is ILLEGAL
+    inside an XML comment. An earlier version of this file used one in three places, which
+    made the document malformed. The browser's img decoder then rejected it, the plugin
+    manager fell back to its default artwork, and the icon never appeared at all. Keep this
+    comment free of double hyphens.
   -->
   <g fill="none" stroke="#4D6BFE" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
     <!-- back machine: top, right, and only the visible part of its bottom and left edges -->

@@ -85,6 +85,65 @@ test('the icon is the stroke-only style of the existing set, and self-contained'
   assert.match(svg, /aria-label="[^"]+"/u)
 })
 
+test('the in-page mark keeps the same geometry as the manifest icon', () => {
+  // The page cannot read the package's files, so its mark is inlined -- which means the two
+  // can drift. They are the same drawing, so a change to one that is not made to the other is
+  // a bug, not a variation.
+  const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
+  const svgPaths = [...svg.matchAll(/<path\s+d="([^"]+)"/gu)].map((m) => m[1]).sort()
+  const client = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
+  const clientPaths = [...client.matchAll(/h\('path',\s*\{\s*d:\s*'([^']+)'\s*\}\)/gu)].map((m) => m[1]).sort()
+  assert.ok(svgPaths.length > 0, 'the manifest icon must contain paths')
+  assert.deepEqual(clientPaths, svgPaths,
+    'the inlined page mark and assets/icon.svg have diverged')
+})
+
+test('the icon is well-formed XML, because the browser decodes it as an <img>', () => {
+  // THIS FAILED SILENTLY IN PRODUCTION. The manifest was valid, `iconOf()` accepted it, the
+  // file existed and rendered in a preview -- and the plugin manager still showed its default
+  // artwork. A double hyphen inside an XML comment is illegal, which made the document
+  // malformed; the browser's <img> decoder rejected the data URL, and `PackageArtwork` fell
+  // back on its `onError` path with nothing logged anywhere.
+  const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
+
+  // 1. No double hyphen inside any comment.
+  let rest = svg
+  let comments = 0
+  for (;;) {
+    const start = rest.indexOf('<!--')
+    if (start < 0) break
+    const end = rest.indexOf('-->', start + 4)
+    assert.ok(end > 0, 'every comment must be closed')
+    const body = rest.slice(start + 4, end)
+    comments += 1
+    assert.equal(body.includes('--'), false,
+      `a double hyphen is illegal inside an XML comment; it makes the whole document malformed. Offending comment:\n${body.slice(0, 200)}`)
+    rest = rest.slice(0, start) + rest.slice(end + 3)
+  }
+  assert.equal(rest.includes('-->'), false, 'no stray comment terminator')
+
+  // 2. Tags balance, and there is exactly one root element.
+  const stripped = rest
+  const tags = stripped.match(/<[^>]+>/gu) ?? []
+  const open = []
+  let roots = 0
+  for (const tag of tags) {
+    if (/^<\?|^<!/.test(tag)) continue
+    if (/\/>$/.test(tag)) continue
+    const name = /^<\/?\s*([A-Za-z_][\w.:-]*)/u.exec(tag)?.[1]
+    assert.ok(name !== undefined, `unparsable tag: ${tag}`)
+    if (tag.startsWith('</')) {
+      assert.equal(open.pop(), name, `closing </${name}> does not match the open tag`)
+    } else {
+      if (open.length === 0) roots += 1
+      open.push(name)
+    }
+  }
+  assert.equal(open.length, 0, `unclosed tags: ${open.join(', ')}`)
+  assert.equal(roots, 1, 'an SVG document must have exactly one root element')
+  assert.equal(tags[0]?.startsWith('<svg'), true, 'the root element must be <svg>')
+})
+
 /**
  * Load lib/client.js against a stub module table, run its `apply`, and return what it
  * registered. `apply` is where registration happens, so a caller that skipped it would see
@@ -161,7 +220,7 @@ test('the client registers exactly one settings.section for this plugin', () => 
  * a fixed order, so the index is stable.
  */
 function makeReactStub() {
-  const state = { index: 0, seeds: [] }
+  const state = { index: 0, seeds: [], calls: [] }
   const createElement = (type, props, ...children) => ({ type, props: props ?? {}, children })
   return {
     __state: state,
@@ -169,13 +228,32 @@ function makeReactStub() {
     useState: (initial) => {
       const index = state.index
       state.index += 1
+      if (state.calls[index] === undefined) state.calls[index] = []
       const seed = state.seeds[index]
-      if (seed !== undefined) return [seed, () => {}]
-      return [typeof initial === 'function' ? initial() : initial, () => {}]
+      const value = seed !== undefined ? seed : (typeof initial === 'function' ? initial() : initial)
+      // The setter RECORDS instead of applying. Nothing re-renders, but a test can then ask
+      // what a click would have put into state -- the only way to cover a handler whose whole
+      // job is to compute that argument, such as the Edit button's.
+      return [value, (next) => { state.calls[index].push(next) }]
     },
     useEffect: () => {},
     useCallback: (fn) => fn,
   }
+}
+
+/** The last value a click passed to the hook at `index`, or undefined if it never fired. */
+function lastSet(react, index) {
+  const calls = react.__state.calls[index]
+  return calls === undefined || calls.length === 0 ? undefined : calls[calls.length - 1]
+}
+
+/** Every element that is a button whose direct children include `label`. */
+function findButton(node, label, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const child of node) findButton(child, label, out); return out }
+  if (node.type === 'button' && Array.isArray(node.children) && node.children.includes(label)) out.push(node)
+  if (Array.isArray(node.children)) for (const child of node.children) findButton(child, label, out)
+  return out
 }
 
 /** Walk a stub element tree and collect every string leaf. */
@@ -407,6 +485,78 @@ test('editing an existing worker offers a blank token that means "keep the store
   // "keep" variant rather than the "required" one.
   assert.match(text, /STORED \u2022\u2022abc1/)
   assert.doesNotMatch(text, /F-TOKEN-NEW/)
+})
+
+// ---------------------------------------------------------------------------
+// regression: Edit must be seeded from the CONFIGURATION, not the live snapshot
+//
+// REPORTED SYMPTOM: the page showed a connected, ready worker, but pressing Edit opened an
+// empty form. The route returns two arrays -- `workers` (live: peerId, name, cwd, report,
+// connection) and `settings.workers` (config: id, name, url, cwd, enabled, serialQueue,
+// tokenSet) -- and the button was seeded from the first, so `id`, `url` and the token state
+// were all undefined.
+// ---------------------------------------------------------------------------
+
+/** Render with both arrays present, and hand back the react stub for click inspection. */
+function renderPairing(snapshotWorkers, configWorkers) {
+  const { registered, react } = loadClient()
+  const Section = registered[0].component
+  react.__state.index = 0
+  react.__state.seeds = []
+  react.__state.seeds[0] = {
+    ok: true,
+    workers: snapshotWorkers,
+    tasks: [],
+    settingsFile: 'C:\\dsh\\settings.json',
+    settings: { workers: configWorkers, requiredTier: 'workspace-write', approvalTimeoutMs: 90000, heartbeatMs: 15000 },
+  }
+  const tree = expand(Section({ t: makeTranslator() }))
+  return { tree, react }
+}
+
+test('pressing Edit seeds the form from the configuration, not from the live snapshot', () => {
+  const snapshotRow = {
+    peerId: 'worker-pc', name: 'worker-pc', cwd: 'C:\\dsh-remote\\p0work',
+    error: '', activeTasks: 0, report: null, connection: {},
+  }
+  const configRow = {
+    id: 'worker-pc', name: 'worker-pc', url: 'ws://192.168.1.101:7331',
+    cwd: 'C:\\dsh-remote\\p0work', enabled: true, serialQueue: 1,
+    tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022UpS0',
+  }
+  const { tree, react } = renderPairing([snapshotRow], [configRow])
+
+  const [editButton] = findButton(tree, 'BTN-EDIT')
+  assert.ok(editButton !== undefined, 'the card must offer an Edit button')
+  editButton.props.onClick()
+
+  // Hook order in the section is snapshot, loadError, busy, status, editing.
+  const editing = lastSet(react, 4)
+  assert.ok(editing !== undefined, 'Edit must open the form')
+  assert.equal(editing.isNew, false)
+  // Every field the form needs must come from the configuration.
+  assert.equal(editing.draft.id, 'worker-pc')
+  assert.equal(editing.draft.url, 'ws://192.168.1.101:7331')
+  assert.equal(editing.draft.tokenSet, true, 'the token state drives the "stored" hint')
+  assert.equal(editing.draft.tokenHint, '\u2022\u2022\u2022\u2022UpS0')
+  assert.equal(editing.draft.cwd, 'C:\\dsh-remote\\p0work')
+  assert.equal(editing.draft.serialQueue, 1)
+})
+
+test('Edit still opens a usable form when the worker is missing from the configuration', () => {
+  // A worker can be live but absent from the saved list (removed while connected). Falling
+  // back to the snapshot's id keeps the form addressable instead of crashing on `undefined`.
+  const snapshotRow = {
+    peerId: 'ghost', name: 'Ghost', cwd: 'C:\\g', error: '', activeTasks: 0, report: null, connection: {},
+  }
+  const { tree, react } = renderPairing([snapshotRow], [])
+  const [editButton] = findButton(tree, 'BTN-EDIT')
+  editButton.props.onClick()
+
+  const editing = lastSet(react, 4)
+  assert.equal(editing.draft.id, 'ghost')
+  assert.equal(editing.draft.name, 'Ghost')
+  assert.equal(editing.draft.url, '', 'an empty url is visible to the operator rather than silently wrong')
 })
 
 // ---------------------------------------------------------------------------
