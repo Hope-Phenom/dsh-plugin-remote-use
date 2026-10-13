@@ -14,10 +14,12 @@
   },
   "files": [
     "lib",
-    "slave",
     "assets",
     "locale",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "slave/*.mjs",
+    "slave/*.ps1",
+    "slave/node_modules"
   ],
   "scripts": {
     "test": "node --test"

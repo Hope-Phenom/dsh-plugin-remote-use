@@ -17,6 +17,7 @@
  * invisible: that no shipped script names a specific user's profile directory.
  */
 import { strict as assert } from 'node:assert'
+import { spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -84,6 +85,50 @@ test('the target-app check is configurable and says which state it is in', () =>
   assert.match(script, /\[string\]\$App = ''/u, 'S18 must be configurable by parameter')
   assert.match(script, /not configured/u, 'unconfigured must be reported as such')
   assert.match(script, /missing at: /u, 'a configured-but-absent app must name the path')
+})
+
+test('the published tarball does not carry this machine\'s generated artifacts', () => {
+  // RUNS THE REAL PACKER rather than inspecting `files`. The first two attempts at this were both
+  // wrong in a way inspection would not have caught:
+  //
+  //   * `.gitignore` does not govern `npm pack` for a directory listed in `files`.
+  //   * `.npmignore` does not either -- npm's documented rule is that entries included by `files`
+  //     CANNOT be excluded by either file.
+  //
+  // So `slave/selfcheck.json` -- a report naming the machine that produced it, its displays, GPU
+  // and session id -- shipped in the tarball until `files` was changed to enumerate `slave/*.mjs`
+  // and `slave/*.ps1` instead of the whole directory. Only the packer can say whether that holds.
+  const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: PKG_ROOT, encoding: 'utf8', timeout: 120_000, shell: true,
+  })
+  assert.equal(packed.status, 0, `npm pack failed: ${String(packed.stderr).slice(0, 300)}`)
+  let report
+  try {
+    report = JSON.parse(String(packed.stdout))
+  } catch {
+    assert.fail(`npm pack --json produced no parseable output: ${String(packed.stdout).slice(0, 200)}`)
+  }
+  const paths = (report?.[0]?.files ?? []).map((f) => f.path)
+
+  assert.ok(paths.length > 0, 'the packer reported no files at all')
+  // The pieces a worker actually needs must be there -- otherwise this test would "pass" by
+  // shipping nothing.
+  for (const required of ['slave/relay.mjs', 'slave/selfcheck.ps1', 'slave/screenshot.ps1', 'lib/index.js', 'lib/client.js']) {
+    assert.ok(paths.includes(required), `${required} is missing from the tarball`)
+  }
+  // ...and nothing that is about THIS machine may be.
+  const forbidden = paths.filter((p) => /selfcheck\.(json|txt)$|screenshot-report\.txt$|pairing\.txt$|slave\/shots\//u.test(p))
+  assert.deepEqual(forbidden, [], `the tarball carries generated artifacts: ${forbidden.join(', ')}`)
+})
+
+test('files enumerates the slave scripts instead of whitelisting the whole directory', () => {
+  // The mechanism behind the test above, asserted directly so a future edit that reverts to
+  // `"slave"` fails here with a clear reason instead of only in the packer.
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const files = pkg.files ?? []
+  assert.equal(files.includes('slave'), false,
+    'a bare "slave" entry whitelists everything under it, and npm cannot then exclude the generated reports')
+  assert.ok(files.some((f) => f.startsWith('slave/')), 'the slave scripts must still ship')
 })
 
 test('param() is the first statement in the scripts that take parameters', () => {
