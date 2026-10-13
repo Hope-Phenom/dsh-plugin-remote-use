@@ -2990,3 +2990,56 @@ S15 model credentials present: pass  actual=C:\Users\you\.dsh\.credentials.yaml
 包能正常安装、然后**起不了自己的监听器**。
 
 变异检验：去掉 `slave/node_modules` → 该测试失败 ✓
+
+#### 第 14 轮：第 1 项（人工审批）在回环上重新端到端验证
+
+**为什么值得做**：第 1 项是唯一"会让任务**做不成**"的缺口。上一次真机验证用的是真从机，而它**已离线 11 轮** ——
+也就是说此后每一处改动（审批队列、审计日志、设置路由、角色面板）都压在一个**无法重跑**的验证上。
+
+回环让它变得可重跑：本机布防 → 配对 → 委托任务 → 强制提权 → 审批。
+
+**两个方向都验证了**（本次运行的原始输出）：
+
+```
+approval requested: tool=pwsh id=call_00_...
+escalated task: stopReason=completed approvals=1
+[PASS] an escalation actually raised a permission request
+[PASS] the decision to allow was carried back and the task continued
+[PASS] the approved command really ran on the worker
+
+denied task: requests=1 output="The escalation was rejected, so the command did not run."
+[PASS] a refusal is obeyed: the escalated command did NOT run
+```
+
+#### 探针里我自己犯的三个错（都属"检查安静地给出错误答案"）
+
+1. **字符串匹配分不清"执行了"和"引用了"**：拒绝那条我用 `!output.includes('DENIED-LIVE')` 断言，
+   而 agent 在解释里**把命令引用回了**输出（"I can run the echo, but not with danger-full-access..."）→
+   **把一次拒绝报告成成功**。改用 **marker 文件**：存在与否毫无歧义。
+
+2. **空洞的通过**：第一版"拒绝方向"没断言**真的发生过审批请求**。若 agent 根本没尝试提权，
+   "命令没跑"就是**废话**。补上断言后，下一次运行立刻抓到 `requests=0` —— **证明这个守卫是必需的**。
+
+3. **PASS 旁边写着失败文案**：`check()` 无论如何都打印 detail，而我给的 detail 是失败信息，
+   于是输出里出现 `[PASS] ... -- no marker at ...`。这种输出会让人**不再信任整份报告**。
+
+#### 环境无法保证的部分，标为"无法判定"而不是通过或失败
+
+委托的 agent **是否**请求提权不由探针控制 —— 工具的说明写着 `danger-full-access` 只用于被沙箱拦下后的
+一次性重试，所以它经常干脆在当前档位下干完。**上一次问了，下一次没问。**
+
+| 处理 | 后果 |
+|---|---|
+| 判为失败 | 探针**间歇性变红**，原因与插件无关 |
+| 判为通过 | 就是上面第 2 条那个空洞检查 |
+| **判为"无法判定"并计入汇总** | 一次"验证得比看起来少"的运行**不会被读成满分** |
+
+汇总行会带上：`RESULT: OK ... (N check(s) could not be exercised)`。
+
+#### 顺带确认：配置在正确的 profile 上
+
+`.dsh\profiles` 下有三个：`desktop`（**装了插件**，链接指向本仓库；有 mediator）、
+`acp`（有 mediator，从机角色需要，无插件 —— 正确）、`web`（两者皆无）。
+
+用户一直在用的设置页正来自 `desktop`，所以"重启 DSH 生效"指的是它 —— 这一点此前是**假设**，现在是**查过的**。
+`web` profile 不装插件，与本功能无关（但它没有 mediator，若将来从它启动需另行配置）。

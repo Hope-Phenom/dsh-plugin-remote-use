@@ -11,7 +11,9 @@
 // IT DOES NOT WRITE THE SETTINGS FILE: `persist` is a no-op here. The arming state's own
 // persistence is covered by unit tests, and a probe has no business modifying the operator's
 // configuration. It still DISARMS before exiting, so no listener is left running.
-import { networkInterfaces } from 'node:os'
+import { existsSync, rmSync } from 'node:fs'
+import { networkInterfaces, tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { AcpBridge } from '../packages/dsh-plugin-remote-use/lib/bridge/acp-bridge.js'
 import { RelaySupervisor } from '../packages/dsh-plugin-remote-use/lib/core/relay-supervisor.js'
@@ -27,6 +29,9 @@ const ACP_PROFILE = `${process.env.USERPROFILE}\\.dsh\\profiles\\acp\\cordis.pat
 
 const line = (s) => process.stdout.write(`${s}\n`)
 let failures = 0
+// Checks the environment refused to exercise. Counted separately so a run that verified less than it
+// looks like cannot be read as a full pass.
+let inconclusive = 0
 const check = (label, pass, detail = '') => {
   line(`  [${pass ? 'PASS' : 'FAIL'}] ${label}${detail === '' ? '' : ` -- ${detail}`}`)
   if (!pass) failures += 1
@@ -125,6 +130,92 @@ line(`  task: stopReason=${result?.stopReason} output=${JSON.stringify(result?.o
 check('a task ran to completion on this machine acting as its own worker',
   result?.stopReason === 'completed', String(result?.stopReason ?? '') + ' ' + String(result?.diagnostic ?? '').slice(0, 120))
 
+// ---------------------------------------------------------------------------
+// THE APPROVAL PATH, end to end.
+//
+// This is item 1 of the objective: the one gap that made a task IMPOSSIBLE rather than merely
+// inconvenient. Before the approval queue existed, a `danger-full-access` escalation was refused
+// with no way to say yes.
+//
+// The last live proof of it used the real worker, which has been offline for eleven rounds -- so
+// every change since then (the queue, the audit log, the settings route, the role panel) has been
+// resting on a verification that could not be repeated. Loopback makes it repeatable.
+//
+// The escalation is requested by PROMPT, not by the harness: the delegated agent has to actually
+// ask, which is what makes this a test of the path rather than of the plumbing.
+//
+// EACH SIDE WRITES A MARKER FILE, because the obvious check -- "does the output contain the
+// command?" -- is a false negative waiting to happen. It did happen: the refusing turn REPLIED
+// with the command quoted back ("I can run the echo, but not with danger-full-access ..."), so
+// text matching reported a refusal as a success. A file either exists or it does not.
+const marker = (name) => join(tmpdir(), `remote-use-approval-${name}-${process.pid}.txt`)
+const markerFlag = (p) => `New-Item -ItemType File -Path '${p}' -Force | Out-Null`
+for (const p of [marker('allowed'), marker('denied')]) { try { rmSync(p, { force: true }) } catch { /* fine */ } }
+
+const approvals = []
+let escalated = null
+try {
+  escalated = await bridge.startTask({
+    cwd: process.cwd(),
+    prompt: `Use the pwsh tool to run this exact command: ${markerFlag(marker('allowed'))}. `
+      + 'Set its sandbox_permissions parameter to "danger-full-access". Do not use any other tool.',
+    onApproval: async (ask) => {
+      approvals.push(ask)
+      line(`  approval requested: tool=${String(ask?.toolName)} id=${String(ask?.toolCallId)}`)
+      return 'allow-once'
+    },
+  })
+} catch (error) {
+  escalated = { stopReason: 'error', diagnostic: String(error?.message ?? error) }
+}
+line(`  escalated task: stopReason=${escalated?.stopReason} approvals=${approvals.length}`)
+
+check('an escalation actually raised a permission request', approvals.length > 0,
+  'the delegated agent never asked, so this scenario proved nothing')
+check('the decision to allow was carried back and the task continued',
+  escalated?.stopReason === 'completed', String(escalated?.stopReason ?? '') + ' ' + String(escalated?.diagnostic ?? '').slice(0, 120))
+check('the approved command really ran on the worker', existsSync(marker('allowed')),
+  `marker expected at ${marker('allowed')}`)
+
+// The refusal direction, from the same path. A decider that says no must be obeyed -- and the
+// task must not perform the escalated action.
+//
+// IT ALSO HAS TO HAVE ASKED. "The command did not run" is true, and worthless, when the agent
+// simply declined to try -- which is exactly what it did on the first run of this probe. The
+// request count is therefore asserted here too, not only on the allowing side.
+const denials = []
+let denied = null
+try {
+  denied = await bridge.startTask({
+    cwd: process.cwd(),
+    prompt: `Use the pwsh tool to run this exact command: ${markerFlag(marker('denied'))}. `
+      + 'Set its sandbox_permissions parameter to "danger-full-access". Do not use any other tool.',
+    onApproval: async (ask) => {
+      denials.push(ask)
+      return 'reject-once'
+    },
+  })
+} catch (error) {
+  denied = { stopReason: 'error', diagnostic: String(error?.message ?? error) }
+}
+line(`  denied task: stopReason=${denied?.stopReason} requests=${denials.length} output=${JSON.stringify(String(denied?.output ?? '')).slice(0, 80)}`)
+// INCONCLUSIVE, NOT FAILED, when the agent declined to ask.
+//
+// Whether the delegated agent requests the escalation is not something this probe controls: the
+// tool description tells it that `danger-full-access` is for a one-shot retry of an operation the
+// sandbox already blocked, so it often just does the work under the current tier instead. On one
+// run it asked and on the next it did not. Reporting that as a FAILURE would make the probe
+// intermittently red for a reason that says nothing about the plugin; reporting it as a PASS would
+// be the vacuous check this comment exists to prevent. So it is named for what it is.
+if (denials.length > 0) {
+  check('a refusal is obeyed: the escalated command did NOT run', !existsSync(marker('denied')),
+    `marker must be absent at ${marker('denied')}`)
+} else {
+  inconclusive += 1
+  line('  [INCONCLUSIVE] the refusal direction was not exercised: the agent never asked for the escalation')
+  line('                 (the allowing direction above is the one that covers the original gap)')
+}
+
 try { await bridge.dispose() } catch { /* best effort */ }
 
 // Never leave a listener running.
@@ -138,6 +229,14 @@ try {
 check('the port was released', released)
 check('the credential was discarded in memory', arming.status().tokenSet === false)
 
+// Leave nothing behind. The markers are the only thing this probe writes outside its own memory,
+// and a probe that litters temp files is a probe someone stops running.
+for (const p of [marker('allowed'), marker('denied')]) { try { rmSync(p, { force: true }) } catch { /* fine */ } }
+
 line('')
-line(failures === 0 ? 'RESULT: OK -- this machine works as its own worker.' : `RESULT: ${failures} CHECK(S) FAILED`)
+// A run that verified LESS than it looks like must not read as a full pass, so the count of checks
+// the environment refused to exercise is carried into the summary line.
+line(failures === 0
+  ? `RESULT: OK -- this machine works as its own worker.${inconclusive > 0 ? ` (${inconclusive} check(s) could not be exercised)` : ''}`
+  : `RESULT: ${failures} CHECK(S) FAILED${inconclusive > 0 ? `, ${inconclusive} inconclusive` : ''}`)
 process.exit(failures === 0 ? 0 : 1)
