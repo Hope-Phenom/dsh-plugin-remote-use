@@ -43,7 +43,10 @@ const check = (label, ok, detail = '') => {
 // ---------------------------------------------------------------------------
 // Mount the plugin exactly as the host does
 // ---------------------------------------------------------------------------
-const mounted = { providers: [], tools: [], routes: [], sections: [], logs: [], effects: [] }
+const mounted = {
+  providers: [], tools: [], routes: [], sections: [], logs: [], effects: [],
+  guards: [], commands: new Map(), listeners: new Map(),
+}
 
 function makeEffectHost(target) {
   let n = 0
@@ -69,11 +72,33 @@ function makeCtx() {
       error: (m) => mounted.logs.push(['error', m]),
     },
     effect: makeEffectHost(mounted.effects),
+    // The plugin subscribes to `agent/created` to apply its default-off tool restriction, so
+    // a context without `on` cannot mount it at all. Keeping this faithful is the point of
+    // this script: it mounts the REAL apply(), and a missing method here is exactly the class
+    // of gap that unit tests running against their own fake context cannot see.
+    on(event, handler) {
+      const list = mounted.listeners.get(event) ?? []
+      list.push(handler)
+      mounted.listeners.set(event, list)
+      return () => {}
+    },
     subagents: { registerProvider: (p) => { mounted.providers.push(p); return () => {} } },
-    tools: { register: (d) => { mounted.tools.push(d); return () => {} } },
-    systemPrompt: { getSectionOrder: () => 100, section: (d) => { mounted.sections.push(d); return () => {} } },
+    tools: {
+      register: (d) => { mounted.tools.push(d); return () => {} },
+      guard: (fn) => { mounted.guards.push(fn); return () => {} },
+    },
+    commands: { register: (d) => { mounted.commands.set(d.name, d); return () => {} } },
+    systemPrompt: {
+      getSectionOrder: (name) => ({ TEAM_POLICY: 600, TOOL_SUBAGENT: 2800 })[name] ?? 100,
+      section: (d) => { mounted.sections.push(d); return () => {} },
+    },
     inject: (deps, cb) => cb({
       effect: makeEffectHost(mounted.effects),
+      commands: { register: (d) => { mounted.commands.set(d.name, d); return () => {} } },
+      tools: {
+        register: (d) => { mounted.tools.push(d); return () => {} },
+        guard: (fn) => { mounted.guards.push(fn); return () => {} },
+      },
       webServer: { register: (r) => { mounted.routes.push(r); return () => {} } },
     }),
   }
@@ -193,6 +218,75 @@ if (shotTool !== undefined) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// 2b. Per-session enablement: installing the plugin must not route every
+//     session through a worker.
+// ---------------------------------------------------------------------------
+console.log('\n=== 2b. per-session enablement (default off) ===')
+
+const makeLiveAgent = (id) => {
+  const agent = { id }
+  const denied = new Set()
+  agent.ctx = {
+    tools: {
+      restrict: (filter) => {
+        for (const name of filter.deny ?? []) denied.add(name)
+        return () => { for (const name of filter.deny ?? []) denied.delete(name) }
+      },
+    },
+  }
+  agent.__denied = denied
+  return agent
+}
+/** Deliver `agent/created` as the registry's serial announce does. */
+const createLiveAgent = (id) => {
+  const agent = makeLiveAgent(id)
+  for (const handler of mounted.listeners.get('agent/created') ?? []) handler({ agent, source: 'startup' })
+  return agent
+}
+/** The first denial from the plugin's global execution guard, if any. */
+const guardReason = (exec) => {
+  for (const guard of mounted.guards) {
+    const reason = guard(exec)
+    if (reason !== undefined) return reason
+  }
+  return undefined
+}
+/** The delegation policy the given session would receive right now. */
+const policyTextFor = (agent) => {
+  const section = mounted.sections.find((s) => s.name === 'remote-use:policy')
+  if (section === undefined) return undefined
+  return typeof section.text === 'function' ? section.text({ agent }) : section.text
+}
+
+check('the /remote-use command is registered', mounted.commands.has('remote-use'))
+check('a global execution guard is registered', mounted.guards.length > 0, `got ${mounted.guards.length}`)
+
+const agentA = createLiveAgent('live-a')
+const agentB = createLiveAgent('live-b')
+check('a new session has the remote tools denied', agentA.__denied.size === 4, `denied ${agentA.__denied.size}`)
+check('the policy section renders empty while off', policyTextFor(agentA) === '', JSON.stringify(policyTextFor(agentA)))
+check('the guard refuses a remote tool while off',
+  /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')),
+  'expected a refusal')
+check('the guard leaves other tools alone', guardReason({ name: 'pwsh', agent: agentA }) === undefined)
+
+const command = mounted.commands.get('remote-use')
+const onResult = command.handler({ commandId: 'live-1', agent: agentA, rawInput: 'on', attachments: [] })
+check('/remote-use on succeeds', onResult.kind === 'success', JSON.stringify(onResult))
+check('an enabled session is no longer denied', agentA.__denied.size === 0, `denied ${agentA.__denied.size}`)
+check('the tool is allowed once enabled', guardReason({ name: 'remote_agents', agent: agentA }) === undefined)
+check('the policy is injected once enabled',
+  /Remote LAN workers/.test(String(policyTextFor(agentA) ?? '')), 'expected the policy text')
+
+// The switch is PER SESSION: turning one on must not turn the other on.
+check('the other session stays off', agentB.__denied.size === 4 && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentB }) ?? '')))
+
+const offResult = command.handler({ commandId: 'live-2', agent: agentA, rawInput: 'off', attachments: [] })
+check('/remote-use off succeeds', offResult.kind === 'success')
+check('the restriction comes back',
+  agentA.__denied.size === 4 && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')))
 
 // ---------------------------------------------------------------------------
 // 3. Teardown

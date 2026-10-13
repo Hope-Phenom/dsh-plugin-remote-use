@@ -24,7 +24,7 @@ const entryPath = process.argv[2] ?? INSTALLED
 // Windows: the ESM loader only accepts file:// URLs for absolute paths.
 const entry = pathToFileURL(entryPath).href
 
-const registered = { providers: [], tools: [], effects: [], sections: [], injects: [] }
+const registered = { providers: [], tools: [], effects: [], sections: [], injects: [], guards: [], commands: new Map(), listeners: new Map() }
 const logLines = []
 
 /**
@@ -57,6 +57,16 @@ function makeCtx() {
       error: (m) => logLines.push(['error', m]),
     },
     effect: runEffect,
+    // The plugin subscribes to `agent/created` to apply its default-off tool restriction, so
+    // a context without `on` cannot mount it at all. Every harness that mounts the real
+    // `apply()` has to grow alongside it -- this was the third to need it, which is the
+    // standing cost of testing the real entry point rather than a hand-built assembly.
+    on(event, handler) {
+      const list = registered.listeners.get(event) ?? []
+      list.push(handler)
+      registered.listeners.set(event, list)
+      return () => {}
+    },
     subagents: {
       registerProvider(provider) {
         registered.providers.push(provider)
@@ -68,9 +78,20 @@ function makeCtx() {
         registered.tools.push(def)
         return () => {}
       },
+      guard(fn) {
+        registered.guards.push(fn)
+        return () => {}
+      },
+    },
+    commands: {
+      register(def) {
+        registered.commands.set(def.name, def)
+        return () => {}
+      },
     },
     systemPrompt: {
-      getSectionOrder: () => 100,
+      // The real order table, for the two names this plugin anchors on.
+      getSectionOrder: (name) => ({ TEAM_POLICY: 600, TOOL_SUBAGENT: 2800 })[name] ?? 100,
       section(def) {
         registered.sections.push(def)
         return () => {}
@@ -97,6 +118,25 @@ function makeInjectedCtx() {
         throw error
       }
       return () => {}
+    },
+    // The plugin's `ctx.inject([...], child => ...)` registrations land on THIS context, so
+    // it needs whatever services the injected callbacks touch -- currently `commands` for the
+    // /remote-use switch and `webServer` for the settings route.
+    commands: {
+      register(def) {
+        registered.commands.set(def.name, def)
+        return () => {}
+      },
+    },
+    tools: {
+      register(def) {
+        registered.tools.push(def)
+        return () => {}
+      },
+      guard(fn) {
+        registered.guards.push(fn)
+        return () => {}
+      },
     },
     webServer: {
       register(route) {
@@ -193,7 +233,18 @@ for (const t of registered.tools) {
   check(`${t.name}: no property keeps a "required" keyword`, stray.length === 0, stray.join(','))
 }
 
-check('registered a runtime-context section', registered.sections.length === 1, `got ${registered.sections.length}`)
+// Asserted BY NAME rather than by count: a count breaks every time a section is added, and
+// says nothing about which one went missing. Two are expected now -- the delegation policy
+// (empty until a session switches remote work on) and the in-flight task summary.
+const sectionNames = registered.sections.map((s) => s.name).sort()
+check('registered both prompt sections',
+  sectionNames.join(',') === 'remote-use:in-flight,remote-use:policy',
+  sectionNames.join(',') || '(none)')
+check('the delegation policy renders empty while no session has opted in',
+  registered.sections.find((s) => s.name === 'remote-use:policy')?.text?.({ agent: { id: 'smoke' } }) === '')
+check('the gate is installed: a command and an execution guard',
+  registered.commands.has('remote-use') && registered.guards.length > 0,
+  `commands=${[...registered.commands.keys()].join(',') || '(none)'} guards=${registered.guards.length}`)
 check('injected into webServer for the settings route',
   registered.injects.some((d) => Array.isArray(d) && d.includes('webServer')))
 

@@ -36,6 +36,11 @@ function makeContext() {
   const routes = []
   const logs = []
   const disposals = []
+  const guards = []
+  const commands = new Map()
+  const listeners = new Map()
+  /** agent -> the deny-filter currently in force for it; absent means lifted. */
+  const restrictions = new Map()
 
   const ctx = {
     logger: {
@@ -54,27 +59,92 @@ function makeContext() {
       }
       return dispose
     },
-    on() { return () => {} },
+    on(event, handler) {
+      const list = listeners.get(event) ?? []
+      list.push(handler)
+      listeners.set(event, list)
+      return () => {}
+    },
     subagents: {
       registerProvider(provider) {
         registered.set(provider.name, provider)
         return () => { registered.delete(provider.name) }
       },
     },
-    tools: { register: (def) => { tools.set(def.name, def); return () => tools.delete(def.name) } },
+    tools: {
+      register: (def) => { tools.set(def.name, def); return () => tools.delete(def.name) },
+      guard: (fn) => {
+        guards.push(fn)
+        return () => { const i = guards.indexOf(fn); if (i >= 0) guards.splice(i, 1) }
+      },
+    },
+    commands: {
+      register: (definition) => {
+        commands.set(definition.name, definition)
+        return () => commands.delete(definition.name)
+      },
+    },
     systemPrompt: {
       section: (s) => { sections.push(s); return () => {} },
-      getSectionOrder: () => 100,
+      // The real table, for the two names this plugin uses.
+      getSectionOrder: (name) => ({ TEAM_POLICY: 600, TOOL_SUBAGENT: 2800 })[name] ?? 0,
+      getContextOrder: () => 0,
     },
     inject(_services, cb) {
       cb({
         effect: ctx.effect,
+        commands: ctx.commands,
+        tools: ctx.tools,
         webServer: { register: (route) => { routes.push(route); return () => {} } },
       })
     },
   }
 
-  return { ctx, registered, tools, sections, routes, logs, disposals }
+  /**
+   * An agent as the platform presents it. `agent.ctx` is the scope every registration made
+   * through it belongs to, which is what makes `tools.restrict()` per-agent — the real
+   * implementation refuses a context-global call for exactly that reason.
+   */
+  function makeAgent(id) {
+    const agent = { id: id ?? `agent-${restrictions.size + 1}` }
+    agent.ctx = {
+      tools: {
+        restrict: (filter) => {
+          restrictions.set(agent, filter)
+          return () => restrictions.delete(agent)
+        },
+      },
+    }
+    return agent
+  }
+
+  /** Deliver an `agent/created` announcement, as the agent registry's `announce` does. */
+  function createAgent(id) {
+    const agent = makeAgent(id)
+    for (const handler of listeners.get('agent/created') ?? []) handler({ agent, source: 'startup' })
+    return agent
+  }
+
+  /** Run the global execution guard, if the plugin registered one. */
+  function guardReason(exec) {
+    for (const guard of guards) {
+      const reason = guard(exec)
+      if (reason !== undefined) return reason
+    }
+    return undefined
+  }
+
+  /** The policy text the given agent would receive right now. */
+  function policyFor(agent) {
+    const section = sections.find((s) => s.name === 'remote-use:policy')
+    if (section === undefined) return undefined
+    return typeof section.text === 'function' ? section.text({ agent }) : section.text
+  }
+
+  return {
+    ctx, registered, tools, sections, routes, logs, disposals,
+    guards, commands, restrictions, listeners, createAgent, makeAgent, guardReason, policyFor,
+  }
 }
 
 /**
@@ -366,4 +436,152 @@ test('removing an unknown worker is a 404, not a silent success', async () => {
     const { status } = await post(routes[0], 'worker.remove', { peerId: 'ghost' })
     assert.equal(status, 404)
   })
+})
+
+// ---------------------------------------------------------------------------
+// per-session enablement: installing the plugin must not route every session
+// through a worker, so the tools are denied inside each session's own scope
+// until `/remote-use on` lifts it for that session.
+// ---------------------------------------------------------------------------
+
+/** Register the plugin and return everything the enablement tests need. */
+function mountWithGate(config = {}) {
+  const harness = makeContext()
+  mount(harness.ctx, { workers: [worker('w1')], ...config })
+  return harness
+}
+
+/** Invoke the slash command the way the command service does. */
+function runCommand(harness, agent, rawInput = '') {
+  const definition = harness.commands.get('remote-use')
+  assert.ok(definition !== undefined, 'the /remote-use command must be registered')
+  return definition.handler({ commandId: 'c1', agent, rawInput, attachments: [], signal: undefined })
+}
+
+test('every new session starts with the remote tools denied', () => {
+  const h = mountWithGate()
+  // The tools exist globally (the model could see them where not restricted).
+  assert.equal(h.tools.size, 4)
+  const agent = h.createAgent('a1')
+  // ...but this session's scope denies them, so its model never sees them.
+  assert.ok(h.restrictions.has(agent))
+  assert.deepEqual(h.restrictions.get(agent).deny, ['remote_agents', 'remote_interrupt', 'remote_selfcheck', 'remote_screenshot'])
+  // The user's rule: nothing injected until a session opts in.
+  assert.equal(h.policyFor(agent), '')
+})
+
+test('/remote-use on lifts the restriction and enables the policy for that session only', () => {
+  const h = mountWithGate()
+  const a1 = h.createAgent('a1')
+  const a2 = h.createAgent('a2')
+
+  const result = runCommand(h, a1, 'on')
+  assert.equal(result.kind, 'success')
+  assert.equal(h.restrictions.has(a1), false, 'the restriction must be lifted')
+  assert.ok(h.policyFor(a1).includes('Remote LAN workers'), 'the policy must be injected')
+  // The other session is untouched: the switch is per session, not global.
+  assert.ok(h.restrictions.has(a2))
+  assert.equal(h.policyFor(a2), '')
+})
+
+test('/remote-use off puts the restriction back', () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+  assert.equal(h.restrictions.has(agent), false)
+
+  const result = runCommand(h, agent, 'off')
+  assert.equal(result.kind, 'success')
+  assert.ok(h.restrictions.has(agent), 'the restriction must be re-applied')
+  assert.equal(h.policyFor(agent), '')
+})
+
+test('/remote-use reports the state, and rejects anything else', () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  assert.match(runCommand(h, agent).text, /is off for this session/)
+  assert.match(runCommand(h, agent, 'status').text, /is off/)
+  runCommand(h, agent, 'on')
+  assert.match(runCommand(h, agent).text, /is on for this session/)
+  // Case and surrounding whitespace are the operator's, not a syntax error.
+  runCommand(h, agent, '  OFF  ')
+  assert.match(runCommand(h, agent).text, /is off/)
+
+  const bad = runCommand(h, agent, 'yes')
+  assert.equal(bad.kind, 'error')
+  assert.match(bad.text, /unknown argument "yes"/)
+})
+
+test('the command refuses to guess a session when the invocation carries none', () => {
+  const h = mountWithGate()
+  const result = runCommand(h, undefined, 'on')
+  // Guessing would either enable every session or none, and both are wrong.
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /no session/)
+})
+
+test('the execution guard is fail-closed: it refuses while off and allows while on', () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+
+  assert.match(h.guardReason({ name: 'remote_agents', agent }), /off for this session/)
+  runCommand(h, agent, 'on')
+  assert.equal(h.guardReason({ name: 'remote_agents', agent }), undefined, 'an enabled session must be allowed')
+  runCommand(h, agent, 'off')
+  assert.match(h.guardReason({ name: 'remote_agents', agent }), /off for this session/)
+})
+
+test('the guard leaves unrelated tools and unknown sessions alone', () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  // Another plugin's tool must never be affected.
+  assert.equal(h.guardReason({ name: 'pwsh', agent }), undefined)
+  // An execution with no agent cannot be attributed, so it is refused -- fail-closed.
+  assert.match(h.guardReason({ name: 'remote_selfcheck' }), /off for this session/)
+})
+
+test('the guard covers an agent that existed before the plugin was applied', () => {
+  // The restriction is applied at agent creation, so an agent created before a hot reload
+  // would keep the tools visible: the tool list can then be wrong. The guard is global
+  // precisely so the CONSEQUENCE is still right.
+  const h = mountWithGate()
+  const preExisting = { id: 'pre-existing', ctx: { tools: { restrict: () => () => {} } } }
+  // No agent/created announcement for it, so no restriction was recorded...
+  assert.equal(h.restrictions.has(preExisting), false)
+  // ...and yet it cannot execute the tool.
+  assert.match(h.guardReason({ name: 'remote_agents', agent: preExisting }), /off for this session/)
+})
+
+test('a session that exists when the plugin loads is denied on its next creation', () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+  assert.equal(h.restrictions.has(agent), false)
+  // A second mount (as a reload does) must not leave it enabled.
+  const reloaded = makeContext()
+  mount(reloaded.ctx, { workers: [worker('w1')] })
+  const same = reloaded.createAgent('a1')
+  assert.ok(reloaded.restrictions.has(same), 'a reloaded plugin starts every session off')
+})
+
+test('a failed restriction does not abort startup, and the guard still protects', () => {
+  const h = makeContext()
+  // An agent whose scope cannot be restricted, e.g. a platform shape this build does not
+  // expect. Degrading to "visible but refused" is far better than failing to load.
+  h.listeners.set('agent/created', [])
+  mount(h.ctx, { workers: [worker('w1')] })
+  const broken = { id: 'broken', ctx: { tools: { restrict() { throw new Error('nope') } } } }
+  for (const handler of h.listeners.get('agent/created')) handler({ agent: broken })
+  assert.ok(h.logs.some(([, m]) => /could not restrict remote tools/.test(m)), 'the failure must be logged')
+  assert.match(h.guardReason({ name: 'remote_agents', agent: broken }), /off for this session/)
+})
+
+test('setting delegationPolicy to empty keeps the tools gated but injects no policy', () => {
+  const h = mountWithGate({ delegationPolicy: '' })
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+  // No section registered at all, so nothing can render.
+  assert.equal(h.sections.some((s) => s.name === 'remote-use:policy'), false)
+  // The switch still governs execution.
+  assert.equal(h.guardReason({ name: 'remote_agents', agent }), undefined)
 })

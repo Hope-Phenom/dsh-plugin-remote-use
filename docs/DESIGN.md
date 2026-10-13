@@ -2113,3 +2113,111 @@ y 8..54，中心正好 `(32,31)`）。两台各自的底座已经足够说明"�
 所以它值得先有一段可以被反驳的文字，而不是先有一段能跑的代码。
 
 **未实现即当前状态**：设置页只**陈述**本机角色为"主机"，不放一个点了没用的开关（§15.3）。
+
+---
+
+## 17. 会话级启用开关：默认 off
+
+### 17.1 要解决的问题
+
+装了插件不等于"每一次工作都应该走从机"。期望的分工是**代码与开发在主机、只有 GUI 验证在从机**，
+而这件事**不能靠"插件装了就一直注入一条策略"来表达**。
+
+而且 DSH 里**没有任何地方告诉父代理"何时该委派"**：
+
+| 位置 | 为什么不行 |
+|---|---|
+| 派单工具 `subagent_remote` 的描述 | `dsh-tool-subagent` 的 Config **没有 `description`**，描述由代码按 provider 能力生成，进程外 provider 得到的是通用文案 |
+| provider 自身 | 契约只有 `name` / `capabilities` / `inheritsParentContext` / `start`，**没有描述位** |
+| DSH 的 `SUBAGENT_DELEGATION` 上下文 | 它是**对子代理说的**（"You are a delegated subagent…"），不是对父代理说的 |
+
+⇒ **策略只能由本插件自己注入**，而"是否注入"由会话决定。
+
+### 17.2 交互
+
+```
+/remote-use           显示本会话当前状态
+/remote-use on        本会话启用：注入分工策略，放开远程工具
+/remote-use off       本会话关闭（默认）
+```
+
+**默认 off**：新会话不注入任何策略，远程工具在该会话内**不可见**。
+**不跨重启保持**：模式是进程内的，重启后回到 off。
+
+### 17.3 实现：三件东西，缺一不可
+
+#### (1) 按会话遮蔽工具
+
+```js
+ctx.on('agent/created', ({ agent }) => {
+  if (!enabledAgents.has(agent)) agent.ctx.tools.restrict({ deny: REMOTE_TOOL_NAMES })
+})
+```
+
+⚠️ **不能全局遮蔽**：`tools.restrict()` 自己会拒绝 ——
+*"a context-global restriction would mask every agent — deny the tool for the intended agent instead"*。
+所以唯一正确的形状是在**每个 agent 自己的作用域**里拒绝，这也让限制随 agent 一起销毁、不跨会话泄漏。
+
+`/remote-use on` 调用该限制的 disposer 解除它。
+
+#### (2) 全局执行守卫（fail-closed 兜底）
+
+```js
+ctx.tools.guard((exec) => {
+  if (!REMOTE_TOOL_NAMES.includes(exec.name)) return undefined
+  return enabledAgents.has(exec.agent) ? undefined : 'remote-use is off for this session: ...'
+})
+```
+
+**为什么必须有它**：(1) 是在 **agent 创建时**施加的，而 `dsh-agent` **没有列举存活 agent 的 API** ——
+所以"插件被应用时已经存在的 agent"（热重载、配置变更）会保留可见的工具，**工具列表可以是错的**。
+全局守卫让**后果仍然正确**：名单错了，执行照样被拒。
+
+#### (3) 按会话条件注入策略
+
+```js
+ctx.systemPrompt.section({
+  name: 'remote-use:policy',
+  order: ctx.systemPrompt.getSectionOrder('TEAM_POLICY'),
+  text: (context) => enabledAgents.has(context.agent) ? cfg.delegationPolicy : '',
+})
+```
+
+`context.agent` 来自 `assembleContextFor(agent)`，所以**同一个 agent 对象**既标识命令作用域、
+也标识提示词作用域 —— 两侧天然一致。
+
+**order 放在 `TEAM_POLICY`**：`dsh-tools` 给它的 PTC-only 声明写过理由 ——
+*"Its order places the rule before that guidance rather than after it"*。
+策略要**先于**它所限定的工具说明被读到。
+
+### 17.4 策略文案（可配置，默认如下）
+
+`delegationPolicy` 配置项。核心三句：
+
+- 代码修改、文件编辑、构建、依赖安装、仓库操作**在本机**
+- **只**委派需要真实桌面的：启动并驱动目标程序、确认界面显示、复现只在真实显示器上出现的现象
+- **不要**在从机上开发 —— 它看不到本工作区，写在那边的不会回来
+
+设为**空串**则完全不注入（工具门禁仍然生效）。
+
+### 17.5 ⚠️ 强制力的真实边界
+
+| 层 | 强制力 |
+|---|---|
+| 本会话工具被遮蔽 | **硬**：模型看不到这些工具 |
+| 全局执行守卫 | **硬**：即使可见也拒绝执行 |
+| 结构性兜底 | **硬**：从机看不到主机工作区、从机沙箱只许写自己的 `cwd` |
+
+⇒ 现在 `off` 是**真的 off**（用户明确选择了"硬 off"）。最坏情况仍是白跑一趟，不会污染仓库。
+
+### 17.6 一个维护代价
+
+`apply()` 依赖的平台面变大了（`ctx.on` / `tools.guard` / `commands` / `agent.ctx.tools.restrict`），
+**每一个挂载真实 `apply()` 的 harness 都必须同步更新**。本轮为此改了三处：
+`test/apply-config.test.js`（仿真 ctx）、`plugin-smoke.mjs`、`plugin-live.mjs`。
+
+`plugin-live.mjs` 与 `plugin-smoke.mjs` **响亮报错**（`ctx.on is not a function`）而不是静默通过 ——
+这正是它们存在的意义：**单测用自己的假 ctx，覆盖不到"真实 apply() 需要的平台面"**。
+
+另外 `plugin-smoke.mjs` 里那条 `sections.length === 1` 的断言改成了**按名字断言** ——
+按数量会在每次新增区块时失效，而且说不清是哪一个丢了。

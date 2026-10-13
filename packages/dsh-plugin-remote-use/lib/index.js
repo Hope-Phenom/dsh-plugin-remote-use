@@ -79,6 +79,55 @@ const WORKER_DEFAULTS = {
 }
 
 /**
+ * Tools this plugin owns — the exact set the per-session gate acts on.
+ *
+ * Listed literally rather than derived from `makeRemoteTools()` so the gate cannot silently
+ * widen if that function ever grows a tool: a new tool would appear in the list only after
+ * someone adds it here, and until then the guard would refuse it (fail-closed).
+ */
+export const REMOTE_TOOL_NAMES = Object.freeze([
+  'remote_agents',
+  'remote_interrupt',
+  'remote_selfcheck',
+  'remote_screenshot',
+])
+
+/** The slash command that switches remote work on and off for one session. */
+export const ENABLE_COMMAND = 'remote-use'
+
+/**
+ * Injected only while a session has remote work switched ON.
+ *
+ * WHY THIS EXISTS AT ALL: enabling the plugin registers the delegation tools, but nothing in
+ * DSH tells the parent agent *when* delegating is appropriate -- the tool description is
+ * generic ("delegate a self-contained task to a subagent"), and DSH's own
+ * `SUBAGENT_DELEGATION` context is addressed to the CHILD, not to the delegating agent.
+ * Without a policy the model has no way to know that this worker is for GUI verification and
+ * not a second development machine.
+ *
+ * Placed at TEAM_POLICY order so the rule is read BEFORE the tool guidance it qualifies,
+ * which is the same placement rationale `dsh-tools` gives for its PTC-only statement.
+ */
+export const DEFAULT_DELEGATION_POLICY = [
+  '## Remote LAN workers (enabled for this session)',
+  '',
+  'A paired worker is available. It exists for GUI verification and testing on a second',
+  'machine, because GUI automation takes over the mouse, keyboard and focus of whichever',
+  'machine runs it.',
+  '',
+  '- Do all code editing, file changes, builds, dependency installs and repository work HERE.',
+  '- Delegate ONLY what needs a real desktop: launching and driving the target application,',
+  '  confirming what the interface shows, reproducing something that only happens on a real',
+  '  display.',
+  '- Do NOT develop on a worker. It cannot see this workspace, so anything written there does',
+  '  not come back.',
+  '',
+  'Call remote_selfcheck before delegating (a worker that fails its readiness check is',
+  'refused by the dispatch gate). Use remote_agents to watch progress, remote_screenshot to',
+  'look at the worker screen, and remote_interrupt to stop a task.',
+].join('\n')
+
+/**
  * Plugin configuration.
  *
  * A worker entry needs the relay's address and shared secret. `cwd` is the worker-side
@@ -112,6 +161,11 @@ export const Config = Schema !== null
     reportBudgetMs: Schema.number().default(4000),
     /** How long the page's explicit "re-check now" may spend. */
     selfcheckBudgetMs: Schema.number().default(25000),
+    /**
+     * The division-of-labour policy injected while a session has remote work switched on.
+     * Empty string disables the injection entirely (the tools are still gated).
+     */
+    delegationPolicy: Schema.string().default(DEFAULT_DELEGATION_POLICY),
   })
   : {
     // Rendered as "unsupported" in the Settings page; `normalizeConfig` applies the very
@@ -125,6 +179,7 @@ export const Config = Schema !== null
     heartbeatMs: 15_000,
     reportBudgetMs: 4_000,
     selfcheckBudgetMs: 25_000,
+    delegationPolicy: DEFAULT_DELEGATION_POLICY,
     _defaults: WORKER_DEFAULTS,
   }
 
@@ -420,6 +475,125 @@ export function apply(ctx, config) {
     ctx.effect(() => ctx.tools.register(def), `remote-use: tool ${def.name}`)
   }
 
+  // ---- per-session enablement (default OFF) ------------------------------
+  //
+  // Installing the plugin must not route every session through a worker. The tools exist
+  // globally, but each session starts with them ANDDENIED in its own scope; `/remote-use on`
+  // lifts that for the session that asked.
+  //
+  // WHY THE RESTRICTION IS PER-AGENT AND NOT GLOBAL: `tools.restrict()` refuses a
+  // context-global call outright -- "a context-global restriction would mask every agent".
+  // So the only correct shape is to deny inside each agent's own scope, which also means the
+  // restriction is disposed with the agent rather than leaking across sessions.
+  /** Agents the operator switched on. ABSENT means off, which is the default. */
+  const enabledAgents = new Set()
+  /** agent -> the disposer that lifts its restriction. Present means "currently denied". */
+  const restrictions = new Map()
+
+  /** Hide the remote tools from one session's model. Idempotent. */
+  function denyFor(agent) {
+    if (agent === undefined || restrictions.has(agent)) return
+    try {
+      // `agent.ctx` scopes the effect, so the restriction lives and dies with the agent.
+      restrictions.set(agent, agent.ctx.tools.restrict({ deny: [...REMOTE_TOOL_NAMES] }))
+    } catch (error) {
+      // Never let this abort plugin startup. The guard below is the backstop that still
+      // refuses execution, so a failed restriction degrades to "visible but unusable"
+      // rather than to "silently allowed".
+      log.warn(`could not restrict remote tools for one session (${error instanceof Error ? error.message : String(error)}); the execution guard still applies`)
+    }
+  }
+
+  /** Show them again for one session. */
+  function allowFor(agent) {
+    const lift = restrictions.get(agent)
+    restrictions.delete(agent)
+    if (typeof lift === 'function') lift()
+  }
+
+  ctx.on('agent/created', ({ agent } = {}) => {
+    if (agent === undefined) return
+    if (!enabledAgents.has(agent)) denyFor(agent)
+  })
+
+  // FAIL-CLOSED BACKSTOP.
+  //
+  // The restriction above is applied when an agent is created, so an agent that already
+  // existed when this plugin was applied -- a hot reload, or a config change -- would keep
+  // the tools visible. `dsh-tools` exposes no way to enumerate live agents, so that case
+  // cannot be closed by iterating. A plain-context guard applies to EVERY agent instead, and
+  // refuses execution unless the session is switched on. The tool list can then be wrong
+  // without the consequence being wrong.
+  ctx.effect(() => ctx.tools.guard((exec) => {
+    if (!REMOTE_TOOL_NAMES.includes(exec?.name)) return undefined
+    const agent = exec?.agent
+    if (agent !== undefined && enabledAgents.has(agent)) return undefined
+    return `remote-use is off for this session: run /${ENABLE_COMMAND} on to route work to a LAN worker.`
+  }), 'remote-use: enablement guard')
+
+  // ---- the switch itself -------------------------------------------------
+  ctx.inject(['commands'], (child) => {
+    const handler = (invocation) => {
+      const agent = invocation?.agent
+      const argument = String(invocation?.rawInput ?? '').trim().toLowerCase()
+
+      if (argument === '' || argument === 'status') {
+        const state = agent !== undefined && enabledAgents.has(agent) ? 'on' : 'off'
+        return {
+          kind: 'success',
+          text: `remote-use is ${state} for this session.`
+            + (state === 'off'
+              ? ` Nothing routes to a worker and the remote tools are hidden. Use /${ENABLE_COMMAND} on to enable them here.`
+              : ' Work needing a real desktop is delegated; code, builds and repository work stay here.'),
+        }
+      }
+      if (agent === undefined) {
+        return { kind: 'error', text: `/${ENABLE_COMMAND}: this invocation carries no session, so the switch cannot be scoped to it.` }
+      }
+      if (argument === 'on') {
+        enabledAgents.add(agent)
+        allowFor(agent)
+        return {
+          kind: 'success',
+          text: `remote-use is on for this session. The remote tools are available and the delegation policy is in effect;`
+            + ` code, builds and repository work still belong here. /${ENABLE_COMMAND} off reverts.`,
+        }
+      }
+      if (argument === 'off') {
+        enabledAgents.delete(agent)
+        denyFor(agent)
+        return {
+          kind: 'success',
+          text: `remote-use is off for this session. The remote tools are hidden and any further call is refused.`,
+        }
+      }
+      return { kind: 'error', text: `/${ENABLE_COMMAND}: unknown argument "${argument}". Use \`on\`, \`off\` or \`status\`.` }
+    }
+
+    child.effect(() => child.commands.register({
+      name: ENABLE_COMMAND,
+      description: 'Route GUI verification and testing to a paired LAN worker for THIS session (default off)',
+      input: { hint: 'on | off | status' },
+      handler,
+    }), `remote-use: /${ENABLE_COMMAND} command`)
+  })
+
+  // ---- the policy, only while switched on --------------------------------
+  //
+  // Order places the rule BEFORE the tool guidance it qualifies, matching the rationale
+  // dsh-tools gives for its own PTC-only statement. Rendering '' outside `on` means the
+  // section is absent rather than empty when the session has not opted in.
+  if (cfg.delegationPolicy !== '') {
+    ctx.effect(() => ctx.systemPrompt.section({
+      name: 'remote-use:policy',
+      order: ctx.systemPrompt.getSectionOrder('TEAM_POLICY'),
+      text: (context) => {
+        const agent = context?.agent ?? context?.scope
+        return agent !== undefined && enabledAgents.has(agent) ? cfg.delegationPolicy : ''
+      },
+    }), 'remote-use: delegation policy section')
+  }
+
   // ---- runtime context: stop the model from forgetting remote work --------
   if (cfg.injectTaskSummary) {
     ctx.effect(() => ctx.systemPrompt.section({
@@ -483,6 +657,10 @@ export function normalizeConfig(config) {
     heartbeatMs: Number.isFinite(config?.heartbeatMs) ? Math.max(0, Number(config.heartbeatMs)) : 15_000,
     reportBudgetMs: Number.isFinite(config?.reportBudgetMs) ? Math.max(1, Number(config.reportBudgetMs)) : 4_000,
     selfcheckBudgetMs: Number.isFinite(config?.selfcheckBudgetMs) ? Math.max(1, Number(config.selfcheckBudgetMs)) : 25_000,
+    // `undefined` means "not configured" and takes the default; an explicit empty string is
+    // the operator switching the injection OFF, which must survive. `??` would be wrong here
+    // in the other direction; the check is deliberately about the type.
+    delegationPolicy: typeof config?.delegationPolicy === 'string' ? config.delegationPolicy : DEFAULT_DELEGATION_POLICY,
   }
 }
 
