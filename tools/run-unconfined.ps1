@@ -21,11 +21,16 @@
 #
 # Usage:
 #   .\run-unconfined.ps1 -Command 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments '-NoProfile -File C:\x.ps1'
-#   .\run-unconfined.ps1 -NodeScript C:\path\to\script.mjs
+#   .\run-unconfined.ps1 -NodeScript C:\path\to\script.mjs -NodeArguments '--port 7398 --token x'
 param(
   [string]$Command = '',
   [string]$Arguments = '',
   [string]$NodeScript = '',
+  # Extra argv for -NodeScript. Without this the runner could only start a script with no options,
+  # which made it useless for `arm-loopback-worker.mjs`: that helper mints its own token unless
+  # `--token` is passed, and the caller cannot know the minted one (its stdout goes to the task, not
+  # to the shell). Forwarding the arguments is what lets the caller pick a token up front.
+  [string]$NodeArguments = '',
   [int]$TimeoutSeconds = 300,
   [switch]$KeepTask
 )
@@ -37,6 +42,7 @@ if ($NodeScript -ne '') {
   if (-not $node) { Write-Error 'node is not on PATH'; exit 2 }
   $Command = $node
   $Arguments = '"' + $NodeScript + '"'
+  if ($NodeArguments -ne '') { $Arguments = $Arguments + ' ' + $NodeArguments }
 }
 if ($Command -eq '') { Write-Error 'pass -Command (with -Arguments) or -NodeScript'; exit 2 }
 

@@ -185,23 +185,60 @@ if (route !== undefined) {
       const mark = c.status === 'pass' ? 'OK  ' : c.status === 'fail' ? 'FAIL' : c.status === 'warn' ? 'WARN' : '??  '
       console.log(`    [${mark}] ${c.id} ${c.name} | ${String(c.actual).slice(0, 90)}`)
     }
-    check('the link actually connected (this is the bug that shipped)', w?.connection?.connected === true,
-      JSON.stringify(w?.connection))
-    check('no connect failures', (w?.connection?.connectFailures ?? 1) === 0)
+    // THE GET'S REPORT IS BUDGETED, AND THAT IS THE DESIGN.
+    //
+    // `snapshot()` probes with `reportBudgetMs` (default 4000 ms) so a page load cannot hang;
+    // the definitive answer comes from the explicit `selfcheck` action, which gets
+    // `selfcheckBudgetMs` (25000 ms) and `maxAgeMs: 0` -- the same path the settings page's button
+    // takes. On a COLD load the first connect spawns the ACP agent (~2 s) and then runs the worker
+    // self-check (~3 s), so the budgeted snapshot legitimately has no report yet.
+    //
+    // Asserting on the budgeted snapshot made a correct design look like a failure. Assert on the
+    // explicit probe instead, and say out loud when the snapshot simply had not finished.
+    const link = w?.connection
+    check('the link actually connected (this is the bug that shipped)', link?.connected === true, JSON.stringify(link))
+    check('no connect failures', (link?.connectFailures ?? 1) === 0)
+    if (w?.report == null) {
+      console.log(`  note: the budgeted snapshot had no report yet (${String(w?.error ?? '')}); asking explicitly, as the page's button does`)
+    }
+
+    let report = w?.report ?? null
+    {
+      const body2 = await new Promise((resolve) => {
+        const res2 = { writeHead: () => {}, end: (s) => resolve(String(s)) }
+        const payload = JSON.stringify({ action: 'selfcheck', peerId: w?.peerId })
+        const req2 = {
+          method: 'POST',
+          on: (event, handler) => {
+            if (event === 'data') handler(Buffer.from(payload))
+            if (event === 'end') handler()
+            return req2
+          },
+        }
+        Promise.resolve(route.handler(req2, res2)).catch(() => resolve(''))
+        setTimeout(() => resolve(''), 60_000)
+      })
+      try {
+        const parsed2 = JSON.parse(body2)
+        if (parsed2?.report !== undefined) report = parsed2.report
+      } catch { /* keep whatever the snapshot had */ }
+    }
+    console.log(`  report    : verdict=${report?.verdict} blocking=${report?.blockingFailures} session=${report?.sessionSegment} checks=${report?.checks?.length}`)
+    for (const c of report?.checks ?? []) {
+      if (c.status !== 'pass') console.log(`    [${c.status.toUpperCase()}] ${c.id} ${c.name} | ${String(c.actual).slice(0, 80)}`)
+    }
+
     // WARNINGS ARE ADVISORY, and this harness has to agree with the product about that.
     //
     // It used to demand `verdict === 'ready'`, which the worker self-check only produces when there
     // are ZERO warnings -- so a worker whose blocking checks all pass, with three advisory notes,
     // read as a harness failure. The product's own gate (`remote-provider`) blocks on
     // `status === 'fail'` and ignores warnings entirely, so the two disagreed and only one was right.
-    //
-    // The distinctions worth keeping are the ones that change what can be done: `blocked` (a
-    // blocking check failed) and `partial` (a check could not be evaluated at all) both mean the
-    // worker is unusable. `warn` does not.
-    const verdict = w?.report?.verdict
+    const verdict = report?.verdict
+    check('a readiness report is available', report !== null && report !== undefined, String(verdict))
     check('the self-check is neither blocked nor partial', verdict !== 'blocked' && verdict !== 'partial',
-      `${String(verdict)} | failed=${String((w?.report?.checks ?? []).filter((c) => c.status === 'fail').map((c) => c.id).join(','))}`)
-    check('no blocking findings', (w?.report?.blockingFailures ?? 1) === 0)
+      `${String(verdict)} | failed=${String((report?.checks ?? []).filter((c) => c.status === 'fail').map((c) => c.id).join(','))}`)
+    check('no blocking findings', (report?.blockingFailures ?? 1) === 0)
   }
 }
 

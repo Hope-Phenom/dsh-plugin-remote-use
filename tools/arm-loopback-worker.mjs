@@ -42,8 +42,9 @@
  * helper disarmed itself the moment it announced it was ready. The live harness then connected to
  * nothing and reported a dead link -- a harness failure that looked exactly like a product failure.
  */
-import { existsSync, rmSync } from 'node:fs'
-import { networkInterfaces } from 'node:os'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { networkInterfaces, tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { RelaySupervisor } from '../packages/dsh-plugin-remote-use/lib/core/relay-supervisor.js'
 import { WorkerArming } from '../packages/dsh-plugin-remote-use/lib/core/worker-arming.js'
@@ -56,12 +57,19 @@ const arg = (name, fallback) => {
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback
 }
 
+// Everything has a DEFAULT, and the announcement goes to a FILE as well as stdout.
+//
+// WHY THE DEFAULTS MATTER: the useful case is starting this through a scheduled task, to get the
+// relay out of the DSH sandbox (`tools/run-unconfined.ps1`). Passing a space-separated argument
+// string across that boundary does not survive -- `pwsh -File script.ps1 -NodeArguments "a b"` binds
+// the value as a missing argument, which was measured. A helper that needs no arguments has nothing
+// to lose in transit, and the announcement file means the caller can still learn the minted token.
+const STATE_DIR = join(tmpdir(), 'dsh-plugin-remote-use')
 const PORT = Number(arg('port', '7398'))
 const PROFILE = arg('profile', `${process.env.USERPROFILE}\\.dsh\\profiles\\acp\\cordis.patch.yml`)
 const HOLD_MS = Number(arg('hold-ms', String(15 * 60 * 1000)))
-const STOP_FILE = arg('stop-file', '')
-// Injected rather than minted so the driver can read it without a credential passing through a
-// file. It is a loopback-only listener that lives for the duration of one harness run.
+const ANNOUNCE_FILE = arg('announce-file', join(STATE_DIR, 'arm-announce.json'))
+const STOP_FILE = arg('stop-file', join(STATE_DIR, 'arm-stop.signal'))
 const TOKEN = arg('token', `loopback-${process.pid}-${Math.floor(Date.now() / 1000)}`)
 
 const log = (m) => process.stderr.write(`[arm-loopback] ${m}\n`)
@@ -101,9 +109,19 @@ for (let i = 0; i < 30; i += 1) {
 }
 if (!up) { arming.disarm({ forget: true }); die(1, 'the listener never answered /healthz') }
 
-// The ONE line the driver parses. Everything else goes to stderr, so stdout stays machine-readable.
-process.stdout.write(`${JSON.stringify({ url: `ws://127.0.0.1:${PORT}`, token: TOKEN, port: PORT, pairing: armed.pairing })}\n`)
+// The ONE line the driver parses, on stdout AND in the file. stdout is for a caller that started us
+// directly; the file is for a caller that started us through a scheduled task, where stdout belongs
+// to the task and never comes back.
+const announcement = JSON.stringify({ url: `ws://127.0.0.1:${PORT}`, token: TOKEN, port: PORT, pairing: armed.pairing, pid: process.pid })
+try {
+  mkdirSync(STATE_DIR, { recursive: true })
+  writeFileSync(ANNOUNCE_FILE, `${announcement}\n`, 'utf8')
+} catch (error) {
+  log(`WARNING: could not write the announcement file (${error.message}); a caller that started us indirectly cannot learn the token`)
+}
+process.stdout.write(`${announcement}\n`)
 log(`armed on 127.0.0.1:${PORT}; holding up to ${Math.round(HOLD_MS / 1000)}s`)
+log(`announcement: ${ANNOUNCE_FILE}`)
 
 let stopping = false
 const shutdown = (why) => {
@@ -118,8 +136,8 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 // Polled rather than watched: a watch on a file that does not exist yet has to be re-armed after
 // every event, and the polling interval is far below the cost of a run.
-if (STOP_FILE !== '') {
-  try { rmSync(STOP_FILE, { force: true }) } catch { /* fine */ }
+try { rmSync(STOP_FILE, { force: true }) } catch { /* fine */ }
+{
   const timer = setInterval(() => { if (existsSync(STOP_FILE)) shutdown('stop file') }, 400)
   timer.unref?.()
 }
