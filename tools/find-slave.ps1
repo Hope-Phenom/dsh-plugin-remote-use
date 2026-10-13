@@ -109,16 +109,50 @@ Write-Host ''
 Write-Host "FOUND: $Name is at $found" -ForegroundColor Green
 
 # --- phase 4: make the NAME resolve, so the next address change is a one-command fix -----------
+#
+# WRITING THE hosts FILE NEEDS ELEVATION, and the first version of this script did not check.
+# `Set-Content` threw "Access to the path ... is denied", the script printed
+# `hosts   : <ip>  <name>` and `ssh <name>  # now resolves to ...` anyway, and exited 0. So it
+# reported success for a change it had not made -- the exact failure mode this project keeps
+# finding in other people's checks, here in my own tool. It was only caught by RUNNING the success
+# path, which had never been run: the earlier test was of the not-found path.
+#
+# A tool that lies about what it did is worse than one that refuses, so the write is checked and a
+# failure exits non-zero with the two things the operator can do instead.
+$hostsEntry = "$found`t$Name"
+$wrote = $false
+$why = ''
 if (-not $NoHosts) {
   $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-  $lines = @(Get-Content $hosts -ErrorAction SilentlyContinue)
-  $kept = $lines | Where-Object { $_ -notmatch "(\s|^)$([regex]::Escape($Name))(\s|$)" }
-  $entry = "$found`t$Name"
-  Set-Content -Path $hosts -Value ($kept + $entry) -Encoding ASCII
-  Write-Host "hosts   : $entry" -ForegroundColor Green
+  try {
+    $lines = @(Get-Content $hosts -ErrorAction Stop)
+    $kept = $lines | Where-Object { $_ -notmatch "(\s|^)$([regex]::Escape($Name))(\s|$)" }
+    Set-Content -Path $hosts -Value ($kept + $hostsEntry) -Encoding ASCII -ErrorAction Stop
+    $wrote = $true
+  } catch {
+    $why = $_.Exception.Message
+  }
+}
+
+Write-Host ''
+if ($NoHosts) {
+  Write-Host "  -NoHosts given; add this yourself (needs elevation):  $hostsEntry"
+  exit 0
+}
+if ($wrote) {
+  Write-Host "hosts   : $hostsEntry" -ForegroundColor Green
   Write-Host ''
   Write-Host "  ssh $Name    # now resolves to $found"
-} else {
-  Write-Host "  -NoHosts given; add this yourself:  $found`t$Name"
+  exit 0
 }
-exit 0
+
+Write-Host "COULD NOT WRITE THE hosts FILE: $why" -ForegroundColor Red
+Write-Host "  (editing it requires an elevated shell)"
+Write-Host ''
+Write-Host "  The worker WAS found at $found. To make the name resolve, either:"
+Write-Host "    1. re-run this from an Administrator PowerShell, or"
+Write-Host "    2. add this line to $env:SystemRoot\System32\drivers\etc\hosts yourself:"
+Write-Host "         $hostsEntry"
+Write-Host "    3. or give the worker a DHCP reservation plus a DNS record on the router,"
+Write-Host "       which survives address changes without touching any machine."
+exit 1

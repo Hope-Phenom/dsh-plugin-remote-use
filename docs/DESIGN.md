@@ -3696,3 +3696,30 @@ dshpair1... -> {"url":"ws://192.168.1.101:7331","token":"..."}
 
 > 这与我一直在修的其它问题同源：**文档说"待部署"而实际已部署，与检查读错路径一样，
 > 是给信任它的人一个错误答案。**
+
+#### 第 27 轮（续）：`find-slave.ps1` 的成功路径第一次跑 —— 抓到它**谎报成功**
+
+这个脚本此前只跑过**找不到**的路径（报告正确）。第一次跑**找到**的路径就暴露了：
+
+```
+key accepted by: 192.168.1.101 -> WORKER-PC
+FOUND: worker-pc is at 192.168.1.101
+Set-Content: Access to the path 'C:\WINDOWS\System32\drivers\etc\hosts' is denied.
+hosts   : 192.168.1.101	worker-pc          ← 照样打印
+  ssh worker-pc    # now resolves to 192.168.1.101
+exit=0                                            ← 报成功
+```
+
+**写失败了，但它宣称成功并返回 0。** 原因是 `Set-Content` 的异常没有被检查，而那两行成功提示是
+**无条件**打印的。写 hosts 需要管理员权限，这也是没考虑到的。
+
+> 这就是我一直在别人代码里找的模式，出现在**我自己的工具**里。
+> 而这个项目已经反复证明：**没有被跑过的路径，就不会被发现** —— 这次是"成功路径"。
+
+修法：把写入包在 try/catch 里，失败时**明确说明、给出三条可操作的替代方案（提权重跑 / 手工加行 /
+路由器 DHCP 保留 + DNS）、并以退出码 1 结束**。`-NoHosts` 仍正常返回 0。
+
+```
+非管理员:  COULD NOT WRITE THE hosts FILE: ... is denied.   exit=1
+-NoHosts :  ... add this yourself (needs elevation): ...    exit=0
+```
