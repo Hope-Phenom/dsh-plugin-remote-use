@@ -924,15 +924,21 @@ export function makeSettingsRoute(deps) {
             if (peer === undefined) return
             // The capture path is independent of the ACP link, so it still works when the
             // worker's agent is busy -- which is exactly when a screenshot is most wanted.
-            const shot = await peer.screenshot({ fresh: true })
+            //
+            // `peer` here is the worker RUNTIME, not the connection. The runtime exposes
+            // `connection` (and `bridge`, the same object) plus a `selfcheck()` that falls
+            // back to a synthesised report; everything else lives on the connection. Calling
+            // `peer.screenshot()` directly was a TypeError at the button, while the model's
+            // `remote_screenshot` tool -- which goes through `connection` -- worked fine.
+            const shot = await peer.connection.screenshot({ fresh: true })
             return send(200, { ok: true, peerId: peer.peerId, screenshot: shot })
           }
 
           case 'ping': {
             const peer = peerOr(body?.peerId)
             if (peer === undefined) return
-            await peer.ensure()
-            return send(200, { ok: true, peerId: peer.peerId, connected: peer.connected })
+            await peer.connection.ensure()
+            return send(200, { ok: true, peerId: peer.peerId, connected: peer.connection.connected })
           }
 
           case 'interrupt': {

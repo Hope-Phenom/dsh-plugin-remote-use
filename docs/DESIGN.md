@@ -2134,6 +2134,68 @@ LOADED-OK     (notify-ref, 402 bytes)   ← 通知插件
 
 因为页面读不到包内文件，页内图标只能内联 —— 所以必须有那条"不许漂移"的断言。
 
+### 15.11 假对象比真对象**能力更强**（第四次测试接缝失效）
+
+首次真机使用后：点「连接检测」「截图」报 **`peer.ensure is not a function`**。
+
+#### 根因：调用者搞错了接收者
+
+`peers` 里存的是 **`workerRuntime`**，它只提供 `selfcheck()` 和 `connection`；
+`ensure()` / `screenshot()` / `connected` 都在 **`connection`（即 `PeerConnection`）** 上。
+
+```js
+// 路由里（错）
+await peer.ensure()
+await peer.screenshot({ fresh: true })
+// 模型工具里（对，remote-tools.js:227）
+await wanted.connection.screenshot({ fresh: args?.fresh !== false })
+```
+
+**同一个功能，模型那条路是对的，页面按钮那条路是错的。**
+
+#### 为什么测试没抓到：**假对象比它替代的东西更强**
+
+```js
+// 测试里的假 peer（错）
+return {
+  peerId, name, defaultCwd,
+  connected: true,          // ← 真实 runtime 没有
+  async ensure() {},        // ← 真实 runtime 没有
+  async screenshot() {...}, // ← 真实 runtime 没有
+  ...
+}
+```
+
+它把连接方法**直接放到了 peer 上**，所以 `peer.ensure()` 在测试里成功、在真实里崩溃。
+**假对象只有在"不比真对象更强"时才有鉴别力** —— 一个更宽容的替身会让整张网失效。
+
+而且 `ping` **当时根本没有测试** —— 变异检验（把路由改回错误写法）只让 screenshot 那条失败。
+
+#### 修法：让假对象**镜像真实形状**，并加一条撒不了谎的测试
+
+| 层 | 做法 |
+|---|---|
+| 单元测试的假 peer | 把 `ensure`/`screenshot`/`cancel`/`connected` 全部移到 `connection` 上，`bridge` 指向同一对象 —— 与真实 runtime 一致 |
+| **集成测试**（`apply-config.test.js`） | **驱动真实 `apply()` 产出的 runtime**：先从 `provider.peer` 取出真实 runtime，断言 `connection.ensure` 存在而 **`runtime.ensure === undefined`**（把 bug 的前提写成断言），再用路由打 `ping`/`screenshot`，断言**错误里不得出现 "is not a function"** |
+
+集成测试通过 `provider.peer` 拿到 runtime —— provider 持有真实对象，这条路径**结构上不可能比真实更强**。
+
+#### 附带发现
+
+`screenshot` 走 **HTTP fetch**（报 `fetch failed`），`ping` 走 **WebSocket**（报 `ETIMEDOUT`）——
+两者的错误文案不同，断言必须同时接受。这是测试跑出来的，不是猜的。
+
+#### 同类问题的累计清单
+
+| # | bug | 为什么测试没抓到 |
+|---|---|---|
+| 1 | provider 从未调用 `bridge.connect()` | 单测用**预先连好**的假 bridge |
+| 2 | 工具 schema 不可转换（`type: null`） | 冒烟只挂载、不触碰工具 |
+| 3 | 编辑表单取自错误数组 | 假数据两个数组长得一样 |
+| 4 | **`peer.ensure is not a function`** | **假对象方法比真对象多** |
+
+**共同点：替身比被替身者更宽容。** 三次是靠真机发现的，一次是靠真机验证脚本。
+
 ---
 
 ## 16. 对称配对（本机在主/从之间切换）—— 设计，待评审

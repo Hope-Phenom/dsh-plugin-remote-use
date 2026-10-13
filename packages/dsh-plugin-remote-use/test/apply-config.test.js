@@ -439,6 +439,60 @@ test('removing an unknown worker is a 404, not a silent success', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// the route must address the worker the way `apply()` actually publishes it
+//
+// REPORTED SYMPTOM: pressing the page's "Test link" and "Screenshot" buttons answered
+// `peer.ensure is not a function`. The route called connection methods on the worker
+// RUNTIME, which carries `selfcheck()` and a `connection`, but not the connection's methods.
+//
+// A hand-written fake hid this: it had `ensure`/`screenshot`/`connected` directly on the
+// peer, so it was MORE capable than the object it stood in for, and the suite passed while
+// the button crashed. These tests use the runtime the REAL `apply()` produced, which cannot
+// be more capable than itself.
+// ---------------------------------------------------------------------------
+
+/** The worker runtime as `apply()` published it, reached through the registered provider. */
+function runtimeFor(registered, peerId) {
+  return registered.get(`remote-${peerId}`)?.peer
+}
+
+test('the published runtime puts the connection methods on `connection`, not on itself', () => {
+  const h = makeContext()
+  mount(h.ctx, { workers: [worker('w1')] })
+  const runtime = runtimeFor(h.registered, 'w1')
+
+  assert.ok(runtime !== undefined, 'the provider must expose the runtime it was given')
+  // Both names point at the same connection, which is what the route may rely on.
+  assert.equal(runtime.bridge, runtime.connection)
+  assert.equal(typeof runtime.connection.ensure, 'function')
+  assert.equal(typeof runtime.connection.screenshot, 'function')
+  assert.equal(typeof runtime.selfcheck, 'function')
+  // The premise of the bug: these are NOT on the runtime.
+  assert.equal(runtime.ensure, undefined)
+  assert.equal(runtime.screenshot, undefined)
+  assert.equal(runtime.connected, undefined)
+})
+
+test('ping and screenshot reach the connection instead of throwing a TypeError', async () => {
+  const h = makeContext()
+  mount(h.ctx, { workers: [worker('w1')] })
+  const route = h.routes[0]
+
+  for (const action of ['ping', 'screenshot']) {
+    const { status, body } = await post(route, action, { peerId: 'w1' })
+    const text = String(body.error ?? '')
+    // The worker is unreachable, so a connection error is the expected outcome. What must
+    // NOT happen is a TypeError from calling a method on the wrong object.
+    assert.equal(/is not a function/u.test(text), false, `${action} addressed the wrong object: ${text}`)
+    assert.equal(status === 200 || status === 502, true, `${action} returned ${status}: ${text}`)
+    // `ping` goes through the WebSocket and says ETIMEDOUT/ECONNREFUSED; `screenshot` is an
+    // HTTP fetch against the relay and says "fetch failed". Either is a connection story.
+    assert.equal(body.ok === true || /ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket|timeout|fetch/iu.test(text), true,
+      `${action} failed for an unexpected reason: ${text}`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // per-session enablement: installing the plugin must not route every session
 // through a worker, so the tools are denied inside each session's own scope
 // until `/remote-use on` lifts it for that session.

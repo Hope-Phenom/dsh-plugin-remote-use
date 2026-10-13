@@ -585,18 +585,39 @@ function fakeReq(method, body) {
   return req
 }
 
+/**
+ * A worker runtime, mirroring the shape `apply()` actually publishes.
+ *
+ * WHY THIS MATTERS: the runtime carries `selfcheck()` plus a `connection`; `ensure()`,
+ * `screenshot()`, `cancel()` and `connected` all live ON the connection. An earlier version
+ * of this fake put `ensure`/`screenshot`/`connected` directly on the peer, which is MORE
+ * capable than the real object — so the route's `peer.ensure()` TypeError passed the whole
+ * suite and only appeared when a user pressed the button.
+ */
 function makePeer(overrides = {}) {
+  const connection = {
+    connected: true,
+    stats: { connected: true, connects: 1 },
+    calls: { ensure: 0, screenshot: 0, cancel: 0 },
+    async ensure() { this.calls.ensure += 1 },
+    async screenshot() {
+      this.calls.screenshot += 1
+      return { localPath: 'C:\\tmp\\shot.png', width: 1920, height: 1080 }
+    },
+    async cancel() { this.calls.cancel += 1 },
+  }
   return {
     peerId: 'w1',
     name: 'w1',
     defaultCwd: 'C:\\work',
-    connected: true,
-    connection: { stats: { connected: true, connects: 1 } },
+    connection,
+    // The real runtime points `bridge` at the same object.
+    bridge: connection,
     selfcheckCalls: [],
-    async selfcheck(opts) { this.selfcheckCalls.push(opts); return { verdict: 'ready', blockingFailures: 0, checks: [] } },
-    async screenshot() { return { localPath: 'C:\\tmp\\shot.png', width: 1920, height: 1080 } },
-    async ensure() {},
-    bridge: { async cancel() {} },
+    async selfcheck(opts) {
+      this.selfcheckCalls.push(opts)
+      return { verdict: 'ready', blockingFailures: 0, checks: [] }
+    },
     ...overrides,
   }
 }
@@ -663,6 +684,18 @@ test('screenshot returns the saved path and geometry', async () => {
   assert.equal(status, 200)
   assert.equal(body.screenshot.width, 1920)
   assert.match(body.screenshot.localPath, /shot\.png$/)
+})
+
+test('ping establishes the link through the connection and reports it', async () => {
+  // The receiver matters: `ensure()` and `connected` live on the worker's CONNECTION, not on
+  // the runtime the route holds. This route called them on the runtime and the page's button
+  // answered "peer.ensure is not a function".
+  const { route, peers } = makeRoute()
+  const connection = peers.get('w1').connection
+  const { status, body } = await callRoute(route, 'POST', JSON.stringify({ action: 'ping', peerId: 'w1' }))
+  assert.equal(status, 200)
+  assert.equal(body.connected, true)
+  assert.equal(connection.calls.ensure, 1, 'ping must go through connection.ensure()')
 })
 
 test('interrupt cancels every in-flight task and reports per-task failures', async () => {
