@@ -189,6 +189,58 @@ test('a DISARMED stored state costs no probe at boot', () => {
   assert.equal(arming.status().armed, false)
 })
 
+test('RE-ARMING ROTATES THE CREDENTIAL, so the old pairing stops working', () => {
+  // Decision 3 is "generated WHEN ENABLED". A credential that survived an explicit stop is one
+  // the operator has no reason to believe is still valid, and the previous pairing would still
+  // open this machine.
+  //
+  // This is the test that was missing: the code read `this.token === '' ? mint() : this.token`,
+  // so a disarm-then-arm reused the old credential while the comment above it promised the
+  // opposite. Nothing failed, because nothing asserted it.
+  let n = 0
+  const { arming } = makeArming({ mint: () => `token-${++n}` })
+  const first = arming.arm({ bindAddress: '192.168.1.100' })
+  assert.equal(first.token, 'token-1')
+  assert.equal(arming.accepts('token-1'), true)
+
+  arming.disarm()
+  const second = arming.arm({ bindAddress: '192.168.1.100' })
+  assert.equal(second.token, 'token-2', 're-arming must mint a new credential')
+  assert.equal(arming.accepts('token-2'), true)
+  assert.equal(arming.accepts('token-1'), false, 'the old pairing must no longer open this machine')
+  // ...and the pairing string it produced carries the new one.
+  const fresh = arming.pairingString()
+  assert.equal(typeof fresh, 'string')
+  assert.equal(fresh.includes('token-1'), false)
+})
+
+test('A RESTART does not rotate: the persisted credential comes back', () => {
+  // The counterpart to the test above, and the reason the two cases had to be told apart. A
+  // restart is not the operator saying "stop", and regenerating here would break every pairing
+  // that had already been distributed.
+  const { arming, calls } = makeArming({ mint: () => 'minted-on-arm' })
+  arming.arm({ bindAddress: '192.168.1.100' })
+  const saved = calls.persisted.at(-1)
+
+  let minted = 0
+  const restarted = makeArming({ stored: saved, mint: () => { minted += 1; return 'should-not-be-used' } })
+  assert.equal(restarted.arming.status().armed, true, 'it comes back armed')
+  assert.equal(restarted.calls.start[0].token, 'minted-on-arm', 'the SAME credential, not a fresh one')
+  assert.equal(minted, 0, 'restoring must not mint anything')
+})
+
+test('disarm({ forget }) still has a distinct meaning: the secret leaves storage', () => {
+  // Rotation makes `forget` unnecessary for invalidating a pairing, but it still matters for an
+  // operator who wants the credential off disk -- after a restart there would be nothing to
+  // restore.
+  const { arming, calls } = makeArming()
+  arming.arm({ bindAddress: '192.168.1.100' })
+  arming.disarm()
+  assert.equal(calls.persisted.at(-1).token !== '', true, 'a plain stop keeps it for the restart case')
+  arming.disarm({ forget: true })
+  assert.equal(calls.persisted.at(-1).token, '', 'forget erases it')
+})
+
 test('disarm keeps the credential for a restart unless asked to forget it', () => {
   const { arming, calls } = makeArming()
   arming.arm({ bindAddress: '192.168.1.100' })

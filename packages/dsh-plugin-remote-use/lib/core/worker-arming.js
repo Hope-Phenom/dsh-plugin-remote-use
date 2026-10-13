@@ -203,10 +203,18 @@ export class WorkerArming {
     const bindAddress = String(request.bindAddress).trim()
     const port = Number(request.port ?? DEFAULT_ARM_PORT)
 
-    // A NEW token each time it is armed from disarmed: disarming is the operator saying "stop",
-    // and a credential that survived that would be a credential they did not expect to still
-    // work. The stored one is only reused across a RESTART, which is a different event.
-    const token = this.token === '' ? this.mint() : this.token
+    // A NEW credential every time it is armed, because decision 3 is "generated WHEN ENABLED".
+    //
+    // The persisted one exists for a different event: a RESTART. Arming is the operator saying
+    // "accept remote execution now", and a credential that survived an explicit stop is one they
+    // have no reason to believe is still valid. The distinction matters because the two cases look
+    // identical in the settings file -- `armed` is false and a token is present either way -- so
+    // only the arm path can tell them apart.
+    //
+    // Caught by reading the code against its own comment: the comment said this, the line did
+    // `this.token === '' ? this.mint() : this.token`, and a disarm-then-arm left the old pairing
+    // working. A test now asserts the rotation.
+    const token = this.mint()
 
     try {
       this.start(bindAddress, port, token)
