@@ -12,8 +12,8 @@
  * against a minimal React stub turns "it parses" into "it produces a tree".
  */
 import { strict as assert } from 'node:assert'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, statSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
@@ -34,6 +34,55 @@ test('package.json declares the client half the way dsh-client-modules reads it'
   assert.equal(pkg.dsh?.client?.platform, 'web')
   // The route the page fetches and the file it lives in must both exist.
   assert.ok(pkg.exports['./client'].endsWith('client.js'))
+})
+
+// ---------------------------------------------------------------------------
+// the Settings nav icon
+//
+// Without `icon` in the manifest the nav falls back to a generic gear. The rules below are
+// `iconOf()` in @deepseek-ai/dsh-app-boot read verbatim: a RELATIVE path, one of four
+// extensions, contained in the manifest directory, a regular file, at most 256 KiB -- and
+// the bytes are inlined as a data: URL, so the SVG must be self-contained.
+// ---------------------------------------------------------------------------
+
+const ICON_MEDIA_TYPES = new Set(['.svg', '.png', '.jpg', '.jpeg', '.webp'])
+const MAX_ICON_BYTES = 256 * 1024
+
+test('the manifest declares an icon that satisfies iconOf()', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const declared = pkg.icon
+  assert.equal(typeof declared, 'string', 'without this the nav shows a generic gear')
+
+  // An absolute path or a URL scheme throws in iconOf.
+  assert.equal(declared.startsWith('/'), false)
+  assert.equal(/^[A-Za-z][A-Za-z\d+.-]*:/u.test(declared), false, 'must not be URL-qualified')
+
+  const extension = declared.slice(declared.lastIndexOf('.'))
+  assert.ok(ICON_MEDIA_TYPES.has(extension), `icon must be svg/png/jpg/webp, got ${extension}`)
+
+  const file = join(PKG_ROOT, declared)
+  const size = statSync(file).size
+  assert.ok(size > 0 && size <= MAX_ICON_BYTES, `icon must be 1 byte .. 256 KiB, got ${size}`)
+
+  // It must remain inside the manifest directory, or iconOf refuses it.
+  assert.equal(relative(PKG_ROOT, file).startsWith('..'), false)
+  // ...and ship, or a published package would reference a file that is not there.
+  assert.ok(pkg.files.includes('assets'), 'the assets directory must be published')
+})
+
+test('the icon is the stroke-only style of the existing set, and self-contained', () => {
+  const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
+  // Inlined as a data URL, so an external reference could never resolve.
+  assert.equal(/<image\b|href\s*=|url\(/u.test(svg), false, 'the icon must not reference anything external')
+  // Match the sibling notification plugin's icon so the nav reads as one set.
+  assert.match(svg, /viewBox="0 0 64 64"/u)
+  assert.match(svg, /fill="none"/u)
+  assert.match(svg, /stroke="#4D6BFE"/u)
+  assert.match(svg, /stroke-width="4"/u)
+  assert.match(svg, /stroke-linejoin="round"/u)
+  // Accessible name, because the nav may render it in place of the label.
+  assert.match(svg, /role="img"/u)
+  assert.match(svg, /aria-label="[^"]+"/u)
 })
 
 /**

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Remote workers">
+  <!--
+    Two machines, offset in both axes and overlapping front-to-back, with a right-angle
+    cable leaving the lower left -- the network-neighbourhood convention, which reads as
+    "another computer" rather than "my second monitor".
+
+    OCCLUSION WITHOUT A FILL: the obvious way to stack these is to fill the front machine
+    with the background colour so it hides the back one, but this icon set is stroke-only
+    (`fill="none"`) and the Settings page has both dark and light themes, so a hardcoded
+    background would show as a coloured block on the other one. Instead the back machine's
+    outline is DRAWN ONLY WHERE IT IS VISIBLE: its path starts at the point the front
+    machine's edge crosses it (42,30), runs around the top, and stops at (28,22) where the
+    front machine covers it. Nothing is hidden, because nothing hidden was drawn.
+
+    Geometry in the 64-unit viewBox, with stroke-width 4 (so every edge overhangs by 2):
+      back screen   x 28..54, y 10..30
+      front screen  x 10..42, y 22..46   -> covers the back's lower-left corner
+      stand/base    x 18..34, y 46..52
+      cable         left from the base to x 7, then down to y 59
+    The cable's vertical sits at x 7 while the front screen's left edge is at x 10, so the
+    two do not merge into one long line at navigation size (17 px).
+  -->
+  <g fill="none" stroke="#4D6BFE" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <!-- back machine: top, right, and only the visible part of the bottom and left edges -->
+    <path d="M42 30H54V10H28V22"/>
+    <!-- front machine -->
+    <path d="M10 22h32v24H10Z"/>
+    <!-- front stand and foot -->
+    <path d="M26 46v6"/>
+    <path d="M18 52h16"/>
+    <!-- cable: a right angle off the lower-left corner -->
+    <path d="M18 52H7v7"/>
+  </g>
+</svg>

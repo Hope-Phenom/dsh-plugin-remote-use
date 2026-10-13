@@ -5,6 +5,7 @@
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
   "type": "module",
   "main": "lib/index.js",
+  "icon": "./assets/icon.svg",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -13,6 +14,7 @@
   },
   "files": [
     "lib",
+    "assets",
     "locale",
     "cordis.patch.yml"
   ],
