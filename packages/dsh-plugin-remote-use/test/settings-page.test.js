@@ -12,13 +12,16 @@
  * against a minimal React stub turns "it parses" into "it produces a tree".
  */
 import { strict as assert } from 'node:assert'
-import { readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
 
 import { makeSettingsRoute } from '../lib/index.js'
+import { ApprovalQueue } from '../lib/core/approval-queue.js'
+import { AuditLog } from '../lib/core/audit-log.js'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -68,6 +71,149 @@ test('the manifest declares an icon that satisfies iconOf()', () => {
   assert.equal(relative(PKG_ROOT, file).startsWith('..'), false)
   // ...and ship, or a published package would reference a file that is not there.
   assert.ok(pkg.files.includes('assets'), 'the assets directory must be published')
+})
+
+// ---------------------------------------------------------------------------
+// the approval section
+// ---------------------------------------------------------------------------
+
+/** Render the section over an arbitrary snapshot and hand back the tree. */
+function renderSnapshot(snapshot) {
+  const { registered, react } = loadClient()
+  const Section = registered[0].component
+  react.__state.index = 0
+  react.__state.seeds = []
+  react.__state.seeds[0] = snapshot
+  return { tree: expand(Section({ t: makeTranslator() })), react }
+}
+
+const BASE_SNAPSHOT = {
+  ok: true, workers: [], tasks: [], settingsFile: 'C:\\dsh\\settings.json', settings: { workers: [] },
+}
+
+test('a pending approval is rendered with what a person needs to judge it', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: {
+      available: true,
+      timeoutMs: 88_000,
+      recent: [],
+      pending: [{
+        id: 'ap1', peerId: 'worker-pc', taskId: 'rtask_1', toolCallId: 'call_7',
+        toolName: 'write', requiredTier: 'danger-full-access', reason: 'tier-check: needs a human',
+        rawInput: '{"file_path":"C:\\\\outside\\\\x.txt"}', ageMs: 3_000,
+      }],
+    },
+    audit: { available: true, path: 'C:\\dsh\\storages\\audit.jsonl', error: '', recent: [] },
+  })
+  const text = textOf(tree).join(' ')
+
+  // The tool, the tier it needs, why the engine would not decide, and the arguments.
+  assert.match(text, /write/)
+  assert.match(text, /danger-full-access/)
+  assert.match(text, /needs a human/)
+  assert.match(text, /outside/)
+  // The budget is shown, so the operator knows how long they have.
+  assert.match(text, /88/)
+  // Both actions are offered.
+  assert.match(text, /BTN-ALLOW/)
+  assert.match(text, /BTN-DENY/)
+})
+
+test('the allow button is wired to a handler, and the row carries its id', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: {
+      available: true,
+      timeoutMs: 88_000,
+      recent: [],
+      pending: [{
+        id: 'ap-xyz', peerId: 'w1', taskId: 't1', toolCallId: 'c1',
+        toolName: 'write', requiredTier: 'danger-full-access', reason: 'r', rawInput: '', ageMs: 1,
+      }],
+    },
+    audit: { available: true, path: 'p', error: '', recent: [] },
+  })
+  const [allow] = findButton(tree, 'BTN-ALLOW')
+  assert.ok(allow !== undefined, 'the allow button must exist')
+  assert.equal(typeof allow.props.onClick, 'function')
+  // The decision is addressed by id; `ap-xyz` reaches the DOM as part of nothing visible, so
+  // assert it through the handler's closure by checking the tree carries exactly one row.
+  const rows = []
+  const walk = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (node.props?.className === 'ru-approval') rows.push(node)
+    if (Array.isArray(node.children)) node.children.forEach(walk)
+  }
+  walk(tree)
+  assert.equal(rows.length, 1)
+})
+
+test('a build with no approval queue says so rather than showing an empty list', () => {
+  // "nothing is waiting" and "this build cannot ask" are different facts. Rendering the empty
+  // state for both would tell the operator their request is merely idle when it was refused.
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: { available: false, pending: [], recent: [], timeoutMs: 0 },
+    audit: { available: false, path: '', error: '', recent: [] },
+  })
+  const text = textOf(tree).join(' ')
+  assert.match(text, /APPROVALS-UNAVAILABLE/)
+  assert.doesNotMatch(text, /APPROVALS-NONE/)
+})
+
+test('an empty queue reads as nothing waiting, not as unavailable', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: { available: true, pending: [], recent: [], timeoutMs: 88_000 },
+    audit: { available: true, path: 'C:\\a.jsonl', error: '', recent: [] },
+  })
+  const text = textOf(tree).join(' ')
+  assert.match(text, /APPROVALS-NONE/)
+  assert.doesNotMatch(text, /APPROVALS-UNAVAILABLE/)
+  assert.match(text, /AUDIT-NONE/)
+})
+
+test('the audit trail is rendered with human wording for who decided', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: { available: true, pending: [], recent: [], timeoutMs: 88_000 },
+    audit: {
+      available: true,
+      path: 'C:\\dsh\\storages\\dsh-plugin-remote-use\\audit.jsonl',
+      error: '',
+      recent: [
+        { at: '2026-10-13T02:03:04.000Z', kind: 'approval', gate: 'human', by: 'human', toolName: 'write', requiredTier: 'danger-full-access', optionId: 'allow-once', peerId: 'w1' },
+        { at: '2026-10-13T02:00:00.000Z', kind: 'approval', gate: 'engine', by: 'engine', toolName: 'read', requiredTier: 'read-only', optionId: 'allow-once', peerId: 'w1' },
+        { at: '2026-10-13T01:59:00.000Z', kind: 'approval', gate: 'human', by: 'timeout', toolName: 'write', requiredTier: 'danger-full-access', optionId: 'reject-once', peerId: 'w1' },
+      ],
+    },
+  })
+  const text = textOf(tree).join(' ')
+  // `by` is a wire value; the page must not show the raw token.
+  assert.match(text, /AUDIT-BY-HUMAN/)
+  assert.match(text, /AUDIT-BY-ENGINE/)
+  assert.match(text, /AUDIT-BY-TIMEOUT/)
+  assert.match(text, /allow-once/)
+  assert.match(text, /reject-once/)
+  assert.match(text, /audit\.jsonl/)
+})
+
+test('an audit write failure is shown rather than swallowed', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: { available: true, pending: [], recent: [], timeoutMs: 88_000 },
+    audit: { available: true, path: 'C:\\a.jsonl', error: 'could not append: EACCES', recent: [] },
+  })
+  assert.match(textOf(tree).join(' '), /could not append: EACCES/)
+})
+
+test('a snapshot with no approval fields at all still renders (older host)', () => {
+  // The page is served per request while the host module is loaded once at boot, so during a
+  // restart the two can disagree. A missing field must degrade, not throw.
+  const { tree } = renderSnapshot({ ...BASE_SNAPSHOT })
+  assert.match(textOf(tree).join(' '), /APPROVALS-UNAVAILABLE/)
 })
 
 test('the icon is the stroke-only style of the existing set, and self-contained', () => {
@@ -303,6 +449,12 @@ function makeTranslator() {
       groupDanger: 'GROUP-DANGER', groupWorkers: 'GROUP-WORKERS', groupRole: 'GROUP-ROLE',
       roleMaster: 'ROLE-MASTER', tokenStored: 'STORED {hint}', tokenMissing: 'NOT-SET',
       fieldCwd: 'F-CWD', fieldEnabled: 'F-ENABLED',
+      btnAllow: 'BTN-ALLOW', btnDeny: 'BTN-DENY',
+      approvalsBudget: 'BUDGET-{s}', auditNote: 'AUDIT-AT-{p}',
+      approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
+      auditNone: 'AUDIT-NONE',
+      auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',
+      auditByEngine: 'AUDIT-BY-ENGINE', auditByTimeout: 'AUDIT-BY-TIMEOUT',
     }
     const template = table[key] ?? key
     return values === undefined ? template : String(template).replace(/\{(\w+)\}/g, (w, k) => (k in values ? values[k] : w))
@@ -636,10 +788,18 @@ async function callRoute(route, method, body, deps) {
   return { status: res.statusCode, body: JSON.parse(res.body) }
 }
 
-function makeRoute({ peers, active } = {}) {
+function makeRoute({ peers, active, queue, audit } = {}) {
   const map = peers ?? new Map([['w1', makePeer()]])
   return {
-    route: makeSettingsRoute({ peers: map, registry: makeRegistry(active ?? []), cache: { size: 3, misses: 1 } }),
+    route: makeSettingsRoute({
+      peers: map,
+      registry: makeRegistry(active ?? []),
+      cache: { size: 3, misses: 1 },
+      // REAL objects by default, not stubs: a stub would let the route's use of them drift
+      // from their actual API, which is exactly how `peer.ensure is not a function` shipped.
+      queue: queue ?? new ApprovalQueue({ timeoutMs: 50 }),
+      audit: audit ?? new AuditLog({ env: { DSH_HOME: mkdtempSync(join(tmpdir(), 'ru-audit-')) } }),
+    }),
     peers: map,
   }
 }
@@ -696,6 +856,125 @@ test('ping establishes the link through the connection and reports it', async ()
   assert.equal(status, 200)
   assert.equal(body.connected, true)
   assert.equal(connection.calls.ensure, 1, 'ping must go through connection.ensure()')
+})
+
+// ---------------------------------------------------------------------------
+// human approval: the pending queue and its audit trail
+//
+// Without these the engine's `needsHuman` had nowhere to go but refusal, so a task that
+// genuinely needed a wider scope could never be completed.
+// ---------------------------------------------------------------------------
+
+const APPROVAL_ASK = {
+  peerId: 'worker-pc',
+  taskId: 'rtask_1',
+  toolCallId: 'call_7',
+  toolName: 'write',
+  requiredTier: 'danger-full-access',
+  reason: 'tier-check',
+  source: 'tier-check',
+  rawInput: { file_path: 'C:\\outside\\x.txt' },
+}
+
+test('GET reports the pending approvals a person can act on', async () => {
+  const queue = new ApprovalQueue({ timeoutMs: 5_000 })
+  const pending = queue.request(APPROVAL_ASK)
+  const { route } = makeRoute({ queue })
+
+  const { status, body } = await callRoute(route, 'GET')
+  assert.equal(status, 200)
+  assert.equal(body.approvals.available, true)
+  assert.equal(body.approvals.pending.length, 1)
+  assert.equal(body.approvals.pending[0].toolName, 'write')
+  assert.equal(body.approvals.pending[0].requiredTier, 'danger-full-access')
+  // The page must never be handed a resolver...
+  assert.equal('resolve' in body.approvals.pending[0], false)
+  // ...and the serialised payload must not carry one either.
+  assert.equal(JSON.stringify(body).includes('"resolve"'), false)
+
+  queue.dispose()
+  await pending
+})
+
+test('approvals.decide allows one request, and the decider sees allow-once', async () => {
+  const queue = new ApprovalQueue({ timeoutMs: 5_000 })
+  const pending = queue.request(APPROVAL_ASK)
+  const { route } = makeRoute({ queue })
+  const id = queue.list()[0].id
+
+  const { status, body } = await callRoute(
+    route, 'POST', JSON.stringify({ action: 'approvals.decide', id, decision: 'allow' }),
+  )
+  assert.equal(status, 200)
+  assert.equal(body.optionId, 'allow-once')
+  assert.deepEqual(body.pending, [], 'the row disappears once decided')
+  assert.equal(await pending, 'allow-once')
+})
+
+test('approvals.decide denies, and the decider sees reject-once', async () => {
+  const queue = new ApprovalQueue({ timeoutMs: 5_000 })
+  const pending = queue.request(APPROVAL_ASK)
+  const { route } = makeRoute({ queue })
+  const { status, body } = await callRoute(
+    route, 'POST', JSON.stringify({ action: 'approvals.decide', id: queue.list()[0].id, decision: 'deny' }),
+  )
+  assert.equal(status, 200)
+  assert.equal(body.optionId, 'reject-once')
+  assert.equal(await pending, 'reject-once')
+})
+
+test('deciding a stale approval is a 409, not a silent success', async () => {
+  // The page may be showing a row that already timed out. Reporting success there would let
+  // a stale click look like a fresh approval.
+  const queue = new ApprovalQueue({ timeoutMs: 5_000 })
+  const { route } = makeRoute({ queue })
+  const { status, body } = await callRoute(
+    route, 'POST', JSON.stringify({ action: 'approvals.decide', id: 'ap-nope', decision: 'allow' }),
+  )
+  assert.equal(status, 409)
+  assert.equal(body.ok, false)
+  assert.match(body.error, /no pending approval/)
+})
+
+test('an invalid decision over the route is refused, not coerced', async () => {
+  const queue = new ApprovalQueue({ timeoutMs: 5_000 })
+  const pending = queue.request(APPROVAL_ASK)
+  const { route } = makeRoute({ queue })
+  const { status } = await callRoute(
+    route, 'POST', JSON.stringify({ action: 'approvals.decide', id: queue.list()[0].id, decision: 'yes' }),
+  )
+  assert.equal(status, 409)
+  assert.equal(queue.pendingCount, 1, 'the request must still be waiting')
+  queue.dispose()
+  await pending
+})
+
+test('GET reports the audit trail and where it lives', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ru-audit-route-'))
+  const audit = new AuditLog({ env: { DSH_HOME: dir } })
+  audit.record({ kind: 'approval', gate: 'engine', by: 'engine', toolName: 'write', optionId: 'allow-once' })
+  const { route } = makeRoute({ audit })
+
+  const { body } = await callRoute(route, 'GET')
+  assert.equal(body.audit.available, true)
+  assert.match(body.audit.path, /audit\.jsonl$/)
+  assert.equal(body.audit.recent.length, 1)
+  assert.equal(body.audit.recent[0].toolName, 'write')
+  assert.equal(body.audit.error, '')
+})
+
+test('a build with no queue says so instead of pretending nothing is waiting', async () => {
+  // `available: false` is the honest answer: "nothing pending" and "cannot ask" are different
+  // facts, and the page must be able to tell them apart.
+  const route = makeSettingsRoute({ peers: new Map(), registry: makeRegistry([]), cache: { size: 0, misses: 0 } })
+  const { status, body } = await callRoute(route, 'GET')
+  assert.equal(status, 200)
+  assert.equal(body.approvals.available, false)
+  assert.deepEqual(body.approvals.pending, [])
+  assert.equal(body.audit.available, false)
+
+  const decided = await callRoute(route, 'POST', JSON.stringify({ action: 'approvals.decide', id: 'x', decision: 'allow' }))
+  assert.equal(decided.status, 503)
 })
 
 test('interrupt cancels every in-flight task and reports per-task failures', async () => {

@@ -91,6 +91,29 @@ window.__ModuleLoader__.load({
       shotDone: '截图已保存：{p}',
       busy: '处理中…',
       screenshotHint: '截图保存在主机临时目录，可在会话中引用该路径。',
+      // --- approvals ---
+      groupApprovals: '等待你批准的请求',
+      approvalsNone: '当前没有等待批准的请求。',
+      approvalsUnavailable: '此构建没有审批队列，引擎无法自行裁定的请求会被直接拒绝。',
+      approvalsNote: '审阅引擎无法自行裁定的请求会停在这里等待，而不是直接失败；超过下面的时限仍未处理则按拒绝处理 —— 所以"放行"永远是一个明确的动作。',
+      approvalsBudget: '每个请求最多等待 {s} 秒',
+      colTool: '工具',
+      colTier: '所需档位',
+      colWaited: '已等待',
+      colArgs: '参数',
+      btnAllow: '允许一次',
+      btnDeny: '拒绝',
+      approving: '正在提交…',
+      approvalAllowed: '已允许一次',
+      approvalDenied: '已拒绝',
+      groupAudit: '最近的裁定',
+      auditNone: '尚无裁定记录。',
+      auditNote: '追加写入，位置：{p}',
+      auditByEngine: '引擎',
+      auditByHuman: '你',
+      auditByTimeout: '超时未处理',
+      auditByNoAnswerer: '无人可问',
+      auditByDisposed: '插件已卸载',
       // --- pairing ---
       btnAdd: '添加工作节点',
       btnEdit: '编辑',
@@ -194,6 +217,29 @@ window.__ModuleLoader__.load({
       shotDone: 'Screenshot saved: {p}',
       busy: 'Working\u2026',
       screenshotHint: 'Screenshots land in the host temp directory; reference that path from the session.',
+      // --- approvals ---
+      groupApprovals: 'Approvals waiting on you',
+      approvalsNone: 'Nothing is waiting for approval.',
+      approvalsUnavailable: 'This build has no approval queue, so a request the engine cannot justify is refused outright.',
+      approvalsNote: 'The review engine refuses anything it cannot justify on its own. Those requests wait here instead of failing, until the budget expires \u2014 and expiry is a refusal, so allowing one is always an explicit act.',
+      approvalsBudget: 'Each waits up to {s}s',
+      colTool: 'Tool',
+      colTier: 'Required',
+      colWaited: 'Waited',
+      colArgs: 'Arguments',
+      btnAllow: 'Allow once',
+      btnDeny: 'Refuse',
+      approving: 'Sending\u2026',
+      approvalAllowed: 'Allowed once',
+      approvalDenied: 'Refused',
+      groupAudit: 'Recent decisions',
+      auditNone: 'No decisions recorded yet.',
+      auditNote: 'Append-only, at {p}',
+      auditByEngine: 'engine',
+      auditByHuman: 'you',
+      auditByTimeout: 'expired unanswered',
+      auditByNoAnswerer: 'nobody to ask',
+      auditByDisposed: 'plugin unloaded',
       // --- pairing ---
       btnAdd: 'Add worker',
       btnEdit: 'Edit',
@@ -246,6 +292,17 @@ window.__ModuleLoader__.load({
       '.ru-group{display:flex;flex-direction:column;border-top:0.5px solid var(--dsw-alias-border-l2);padding-top:14px}',
       '.ru-group-title{margin:0 0 8px;font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary)}',
       '.ru-note{margin:0;font-size:12px;color:var(--dsw-alias-label-tertiary)}',
+      '.ru-note.warn{color:var(--dsw-alias-state-error-primary)}',
+      '.ru-note.dim{font-size:11px}',
+      '.ru-dim{color:var(--dsw-alias-label-tertiary)}',
+      // A pending approval is the one thing on this page that is BLOCKING a worker, so it is
+      // outlined in the business colour rather than reading as another informational card.
+      '.ru-approvals{display:flex;flex-direction:column;gap:10px}',
+      '.ru-approval{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border:0.5px solid var(--dsw-alias-state-business-primary);border-radius:var(--dsw-radius-sm)}',
+      '.ru-approval-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
+      '.ru-approval-why{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
+      '.ru-approval-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '.ru-args{margin:0;padding:6px 8px;max-height:96px;overflow:auto;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-interactive-bg-hover);font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--dsw-alias-label-secondary)}',
       '.ru-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.ru-card{border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:12px 14px;display:flex;flex-direction:column;gap:10px}',
       '.ru-card + .ru-card{margin-top:10px}',
@@ -297,6 +354,20 @@ window.__ModuleLoader__.load({
       return String(template).replace(/\{(\w+)\}/g, (whole, key) => (
         Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : whole
       ))
+    }
+
+    /**
+     * An audit row's timestamp as local wall-clock time, seconds precision.
+     *
+     * The trail is the only place the page shows absolute time, and an ISO string with
+     * milliseconds is unreadable when the question is "did I approve that, and when".
+     * An unparsable value is shown verbatim rather than as "Invalid Date".
+     */
+    function formatTime(value) {
+      const date = new Date(String(value ?? ''))
+      if (Number.isNaN(date.getTime())) return String(value ?? '')
+      const pad = (n) => String(n).padStart(2, '0')
+      return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
     }
 
     /**
@@ -684,6 +755,37 @@ window.__ModuleLoader__.load({
         }
       }, [call, refresh, describeApply])
 
+      const onDecide = React.useCallback(async (id, decision) => {
+        setBusy(`approval:${id}`)
+        setStatus({ kind: 'idle', text: '' })
+        try {
+          const data = await call('approvals.decide', { id, decision })
+          setStatus({
+            kind: 'ok',
+            text: data.optionId === 'allow-once' ? t('approvalAllowed') : t('approvalDenied'),
+          })
+          // Re-read: the request may have expired between render and click, and the audit
+          // trail gained a row either way.
+          await refresh()
+        } catch (error) {
+          // A 409 here means the row was stale -- say so rather than looking like a crash.
+          setStatus({ kind: 'err', text: error instanceof Error ? error.message : String(error) })
+          await refresh()
+        } finally {
+          setBusy('')
+        }
+      }, [call, refresh, t])
+
+      /** Turn a `by` value from the audit trail into words. */
+      const describeBy = React.useCallback((by) => {
+        if (by === 'engine') return t('auditByEngine')
+        if (by === 'human') return t('auditByHuman')
+        if (by === 'timeout') return t('auditByTimeout')
+        if (by === 'no-answerer') return t('auditByNoAnswerer')
+        if (by === 'disposed') return t('auditByDisposed')
+        return String(by ?? '')
+      }, [t])
+
       const onAction = React.useCallback(async (action, peerId) => {
         setBusy(action)
         setStatus({ kind: 'idle', text: '' })
@@ -735,6 +837,14 @@ window.__ModuleLoader__.load({
       // demonstrably connected and ready.
       const configWorkers = Array.isArray(snapshot?.settings?.workers) ? snapshot.settings.workers : []
       const configFor = (peerId) => configWorkers.find((w) => w.id === peerId)
+
+      // Approvals waiting on the operator, and the trail of what was decided. `available` is
+      // distinct from an empty list on purpose: "nothing is waiting" and "this build cannot
+      // ask" are different facts and the page must not conflate them.
+      const approvals = snapshot?.approvals ?? { available: false, pending: [], recent: [], timeoutMs: 0 }
+      const pending = Array.isArray(approvals.pending) ? approvals.pending : []
+      const audit = snapshot?.audit ?? { available: false, path: '', error: '', recent: [] }
+      const recentAudit = Array.isArray(audit.recent) ? audit.recent : []
 
       return h('div', { className: 'ru-page' },
         h('style', null, CSS),
@@ -829,6 +939,72 @@ window.__ModuleLoader__.load({
           : h('div', { className: 'ru-group' },
             h('h3', { className: 'ru-group-title' }, t('groupSource')),
             h('p', { className: 'ru-source' }, fmt(t('sourceText'), { file: snapshot.settingsFile }))),
+
+        h('div', { className: 'ru-group' },
+          h('h3', { className: 'ru-group-title' }, t('groupApprovals')),
+          approvals.available !== true
+            ? h('p', { className: 'ru-note warn' }, t('approvalsUnavailable'))
+            : h('div', null,
+              h('p', { className: 'ru-note' }, t('approvalsNote')),
+              h('p', { className: 'ru-note dim' }, fmt(t('approvalsBudget'), {
+                s: Math.round(Number(approvals.timeoutMs ?? 0) / 1000),
+              })),
+              pending.length === 0
+                ? h('p', { className: 'ru-note' }, t('approvalsNone'))
+                : h('div', { className: 'ru-approvals' }, pending.map((row) => {
+                  const id = String(row.id ?? '')
+                  const rowBusy = busy === `approval:${id}`
+                  return h('div', { className: 'ru-approval', key: id },
+                    h('div', { className: 'ru-approval-head' },
+                      h('strong', { className: 'ru-mono' }, String(row.toolName ?? '?')),
+                      h('span', { className: 'ru-badge warn' }, String(row.requiredTier ?? '?')),
+                      h('span', { className: 'ru-dim' }, `${String(row.peerId ?? '')} \u00b7 ${String(row.taskId ?? '')}`)),
+                    h('div', { className: 'ru-approval-why' }, String(row.reason ?? '')),
+                    row.rawInput === '' ? null : h('pre', { className: 'ru-args' }, String(row.rawInput)),
+                    h('div', { className: 'ru-approval-actions' },
+                      h('button', {
+                        type: 'button',
+                        className: 'ru-btn primary',
+                        disabled: anyBusy,
+                        onClick: () => void onDecide(id, 'allow'),
+                      }, rowBusy ? t('approving') : t('btnAllow')),
+                      h('button', {
+                        type: 'button',
+                        className: 'ru-btn',
+                        disabled: anyBusy,
+                        onClick: () => void onDecide(id, 'deny'),
+                      }, t('btnDeny')),
+                      h('span', { className: 'ru-dim' }, `${t('colWaited')} ${Math.round(Number(row.ageMs ?? 0) / 1000)}s`)))
+                })))),
+
+        h('div', { className: 'ru-group' },
+          h('h3', { className: 'ru-group-title' }, t('groupAudit')),
+          audit.available !== true
+            ? h('p', { className: 'ru-note dim' }, t('auditNote', { p: '\u2014' }))
+            : h('div', null,
+              h('p', { className: 'ru-note dim' }, fmt(t('auditNote'), { p: String(audit.path ?? '') })),
+              audit.error === '' ? null : h('p', { className: 'ru-note warn' }, String(audit.error)),
+              recentAudit.length === 0
+                ? h('p', { className: 'ru-note' }, t('auditNone'))
+                : h('div', { className: 'ru-scroll' },
+                  h('table', { className: 'ru-table' },
+                    h('thead', null, h('tr', null,
+                      h('th', null, t('colStarted')),
+                      h('th', null, t('colTool')),
+                      h('th', null, t('colTier')),
+                      h('th', null, t('colState')),
+                      h('th', null, t('colWorker')))),
+                    h('tbody', null, recentAudit.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
+                      h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
+                      h('td', { className: 'ru-mono' }, String(row.toolName ?? '\u2014')),
+                      h('td', null, String(row.requiredTier ?? '\u2014')),
+                      h('td', null,
+                        h('span', {
+                          className: row.optionId === 'allow-once' ? 'ru-badge ok' : 'ru-badge',
+                        }, String(row.optionId ?? '')),
+                        ' ',
+                        h('span', { className: 'ru-dim' }, fmt(t('auditBy'), { by: describeBy(row.by) }))),
+                      h('td', null, String(row.peerId ?? ''))))))))),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupTasks')),

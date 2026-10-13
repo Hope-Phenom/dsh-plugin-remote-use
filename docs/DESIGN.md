@@ -2196,6 +2196,63 @@ return {
 
 **共同点：替身比被替身者更宽容。** 三次是靠真机发现的，一次是靠真机验证脚本。
 
+### 15.12 人工审批与审计日志（P5 剩余项）
+
+#### 修掉的功能缺口：`needsHuman` 曾经**只能失败**
+
+规则 6 的设计原文是"上报人工（缺省 `optionId` 为 `reject-once`，**人工批准后由调用方覆盖**）" ——
+但那个"调用方"从没被写出来。代码里的注释是诚实的：
+
+```js
+// Until a human UI is wired, `needsHuman` requests fall through to refusal.
+```
+
+后果：`danger-full-access` 提权**一律被拒，且没有任何批准途径**。从机的 GUI 测试若需要写工作区之外
+（日志、配置、安装目录），**永远做不成**。fail-closed 不是漏洞，但是一个真正做不成事的缺口。
+
+#### 设计要点
+
+| 决定 | 理由 |
+|---|---|
+| 队列与审计是**插件级**，不是每 worker 一个 | 等一个人的请求不属于某个 worker；审计按 worker 重建就不叫 trail |
+| 队列超时**比 bridge 自身的超时更短**（提前 2s） | bridge 也在 race 它自己的 `approvalTimeoutMs`；若队列更慢，bridge 先拒绝，页面就留下一行**永远点不动的幽灵记录** |
+| 超时 = 拒绝 | 这让"放行"永远是一个**明确动作**，而不是默认结果 |
+| 审计**独立文件、追加写入** | 设置文件每次保存都整体重写；审计被重写就等于有机会丢掉你正想留的记录 |
+| 审计**永不抛错** | 它只是观察者。一个能否决审批的审计，比一个报告"写不进去"的审计更糟 |
+| 没有队列时返回 `available:false` | "没人在等"和"这个构建问不了人"是两件不同的事 |
+| 点已失效的行 → **409** | 页面可能正展示一行已超时的记录；报成功会让"过期点击"看起来像"刚批准" |
+
+#### 顺带修掉的接线 bug：`allow-once` 在构造函数级路径上不可达
+
+```js
+// AcpBridge.normalizeSelected
+if (answered === OPTION_ALLOW_ONCE && ...) return OPTION_ALLOW_ONCE
+return rejectOptionId                     // ← 否则一律拒绝
+```
+
+它拿**字符串**比较，而 `makeApprovalDecider` 返回的是**对象**
+`{optionId, source, reason, needsHuman}`。对象永远不等于字符串 ⇒ **这条路径静默拒绝一切**。
+
+provider 那条路是对的（它自己解包 `.optionId`），所以端到端测试全绿 —— 只有**构造函数级默认**
+（"某个别的调用方直接用 bridge"）是坏的。fail-closed，不是安全问题，但 `allow-once` 在那条路上
+是**死代码**。
+
+修法：新增 `asBridgeOption(decider)` 适配器，并把结果**规范化**为两个 ACP optionId 之一，
+以后决策对象变形也塞不进别的东西。
+
+**测试策略（两层，缺一不可）**：
+
+| 层 | 作用 |
+|---|---|
+| 行为测试（真 bridge + 假 agent） | 同一个测试里先跑**未适配**的 decider（必须得到 `reject-once`），再跑适配后的（必须 `allow-once`）—— 把 bug 本身写成断言 |
+| **源码级接线守卫** | 行为测试证明不了 `index.js` **用了**适配器（那个默认回调在 `PeerConnection` 里惰性构造，运行时测不到）。这是"没有运行时路径可达的接线 bug"，源码断言是诚实的选项，回退会立刻失败 |
+
+#### 契约来源
+
+`AcpBridge` 从类型上已经支持异步：`onApproval: (req) => Promise<'allow-once'|'reject-once'>`，
+且 provider 是 `await this.decideApproval(...)`。所以"挂住等人批"**不需要改 bridge**，
+只要把 decider 变 async 并接上队列。
+
 ---
 
 ## 16. 对称配对（本机在主/从之间切换）—— 设计，待评审

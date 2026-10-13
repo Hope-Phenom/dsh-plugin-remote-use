@@ -28,6 +28,8 @@ import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
 import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
+import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
+import { AuditLog } from './core/audit-log.js'
 import {
   mergeSettings,
   publicWorker,
@@ -221,6 +223,30 @@ export function apply(ctx, config) {
    */
   const unwire = new Map()
 
+  /**
+   * The audit trail and the human-approval queue are PLUGIN-level, not per worker.
+   *
+   * A request waiting for a person concerns the plugin as a whole, and a trail that began
+   * afresh for each worker would not be a trail. Both outlive `reconfigure`, which only ever
+   * diffs connections.
+   */
+  const audit = new AuditLog({ log: (level, message) => log[level](message) })
+  const queue = new ApprovalQueue({
+    // Settle just before the bridge's own timeout, so the outcome the queue records is the
+    // one the worker actually received. If the queue were the slower of the two, the bridge
+    // would reject first and the page would keep a ghost entry nobody could act on.
+    timeoutMs: Math.max(1_000, cfg.approvalTimeoutMs - QUEUE_LEAD_MS),
+    onSettle: (outcome) => {
+      audit.record({ kind: 'approval', gate: 'human', ...outcome })
+      log.info(`approval ${outcome.toolCallId} tool=${outcome.toolName} `
+        + `required=${outcome.requiredTier} -> ${outcome.optionId} (gate=human by=${outcome.by}) `
+        + `waited=${outcome.waitedMs}ms`)
+    },
+  })
+  // Refuse anything still waiting when the plugin unloads, rather than leaving the worker
+  // blocked until its bridge timeout.
+  ctx.effect(() => () => queue.dispose())
+
   // Validate our frozen capability mirror against the live package. A mismatch means
   // DSH changed the contract and our advertisement is no longer honest.
   void verifyAgainstUpstream().then((r) => {
@@ -290,7 +316,7 @@ export function apply(ctx, config) {
         // true -- so this path silently rejected everything. Fail closed, but wrong, and it
         // left `allow-once` unreachable for any caller that did not come through the
         // provider, which is the only path the end-to-end security tests exercise.
-        onApproval: asBridgeOption(makeApprovalDecider({ cfg, worker, memories, log })),
+        onApproval: asBridgeOption(makeApprovalDecider({ cfg, worker, memories, log, queue, audit })),
       }),
     })
 
@@ -343,7 +369,7 @@ export function apply(ctx, config) {
     // so a settings change that alters `requiredTier` takes effect on the next decision
     // without re-wiring anything.
     const dispose = ctx.effect(() => {
-      const decider = makeApprovalDecider({ cfg, worker, memories, log })
+      const decider = makeApprovalDecider({ cfg, worker, memories, log, queue, audit })
       const provider = new RemoteProvider({
         peer: workerRuntime,
         registry,
@@ -618,6 +644,11 @@ export function apply(ctx, config) {
       peers,
       registry,
       cache,
+      // The approval queue and its trail are plugin-level: created once for the whole
+      // apply(), not per worker, because a request waiting on a person is not about one
+      // worker and a trail that restarted per worker would not be a trail.
+      queue,
+      audit,
       currentSettings,
       persistSettings,
       settingsPath: stored.file,
@@ -692,8 +723,20 @@ export function normalizeConfig(config) {
  * @returns {(ask: { taskId?: string, toolCallId: string, toolName?: string, rawInput?: unknown }) => { optionId: string, source: string, reason: string, needsHuman: boolean }}
  */
 export function makeApprovalDecider(deps) {
-  const { cfg, worker, memories, log } = deps
-  return function decide(ask) {
+  const { cfg, worker, memories, log, queue, audit } = deps
+
+  /**
+   * Append one audit row. Never throws into the approval path: a trail that can veto an
+   * operation is worse than one that reports it could not write.
+   */
+  const record = (entry) => {
+    if (audit === undefined) return
+    try {
+      audit.record(entry)
+    } catch { /* audited elsewhere; never change a decision because logging failed */ }
+  }
+
+  return async function decide(ask) {
     const taskId = typeof ask?.taskId === 'string' && ask.taskId !== '' ? ask.taskId : 'unattributed'
     let memory = memories.get(taskId)
     if (memory === undefined) {
@@ -707,19 +750,59 @@ export function makeApprovalDecider(deps) {
       defaultTier: cfg.requiredTier,
     })
 
-    const decision = decideApproval(
+    const engine = decideApproval(
       { taskId, toolCallId: ask?.toolCallId, toolName: ask?.toolName, rawInput: ask?.rawInput },
       { memory, policy: { requiredTier, workspaceRoot: worker.cwd } },
     )
 
-    const humans = decision.needsHuman ? ' [NEEDS HUMAN]' : ''
-    log.info(`approval ${String(ask?.toolCallId)} tool=${String(ask?.toolName)} `
-      + `required=${requiredTier} -> ${decision.optionId} (source=${decision.source})${humans} ${decision.reason}`)
+    const toolCallId = String(ask?.toolCallId ?? '')
+    const toolName = String(ask?.toolName ?? '')
 
-    // Until a human UI is wired, `needsHuman` requests fall through to refusal. The
-    // optionId is already reject-once in that case, so this is fail-closed by
-    // construction -- never an implicit allow.
-    return decision
+    // The engine decided on its own (cache miss, tier check, task memory, policy). Record it
+    // and answer at once: there is nothing a human could add.
+    if (!engine.needsHuman || queue === undefined) {
+      // `needsHuman` with no queue means nobody can be asked, which is a refusal by
+      // construction -- the engine already set the rejection option.
+      const by = engine.needsHuman ? 'no-answerer' : 'engine'
+      log.info(`approval ${toolCallId} tool=${toolName} required=${requiredTier} `
+        + `-> ${engine.optionId} (gate=engine by=${by} source=${engine.source}) ${engine.reason}`)
+      record({
+        kind: 'approval',
+        gate: 'engine',
+        by,
+        peerId: worker.id,
+        taskId,
+        toolCallId,
+        toolName,
+        requiredTier,
+        optionId: engine.optionId,
+        engineSource: engine.source,
+        reason: engine.reason,
+      })
+      return engine
+    }
+
+    // The engine cannot justify this one, so ask. The request is held open until a human
+    // answers or the queue's budget expires -- and expiry is a REFUSAL, which is what makes
+    // this a widening of what is POSSIBLE rather than a loosening of what is ALLOWED.
+    log.info(`approval ${toolCallId} tool=${toolName} required=${requiredTier} `
+      + `[NEEDS HUMAN] queued (${engine.reason})`)
+    const optionId = await queue.request({
+      peerId: worker.id,
+      taskId,
+      toolCallId,
+      toolName,
+      rawInput: ask?.rawInput,
+      requiredTier,
+      reason: engine.reason,
+      source: engine.source,
+    })
+
+    // The queue's `onSettle` writes the audit row for this one: it holds the `by` detail
+    // (human / timeout / disposed) that the decision alone cannot express.
+    return optionId === OPTION.ALLOW_ONCE
+      ? { ...engine, optionId: OPTION.ALLOW_ONCE, source: 'human', needsHuman: false, reason: `allowed once by a human (${engine.reason})` }
+      : { ...engine, optionId: OPTION.REJECT_ONCE, source: 'human', needsHuman: false, reason: `refused (${engine.reason})` }
   }
 }
 
@@ -848,7 +931,7 @@ function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
  *           settingsPath?: string, reportBudgetMs?: number, selfcheckBudgetMs?: number }} deps
  */
 export function makeSettingsRoute(deps) {
-  const { peers, registry, cache } = deps
+  const { peers, registry, cache, queue, audit } = deps
   const currentSettings = deps.currentSettings ?? (() => ({ workers: [] }))
   const persistSettings = deps.persistSettings ?? (() => ({ ok: false, error: 'this build cannot persist settings' }))
   const settingsFile = deps.settingsPath ?? ''
@@ -914,6 +997,18 @@ export function makeSettingsRoute(deps) {
           // The vocabulary the page needs to render its own controls, without any secret.
           settings: publicSettings(),
           settingsFile,
+          // Approvals waiting for a person, and the trail of what was decided. The pending
+          // list is what makes `danger-full-access` reachable at all: without it the engine's
+          // "needs a human" had nowhere to go but refusal.
+          //
+          // `available: false` rather than an empty list when the queue is absent: the page
+          // must be able to tell "nothing is waiting" from "this build cannot ask".
+          approvals: queue === undefined
+            ? { available: false, pending: [], recent: [], timeoutMs: 0 }
+            : { available: true, pending: queue.list(), recent: queue.recent(10), timeoutMs: queue.timeoutMs },
+          audit: audit === undefined
+            ? { available: false, path: '', error: '', recent: [] }
+            : { available: true, path: audit.file, error: audit.lastError, recent: audit.tail(20) },
         }
       }
 
@@ -1033,9 +1128,23 @@ export function makeSettingsRoute(deps) {
             return send(200, { ok: true, applied, settings: publicSettings() })
           }
 
+          case 'approvals.decide': {
+            // The whole point of the queue: a `danger-full-access` request the engine refused
+            // to justify can be allowed once, by a person, instead of failing outright.
+            //
+            // A decision for an entry that already settled is reported as a failure rather
+            // than quietly accepted -- the page is showing a row that no longer exists, and
+            // pretending otherwise would let a stale click look like a fresh approval.
+            if (queue === undefined) return send(503, { ok: false, error: 'this build has no approval queue' })
+            const result = queue.decide(String(body?.id ?? ''), body?.decision)
+            if (result.ok !== true) return send(409, { ok: false, error: result.error })
+            return send(200, { ok: true, optionId: result.optionId, pending: queue.list() })
+          }
+
           default:
             return send(400, { ok: false, error: `unknown action "${action}"` })
-        }      } catch (error) {
+        }
+      } catch (error) {
         return send(502, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }
     },
