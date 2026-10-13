@@ -244,6 +244,37 @@ test('a malformed worker row does not crash the render', () => {
   assert.match(text, /p/)
 })
 
+test('before the first response the page says loading, not "no workers configured"', () => {
+  // Regression for a REPORTED bug: the Host probes readiness before answering, so against
+  // an unreachable worker the first response can take a full TCP connect timeout. Rendering
+  // the empty state during that window told the operator "nothing is configured" about data
+  // it had not received -- a confident claim of absence.
+  const { registered, react } = loadClient()
+  const Section = registered[0].component
+  const t = (key) => ({ title: 'TITLE', description: 'DESC', roleNote: 'ROLE-NOTE', loading: 'LOADING', noWorkers: 'NO-WORKERS' }[key] ?? key)
+  react.__state.index = 0
+  react.__state.seeds = [] // no snapshot yet
+  const text = textOf(expand(Section({ t }))).join(' ')
+  assert.match(text, /LOADING/)
+  assert.doesNotMatch(text, /NO-WORKERS/, 'absence must not be asserted before the first response')
+})
+
+test('a worker with no report is described as pending, not as missing', () => {
+  const tree = renderWith([{
+    peerId: 'w1',
+    name: 'w1',
+    cwd: 'C:\\work',
+    error: 'readiness probe did not finish within 4000 ms',
+    activeTasks: 0,
+    report: null,
+    connection: { connected: false, connectFailures: 2, lastError: 'connect ETIMEDOUT' },
+  }])
+  const text = textOf(tree).join(' ')
+  assert.match(text, /w1/)
+  assert.match(text, /reportPending/, 'a missing report is its own state')
+  assert.match(text, /did not finish within 4000 ms/, 'the reason must be shown')
+})
+
 // ---------------------------------------------------------------------------
 // host half: the data route
 // ---------------------------------------------------------------------------
@@ -410,4 +441,70 @@ test('the response is never cached', async () => {
   await route.handler(fakeReq('GET'), res)
   // A cached availability answer is worse than no answer.
   assert.match(res.headers['cache-control'], /no-store/)
+})
+
+// ---------------------------------------------------------------------------
+// regression: a page load must not pay an unreachable worker's connect timeout
+//
+// REPORTED SYMPTOM: the Settings page showed "no workers configured" while the route was
+// returning one entry. The request was still in flight because `selfcheck()` connects
+// first, and an unreachable worker costs a full TCP connect timeout (~20 s); for that whole
+// window the browser showed its initial state, which the page rendered as "nothing
+// configured" -- a confident statement of absence about data it had not yet received.
+// ---------------------------------------------------------------------------
+
+test('GET still returns the worker row when the readiness probe hangs', async () => {
+  const peers = new Map([['w1', makePeer({
+    // Never settles: stands in for a TCP connect against a powered-off or logged-out host.
+    selfcheck: () => new Promise(() => {}),
+    connected: false,
+    connection: { stats: { connected: false, connectFailures: 1, lastError: 'connect ETIMEDOUT' } },
+  })]])
+  const route = makeSettingsRoute({
+    peers,
+    registry: makeRegistry([]),
+    cache: { size: 0, misses: 0 },
+    reportBudgetMs: 40,
+  })
+
+  const started = Date.now()
+  const { status, body } = await callRoute(route, 'GET')
+  const elapsed = Date.now() - started
+
+  assert.equal(status, 200)
+  // The row must be present: the page distinguishes "no workers" from "no report".
+  assert.equal(body.workers.length, 1)
+  assert.equal(body.workers[0].peerId, 'w1')
+  assert.equal(body.workers[0].report, null)
+  assert.match(body.workers[0].error, /did not finish within 40 ms/)
+  // Link state is knowable immediately and must survive the probe timeout.
+  assert.equal(body.workers[0].connection.connected, false)
+  assert.ok(elapsed < 3000, `the page load must not wait for the connect timeout (took ${elapsed} ms)`)
+})
+
+test('an explicit self-check gets a longer budget than a page load', async () => {
+  // The operator pressed the button and is watching, so a connect attempt may finish.
+  let sawOpts
+  const peers = new Map([['w1', makePeer({
+    async selfcheck(opts) { sawOpts = opts; return { verdict: 'ready' } },
+  })]])
+  const route = makeSettingsRoute({
+    peers, registry: makeRegistry([]), cache: { size: 0, misses: 0 }, selfcheckBudgetMs: 50,
+  })
+  const { status, body } = await callRoute(route, 'POST', JSON.stringify({ action: 'selfcheck', peerId: 'w1' }))
+  assert.equal(status, 200)
+  assert.equal(body.report.verdict, 'ready')
+  // maxAgeMs 0 is what makes it a FRESH probe rather than a cached report.
+  assert.deepEqual(sawOpts, { maxAgeMs: 0 })
+})
+
+test('a self-check that times out is reported as a timeout, not a worker fault', async () => {
+  const peers = new Map([['w1', makePeer({ selfcheck: () => new Promise(() => {}) })]])
+  const route = makeSettingsRoute({
+    peers, registry: makeRegistry([]), cache: { size: 0, misses: 0 }, selfcheckBudgetMs: 40,
+  })
+  const { status, body } = await callRoute(route, 'POST', JSON.stringify({ action: 'selfcheck', peerId: 'w1' }))
+  assert.equal(status, 504)
+  assert.equal(body.ok, false)
+  assert.match(body.error, /did not finish within 40 ms/)
 })

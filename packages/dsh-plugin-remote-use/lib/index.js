@@ -360,6 +360,60 @@ export function makeApprovalDecider(deps) {
 /** Largest POST body the Settings page may send. It only carries a small action object. */
 const SETTINGS_MAX_BODY = 16 * 1024
 
+/**
+ * Readiness budget for a page load.
+ *
+ * MEASURED PROBLEM: `selfcheck()` connects first, and against an unreachable worker that
+ * costs a full TCP connect timeout (~20 s). A page load must not pay that: for the whole
+ * time the request was in flight the browser showed its initial state, which read as
+ * "nothing is configured" even though the worker list plainly had one entry. Link state is
+ * knowable immediately, so it is returned regardless and a missing report is reported as
+ * missing rather than as an absence of workers.
+ */
+const REPORT_BUDGET_MS = 4_000
+
+/** An explicit "re-check now" may take longer: the operator asked for it and is waiting. */
+const SELFCHECK_BUDGET_MS = 25_000
+
+/** Sentinel distinguishing "the probe did not finish" from a legitimate `undefined`. */
+const TIMED_OUT = Symbol('timed-out')
+
+/**
+ * Await `promise`, but give up after `budgetMs`.
+ *
+ * The underlying probe is NOT cancelled -- a pending TCP connect cannot be. Its rejection is
+ * swallowed so a late failure cannot surface as an unhandled rejection; the connection's own
+ * `lastError` still records it for the next read.
+ */
+async function within(promise, budgetMs) {
+  let timer
+  const expiry = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), budgetMs)
+    if (typeof timer?.unref === 'function') timer.unref()
+  })
+  promise.catch(() => {})
+  try {
+    return await Promise.race([promise, expiry])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Run a readiness probe under a budget.
+ * @param {object} peer
+ * @param {number} budgetMs
+ * @param {{ maxAgeMs?: number, timeoutMs?: number }} [opts] passed through to `selfcheck`
+ * @returns {Promise<{ report: object | null, error: string }>}
+ */
+async function probeWithin(peer, budgetMs, opts) {
+  const raced = await within(peer.selfcheck(opts), budgetMs)
+  if (raced === TIMED_OUT) {
+    return { report: null, error: `readiness probe did not finish within ${budgetMs} ms` }
+  }
+  return { report: raced, error: '' }
+}
+
 /** Read and parse a JSON request body without letting a huge one exhaust memory. */
 function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
   return new Promise((resolve, reject) => {
@@ -397,10 +451,14 @@ function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
  * thrown: the browser half renders the message, and an unhandled rejection here would show
  * the page a bare 500 with nothing to display.
  *
- * @param {{ peers: Map<string, any>, registry: TaskRegistry, cache: ToolCallCache }} deps
+ * @param {{ peers: Map<string, any>, registry: TaskRegistry, cache: ToolCallCache,
+ *           reportBudgetMs?: number, selfcheckBudgetMs?: number }} deps
  */
 export function makeSettingsRoute(deps) {
   const { peers, registry, cache } = deps
+  // Injectable so a test can drive the timeout path without waiting the production budget.
+  const reportBudgetMs = Number.isFinite(deps.reportBudgetMs) ? Number(deps.reportBudgetMs) : REPORT_BUDGET_MS
+  const selfcheckBudgetMs = Number.isFinite(deps.selfcheckBudgetMs) ? Number(deps.selfcheckBudgetMs) : SELFCHECK_BUDGET_MS
   return {
     kind: 'exact',
     path: '/api/dsh/dsh-plugin-remote-use',
@@ -417,7 +475,9 @@ export function makeSettingsRoute(deps) {
           let report = null
           let error = ''
           try {
-            report = await peer.selfcheck()
+            const probed = await probeWithin(peer, reportBudgetMs)
+            report = probed.report
+            error = probed.error
           } catch (e) {
             error = e instanceof Error ? e.message : String(e)
           }
@@ -470,8 +530,13 @@ export function makeSettingsRoute(deps) {
             // "can it run right now", and a cached report cannot answer that.
             const peer = peerOr(body?.peerId)
             if (peer === undefined) return
-            const report = await peer.selfcheck({ maxAgeMs: 0 })
-            return send(200, { ok: true, peerId: peer.peerId, report })
+            // A longer budget than a page load: this is an explicit request and the
+            // operator is watching it, so a connect attempt is allowed to finish.
+            const probed = await probeWithin(peer, selfcheckBudgetMs, { maxAgeMs: 0 })
+            if (probed.report === null && probed.error !== '') {
+              return send(504, { ok: false, error: probed.error, peerId: peer.peerId })
+            }
+            return send(200, { ok: true, peerId: peer.peerId, report: probed.report })
           }
 
           case 'screenshot': {

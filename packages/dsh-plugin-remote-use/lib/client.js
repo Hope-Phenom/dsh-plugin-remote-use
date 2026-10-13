@@ -37,7 +37,9 @@ window.__ModuleLoader__.load({
       roleMaster: '主机',
       roleNote: '本机作为主机向工作节点派单。切换为工作节点（对称配对）尚未实现。',
       groupWorkers: '工作节点',
+      loading: '正在读取工作节点状态…',
       noWorkers: '尚未配置工作节点。请在 profile 补丁中配置后重启。',
+      reportPending: '就绪报告未在限时内取得 —— 工作节点可能不可达。连接状态见下。',
       verdictReady: '就绪',
       verdictBlocked: '不可用',
       verdictUnknown: '未知',
@@ -99,7 +101,9 @@ window.__ModuleLoader__.load({
       roleMaster: 'Master',
       roleNote: 'This machine dispatches to workers. Switching it into worker mode (symmetric pairing) is not implemented yet.',
       groupWorkers: 'Workers',
+      loading: 'Reading worker state\u2026',
       noWorkers: 'No workers configured. Add one to the profile patch and restart.',
+      reportPending: 'The readiness report did not arrive in time \u2014 the worker is probably unreachable. Link state below.',
       verdictReady: 'ready',
       verdictBlocked: 'unavailable',
       verdictUnknown: 'unknown',
@@ -294,6 +298,12 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ru-card' },
         h('div', { className: 'ru-card-head' }, head),
         h('div', { className: 'ru-kv' }, kv),
+        // A missing report is stated as its own fact. The previous revision let it fall
+        // through to a generic empty state, which reads as "nothing here" rather than
+        // "the probe did not complete".
+        report === null || report === undefined
+          ? h('div', { className: 'ru-msg mute' }, t('reportPending'))
+          : null,
         row.error !== undefined && row.error !== '' ? h('div', { className: 'ru-msg err' }, String(row.error)) : null,
         actions,
         checks.length === 0 ? null : h('div', {},
@@ -415,16 +425,22 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupWorkers')),
-          workers.length === 0
-            ? h('p', { className: 'ru-note' }, t('noWorkers'))
-            : h('div', {}, workers.map((row) => h(WorkerCard, {
-              key: String(row.peerId),
-              t,
-              row,
-              busy: busy === 'stop' ? 'stop' : (busy !== '' && busy !== 'stop' ? busy : ''),
-              onAction: (action, peerId) => void onAction(action, peerId),
-            }))),
-          h('div', { className: 'ru-actions', style: { marginTop: '10px' } },
+          // Three distinct states, because conflating them is how a page tells the operator
+          // "nothing is configured" while a slow request is still in flight. The first load
+          // can legitimately take seconds: the Host attempts a readiness probe, and an
+          // unreachable worker costs a full TCP connect timeout.
+          snapshot === null
+            ? h('p', { className: 'ru-note' }, t('loading'))
+            : workers.length === 0
+              ? h('p', { className: 'ru-note' }, t('noWorkers'))
+              : h('div', {}, workers.map((row) => h(WorkerCard, {
+                key: String(row.peerId),
+                t,
+                row,
+                busy: busy === 'stop' ? 'stop' : (busy !== '' && busy !== 'stop' ? busy : ''),
+                onAction: (action, peerId) => void onAction(action, peerId),
+              }))),
+          snapshot === null ? null : h('div', { className: 'ru-actions', style: { marginTop: '10px' } },
             h('button', {
               type: 'button', className: 'ru-btn', disabled: anyBusy || workers.length === 0,
               onClick: async () => {
