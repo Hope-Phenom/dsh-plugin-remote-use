@@ -27,7 +27,8 @@ dsh-env-backup.py -- DSH 环境的交互式备份 / 还原 / 校验工具。
     python dsh-env-backup.py                    # 交互式菜单
     python dsh-env-backup.py backup   --to D:\\bk --name my-backup [--slim] [--yes]
     python dsh-env-backup.py restore  --from D:\\bk\\my-backup [--yes]
-    python dsh-env-backup.py verify   --from D:\\bk\\my-backup [--deep]
+    python dsh-env-backup.py verify   --from D:\\bk\\my-backup
+    python dsh-env-backup.py verify   --from D:\\bk\\my-backup --deep    # 未实现，以退出码 3 拒绝
     python dsh-env-backup.py list     --to D:\\bk
 """
 
@@ -854,6 +855,25 @@ def do_verify(src_home: Path, backup_dir: Path, *, deep: bool) -> int:
     if m is None:
         bad(f"不是有效的备份目录: {backup_dir}")
         return 1
+    if deep:
+        # REFUSES UP FRONT, rather than pretending or doing half the work first.
+        #
+        # The flag used to fall into an empty loop and then print "（深度校验按需实现…）" followed by
+        # the same "校验通过" as the shallow path -- so an operator who asked for a thorough check
+        # was told they had had one.
+        #
+        # It cannot be implemented as advertised for a reason worth recording: the manifest stores
+        # hashes for the CRITICAL files only (`criticalHashes`), not for all 10,795, so there is
+        # nothing to compare the rest against. Comparing every backup file to the LIVE environment is
+        # not a substitute -- the live environment changes by design (sessions, logs, caches), so
+        # that check would report differences on every run and mean nothing.
+        #
+        # A real deep verify needs the manifest to record a per-file list at BACKUP time. Until it
+        # does, saying so is the only honest answer, and a distinct exit code makes it actionable.
+        bad("--deep 尚未实现：清单只记录了关键文件的哈希，其余文件没有可比对的基线。")
+        info("  已实现的是：关键文件哈希 + 全部 junction + 规模核对（去掉 --deep 即可运行）。")
+        info("  若要真正的逐文件校验，需要先在备份时把每个文件的路径/大小/哈希写进清单。")
+        return 3
     say(f"  备份  : {backup_dir.name}  ({m.get('createdAt', '?')})")
     say(f"  对比  : {src_home}")
     say()
@@ -906,16 +926,6 @@ def do_verify(src_home: Path, backup_dir: Path, *, deep: bool) -> int:
     # 备份自身含 manifest，当前含日志等，数量本就不会完全相等
     info("（数量差异属正常：manifest、日志、sessions 等会各自增长）")
 
-    if deep:
-        say()
-        info("深度校验：逐文件哈希比对（可能较慢）...")
-        ex = set(m.get("excludes", []))
-        log(f"deep verify: excludes={sorted(ex)}")
-        mism, missing = [], []
-        for rel_dir in sorted(p for p in backup_dir.iterdir()
-                              if p.is_dir() and p.name not in ex):
-            pass
-        say("  （深度校验按需实现：本版只做关键文件 + junction + 规模核对）")
 
     say()
     if problems == 0:

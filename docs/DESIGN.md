@@ -3516,3 +3516,64 @@ noWorkers: '尚未配置工作节点。请在 profile 补丁中配置后重启�
 DSH **仍未重启**（主进程已运行 231 分钟，插件端点仍 404），所以真实 GUI 渲染仍然无法验证。
 与其做低价值的清扫，不如去测一条**风险最高且从未覆盖**的路径 —— 结果它是对的，
 而"它是对的"这件事**此前只是假设**。
+
+#### 第 24 轮：备份工具的 `--deep` 是一个**空壳**，而它是"安全网"
+
+连续多轮 DSH 未重启（主进程已运行 233 分钟，插件端点仍 404），于是这一轮去验证一件**从没验过**的东西：
+用户早先要的那个 Python 备份/恢复工具。
+
+##### 先说结论：工具本体是好的
+
+```
+$ python tools\dsh-env-backup.py list --to D:\dsh-backups
+  before-remote-plugin-install  已校验   full  10,795 文件 / 587.2 MB   junction=484
+
+$ python tools\dsh-env-backup.py verify --from D:\dsh-backups\before-remote-plugin-install
+  OK    profiles/desktop/cordis.yml / .credentials.yaml / .anonymous-user-id
+  OK    全部 484 个 junction 都存在且指向清单记录的目标
+  FAIL  profiles/desktop/cordis.patch.yml  (内容不同)
+  FAIL  profiles/desktop/package.json / pnpm-lock.yaml  (内容不同)
+  FAIL  cordis.patch.yml  (内容不同)
+  4 项未通过
+```
+
+**四项差异正是我这几轮改过的东西**（沙箱 mediator 行、插件安装、根补丁）—— 工具的判据是准的。
+
+##### 但 `--deep` 是个空壳
+
+```python
+if deep:
+    info("深度校验：逐文件哈希比对（可能较慢）...")
+    for rel_dir in sorted(...):
+        pass                                    # ← 空循环
+    say("  （深度校验按需实现：本版只做关键文件 + junction + 规模核对）")
+# 然后照常打印"校验通过"，返回 0
+```
+
+用法里写着 `verify --from ... [--deep]`。**在一张安全网上，这比没有这个选项更糟** ——
+操作者以为做了深度校验，实际只做了浅层的，而且拿到的是成功退出码。
+
+**它无法照宣传实现，原因值得记下**：清单只存 **`criticalHashes`**（9 个关键文件），
+另外 10,795 个文件**没有基线可比**。拿备份去和**实时环境**逐文件比对也不算数 ——
+实时环境本来就在变（sessions、日志、缓存），那样每次都会报差异，等于没有意义。
+
+**修法**：在**开头**就以**退出码 3** 拒绝，并说明已实现的是什么、要实现需要什么。
+同时在用法行和 README 里标明未实现。
+
+```
+--deep     exit=3   (拒绝)
+普通 verify exit=2   (有差异，工具正常)
+list       exit=0
+```
+
+##### README 补了退出码表
+
+对安全网工具，脚本里必须能分开"**有差异**"和"**工具坏了**"：
+
+| 码 | 含义 |
+|---|---|
+| `0` | 校验通过 |
+| **`2`** | **有差异** —— 工具本身正常 |
+| `3` | `--deep` 未实现，拒绝执行 |
+| `1` | 操作失败 |
+| `130` | 用户中断 |
