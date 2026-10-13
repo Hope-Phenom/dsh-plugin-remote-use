@@ -1,6 +1,24 @@
 # DSH 环境备份 / 还原工具
 
-`dsh-env-backup.py` —— 交互式，也可脚本调用。备份 / 还原 / 校验整个 DSH 环境。
+> 这份文档主要讲**备份/还原工具**；文末是 `tools/` 下全部脚本的索引，以及归在 `.research/` 的沙箱相关脚本。
+> 插件的安装与使用见仓库根目录的 [README.md](../README.md)；踩坑与教训见 [docs/PITFALLS.md](../docs/PITFALLS.md)。
+
+## 本目录的工具一览
+
+| 脚本 | 一句话 |
+|---|---|
+| `dsh-env-backup.py` | **本文主角**：交互式备份 / 还原 / 校验整个 DSH 环境 |
+| `check-sandbox-ready.mjs` | 验证沙箱 mediator 是否真的生效（6 项行为检查），退出码 0/1/2 |
+| `deploy-slave.ps1` | 部署从机侧文件；`-Remote <host>` 走 ssh，**在目标机上**验证 |
+| `find-slave.ps1` | 从机 IP 会变时：扫网段 → 用从机自己的密钥认领 → 更新 hosts |
+| `arm-loopback-worker.mjs` | 在回环上把本机布防为工作节点，便于**没有第二台机器**时跑真机测试 |
+| `run-unconfined.ps1` | 用一次性计划任务把命令放到 **DSH 沙箱之外**执行（沙箱内自检的合成输入项会假失败） |
+| `check-brackets.mjs` | 括号/引号配对检查，给生成或大改的 JS 用 |
+| `icon-check.mjs` | 校验插件图标满足 DSH 的 `iconOf()` 规则（相对路径、扩展名、体积、XML 良构） |
+
+## `dsh-env-backup.py`
+
+交互式，也可脚本调用。备份 / 还原 / 校验整个 DSH 环境。
 
 ```powershell
 # 交互式（推荐）
@@ -162,8 +180,10 @@ C:\Users\you\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\...
 
 ## 已知限制
 
-- **深度校验未实现**：`verify --deep` 目前只做关键文件 + junction + 规模核对，没有逐文件全量哈希。
-  全量哈希 10k 文件需要几十秒，需要时再加。
+- **深度校验未实现，而且 `--deep` 会拒绝执行**（退出码 `3`），不是"退化成浅层校验"。
+  它无法照宣传实现：清单只记录**关键文件**的哈希（`criticalHashes`），其余 10k 个文件没有可比对的基线；
+  而拿备份去和**实时环境**逐文件比对也不算数 —— 实时环境本来就在变（sessions、日志、缓存），
+  那样每次都会报差异。要真正的逐文件校验，需要**在备份时**把每个文件的路径/大小/哈希写进清单。
 - **不保留 ACL**：robocopy 用 `/COPY:DAT`（数据+属性+时间戳），不复制审计 ACL。
   对 `.dsh` 这种用户自有目录够用。
 - **junction 目标丢失时不会失败**：重建时若目标不存在，会警告并继续，不会中断整个还原。
