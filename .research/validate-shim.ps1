@@ -8,8 +8,22 @@
 # as ANSI. (Note: an inline SSH script bypasses the project's deploy gate, which is how a
 # PowerShell 7 `??` operator reached this worker once already. File-based deployment with
 # `deploy-ps1.ps1` is what catches that.)
+# Parameterised so the SAME script validates the worker and the host. The defect it checks for
+# is a property of the DSH build, not of either machine, so both need the same evidence -- and
+# two copies would drift.
+#
+# `param()` must be the FIRST statement in the script: PowerShell rejects it after any
+# assignment, and PS 5.1 reports that as a confusing "invalid assignment operator" at the
+# following lines. The deploy gate caught exactly that.
+param(
+  [string]$Shim = 'C:\dsh-remote\sandbox-mediator\shim.mjs',
+  [string]$NodeExe = 'C:\Program Files\nodejs\node.exe',
+  [string]$Workspace = 'C:\dsh-remote\p0work'
+)
+
 $ErrorActionPreference = 'Continue'
 if ([string]::IsNullOrEmpty($PSScriptRoot)) { $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+
 $log = Join-Path $PSScriptRoot 'validate-shim.txt'
 Remove-Item $log -Force -ErrorAction SilentlyContinue
 # NOT Write-Output: that writes to the PIPELINE, so every line a helper printed became part
@@ -18,8 +32,8 @@ Remove-Item $log -Force -ErrorAction SilentlyContinue
 # keeps the pipeline clean.
 function W($m) { [Console]::WriteLine($m); Add-Content -Path $log -Value $m -Encoding UTF8 }
 
-$node = 'C:\Program Files\nodejs\node.exe'
-$shim = 'C:\dsh-remote\sandbox-mediator\shim.mjs'
+$shim = $Shim
+$node = $NodeExe
 $pwshExe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
 $out = Join-Path $PSScriptRoot 'shim-out.txt'
 $err = Join-Path $PSScriptRoot 'shim-err.txt'
@@ -63,7 +77,7 @@ W "pwsh : $(Test-Path $pwshExe)"
 W ""
 
 $bwrapReadOnly = @('--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--die-with-parent')
-$bwrapWrite = $bwrapReadOnly + @('--tmpfs', '/tmp', '--bind', 'C:\dsh-remote\p0work', 'C:\dsh-remote\p0work')
+$bwrapWrite = $bwrapReadOnly + @('--tmpfs', '/tmp', '--bind', $Workspace, $Workspace)
 $pwshCmd = @('--', $pwshExe, '-NoProfile', '-Command', 'Write-Output shim-child-alive')
 $cmdEcho = @('--', 'cmd', '/c', 'echo', 'read-only-ok')
 

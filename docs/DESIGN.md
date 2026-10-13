@@ -1780,8 +1780,76 @@ Get-Location     → C:\dsh-remote\p0work       exit 0
 那是更干净的上游修法（shim 是变通）。上游 `deepseek-ai/deepseek-harness` 关闭了 issue、
 不接受外部 PR，文档渠道是 GitHub Discussions。
 
-### 14.3.1 若沙箱再次不可用时的降级路径
+### 14.3.2 同一缺陷在**主机**上的复现 —— 关键在于"有没有控制台"
 
+第 4 项（对称配对 / 角色配置）的前提是"**本机沙箱可用**"。为此复查了主机，结论比预想的细分：
+
+#### 事实一：主机是同一个 DSH 构建，`process.execPath` 同样是 GUI 子系统
+
+```
+DeepSeek Harness.exe   PE subsystem = 2  (GUI，Windows 不自动分配控制台)
+node.exe               PE subsystem = 3  (Console)
+```
+
+#### 事实二：**从有控制台的进程启动时，缺陷不复现**（这是我第一次测错的地方）
+
+我最初直接用 `cmd /c` 起 `DeepSeek Harness.exe` 跑 runner，**成功了**。原因不是缺陷不存在，
+而是**运行我的 pwsh 自己有控制台**（实测 `GetConsoleWindow() != 0`），控制台被一路继承下去。
+
+> **教训**：缺陷不是"GUI 子系统"这一个属性决定的，而是"**该进程有没有控制台**"。
+> 只看子系统就下结论，会得到一个**方向相反**的判断。
+
+#### 事实三：用真实上下文（计划任务，无控制台）**复现了**
+
+同一 runner、同一参数、**同样无控制台**，只有解释器不同：
+
+| 解释器 | 结果 |
+|---|---|
+| `DeepSeek Harness.exe` (GUI) | **exit 127** · `windows-acl-run: GetStdHandle failed (Win32 0): null stdin handle` |
+| `node.exe` (Console) | **exit 0** · `node-child-alive` |
+
+**症状与从机不同**（这里是 `null stdin handle`，从机是 `0xC0000142`），**根因相同**：进程没有控制台，
+标准句柄拿不到。
+
+#### 结论：主机**交互式**沙箱是好的，**服务式**沙箱会坏
+
+| 主机的角色 | 启动方式 | 沙箱 |
+|---|---|---|
+| 交互式主机（现在） | 用户从桌面/终端启动，**有控制台** | ✅ 可用 |
+| **作为从机**（第 4 项要走的路） | 计划任务启动，**无控制台** | ❌ **会坏** |
+
+所以主机这一侧的 shim 是**针对"主机作为从机"这一角色的真实修复**，不是预防性配置。
+
+#### 主机侧的部署物
+
+```
+C:\dsh-sandbox-mediator\          1304 文件 / 13.3 MB
+  shim.mjs                        与从机同一份（.research/sandbox-mediator-shim.mjs）
+  node_modules\@deepseek-ai\dsh-sandbox-windows-acl\lib\runner.js
+  node_modules\@koromix\koffi-win32-x64\...\koffi.node
+  ...
+```
+
+由 `.research/extract-mediator.mjs` 在 **Electron-as-node** 下物化（`node.exe` 读不了 app.asar）。
+**DSH 升级后必须重跑**，否则这个 mediator 驱动的是上一版的 runner。
+
+配置写在 `C:\Users\you\.dsh\profiles\desktop\cordis.patch.yml`（原文件已备份为
+`.bak-before-sandbox-shim`），**需要重启 DSH 才生效**。
+
+#### 两个验证脚本（都可参数化，主机与从机共用同一份）
+
+| 脚本 | 断言 |
+|---|---|
+| `validate-shim.ps1` | shim 的**方言翻译**：workspace-write / read-only 两种 bwrap 形态都能跑；未知 flag 与缺失 `--` **必须硬失败**（4/4） |
+| `validate-sandbox-confinement.ps1` | shim **真的在限制**：工作区内可写、工作区外被拒且无残留、read-only 连工作区也不可写、read-only 仍可读（5/5） |
+
+> **一个我写错又被自己抓到的探针**：最初用 `whoami` **失败**当作"受限令牌生效"的判据。
+> 但 Windows 的 rung 造的是 `WRITE_RESTRICTED`，**只限制写**——读自己的进程身份照样成功。
+> 实测 `whoami` 返回了 `host-pc\dev`，而**限制是正常工作的**。这个探针会把健康的沙箱
+> 报成坏的。从机那次 `whoami` 失败，应该是**只读模式**（`--ro-bind / /` 连读也限制）的症状。
+> 真正的判据是"工作区外写入被拒且无残留"。
+
+### 14.3.1 若沙箱再次不可用时的降级路径
 `danger-full-access` 仍然可用，但**必须知道代价**（这是实测，不是推测）：沙箱关闭后
 **审批链路整条失效**——因为触发点是"沙箱拒绝 → 提权 → 审批请求"：
 
