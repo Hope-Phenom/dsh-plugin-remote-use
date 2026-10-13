@@ -301,6 +301,94 @@ test('the pairing panel is closed until asked for', () => {
   assert.equal(opened(false), true, 'it toggles')
 })
 
+// ---------------------------------------------------------------------------
+// the worker role panel
+// ---------------------------------------------------------------------------
+
+const ROLE_OFF = {
+  armed: false, bindAddress: '', port: 7331, tokenSet: false, tokenHint: '',
+  armedAt: 0, uptimeMs: 0, lastError: '', probe: { ok: false, reason: 'not checked yet' },
+  interfaces: [
+    { address: '192.168.1.100', name: '以太网', score: 40, private: true, virtual: false },
+    { address: '172.20.0.1', name: 'vEthernet (Default Switch)', score: -1, private: true, virtual: true },
+    { address: '169.254.1.1', name: 'Ethernet 2', score: 1, private: false, virtual: false },
+  ],
+}
+
+function renderRole(role) {
+  return renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: { workers: [], sessionsEnabled: 0, enableCommand: '/remote-use on', workerRole: role },
+  })
+}
+
+test('the worker role panel says plainly whether a listener is open', () => {
+  // An operator who cannot see whether they left a port open has no way to check.
+  const off = textOf(renderRole(ROLE_OFF).tree).join(' ')
+  assert.match(off, /ROLE-DISARMED/)
+  assert.match(off, /ROLE-DISARMED-NOTE/)
+  assert.doesNotMatch(off, /ROLE-ARMED/)
+
+  const on = textOf(renderRole({
+    ...ROLE_OFF, armed: true, bindAddress: '192.168.1.100', uptimeMs: 90_000, tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022abcd',
+  }).tree).join(' ')
+  assert.match(on, /ROLE-ARMED/)
+  // Address, how long, and which credential -- all three, so "am I still exposed" is answerable.
+  assert.match(on, /192\.168\.1\.100/)
+  assert.match(on, /1m/)
+  assert.match(on, /abcd/)
+})
+
+test('the interface list is complete, and says why the virtual ones are not offered', () => {
+  const tree = renderRole(ROLE_OFF).tree
+  const options = []
+  const collect = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(collect); return }
+    if (node.type === 'option') options.push(node)
+    if (Array.isArray(node.children)) node.children.forEach(collect)
+  }
+  collect(tree)
+  // Filtered by the interface addresses: AdvancedSettings renders its own <option> list (the
+  // permission tiers), so counting every option would include three that have nothing to do with
+  // the interface choice -- which is exactly what the first version of this assertion did.
+  const addresses = new Set(ROLE_OFF.interfaces.map((i) => i.address))
+  const ifaceOptions = options.filter((o) => addresses.has(String(o.props.value)))
+  assert.equal(ifaceOptions.length, 3, 'every interface is listed, not only the usable ones')
+  const virtual = ifaceOptions.find((o) => String(o.props.value) === '172.20.0.1')
+  assert.ok(virtual !== undefined)
+  assert.equal(virtual.props.disabled, true, 'a virtual adapter must not be selectable')
+  assert.match(String(virtual.children[0]), /ROLE-VIRTUAL/)
+  assert.match(String(virtual.children[0]), /ROLE-NOT-OFFERED/)
+  const usable = ifaceOptions.find((o) => String(o.props.value) === '192.168.1.100')
+  assert.equal(usable.props.disabled, false)
+})
+
+test('the arm button is disabled until a check has passed', () => {
+  // Decision 4 refuses arming without a verified sandbox. A button that can only fail teaches
+  // the operator to click through warnings, so it starts disabled.
+  const before = findButton(renderRole(ROLE_OFF).tree, 'ROLE-ARM')
+  assert.equal(before.length, 1)
+  assert.equal(before[0].props.disabled, true, 'not armable before any check')
+
+  const failed = findButton(renderRole({ ...ROLE_OFF, probe: { ok: false, reason: 'no mediator' } }).tree, 'ROLE-ARM')
+  assert.equal(failed[0].props.disabled, true)
+
+  const ok = textOf(renderRole({ ...ROLE_OFF, probe: { ok: true, reason: '' } }).tree).join(' ')
+  assert.match(ok, /ROLE-SANDBOX-OK/)
+})
+
+test('the armed panel offers the local stop and says it does not contact the master', () => {
+  const tree = renderRole({
+    ...ROLE_OFF, armed: true, bindAddress: '192.168.1.100', tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022abcd',
+  }).tree
+  assert.equal(findButton(tree, 'ROLE-STOP').length, 1, 'the emergency stop must be reachable')
+  assert.equal(findButton(tree, 'ROLE-STOP-FORGET').length, 1)
+  assert.match(textOf(tree).join(' '), /ROLE-STOP-HINT/)
+  // Nothing to arm while armed: the panel does not offer a no-op.
+  assert.equal(findButton(tree, 'ROLE-ARM').length, 0)
+})
+
 test('the icon is the stroke-only style of the existing set, and self-contained', () => {
   const svg = readFileSync(join(PKG_ROOT, 'assets', 'icon.svg'), 'utf8')
   // Inlined as a data URL, so an external reference could never resolve.
@@ -538,6 +626,15 @@ function makeTranslator() {
       approvalsBudget: 'BUDGET-{s}', auditNote: 'AUDIT-AT-{p}',
       fieldKeepShots: 'F-KEEPSHOTS', fieldPolicy: 'F-POLICY', fieldSessions: 'F-SESSIONS',
       sessionsOn: 'SESSIONS-ON-{n}', sessionsNone: 'SESSIONS-NONE', switchHint: 'SWITCH {cmd}',
+      roleArmed: 'ROLE-ARMED', roleDisarmed: 'ROLE-DISARMED', roleDisarmedNote: 'ROLE-DISARMED-NOTE',
+      roleUptime: 'UP', roleToken: 'TOK', roleSandbox: 'SANDBOX', roleSandboxOk: 'ROLE-SANDBOX-OK',
+      roleSandboxUnknown: 'ROLE-SANDBOX-?',
+      roleBind: 'BIND', roleBindHint: 'BIND-HINT', roleVirtual: 'ROLE-VIRTUAL', roleNotOffered: 'ROLE-NOT-OFFERED',
+      rolePort: 'PORT', rolePortHint: 'PORT-HINT', roleCheck: 'ROLE-CHECK', roleArm: 'ROLE-ARM',
+      roleCheckOk: 'ROLE-CHECK-OK', roleCheckFailed: 'ROLE-CHECK-FAILED',
+      roleIssuedOnce: 'ROLE-ONCE', rolePairing: 'PAIRING', rolePairingHint: 'PAIRING-HINT',
+      roleTokenLabel: 'TOKEN-LABEL', roleTokenHint: 'TOKEN-HINT', roleIssuedDone: 'ROLE-DONE',
+      roleStop: 'ROLE-STOP', roleStopForget: 'ROLE-STOP-FORGET', roleStopHint: 'ROLE-STOP-HINT',
       fieldPairing: 'F-PAIRING', fieldPairingHint: 'PAIR-HINT', fieldPairingPlaceholder: 'dshpair1.', pairDone: 'PAIR-DONE',
       approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
       auditNone: 'AUDIT-NONE',

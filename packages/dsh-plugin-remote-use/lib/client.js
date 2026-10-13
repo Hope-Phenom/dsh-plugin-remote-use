@@ -114,6 +114,33 @@ window.__ModuleLoader__.load({
       approving: '正在提交…',
       approvalAllowed: '已允许一次',
       approvalDenied: '已拒绝',
+      roleArmed: '本机正在接受远程驱动',
+      roleDisarmed: '未接受远程驱动',
+      roleDisarmedNote: '当前没有监听任何端口。布防会开一个端口，让已配对的主机在本机执行命令。',
+      roleUptime: '已运行',
+      roleToken: '凭据',
+      roleSandbox: '约束状态',
+      roleSandboxOk: '沙箱已验证',
+      roleSandboxUnknown: '尚未验证',
+      roleBind: '监听地址',
+      roleBindHint: '指定某个局域网接口。不提供"所有接口"的选项；虚拟网卡会列出来，只是为了让你看到它为何不被选中。',
+      roleVirtual: '虚拟网卡',
+      roleNotOffered: '不提供',
+      rolePort: '端口',
+      rolePortHint: '主机拨这个端口。7331 与参考从机一致。',
+      roleCheck: '先检查',
+      roleArm: '布防为工作节点',
+      roleCheckOk: '沙箱能约束本机，地址可用，可以布防。',
+      roleCheckFailed: '暂时不能布防：',
+      roleIssuedOnce: '只显示这一次。之后不再展示 —— 重新签发意味着先停止布防再重新布防。',
+      rolePairing: '配对串',
+      rolePairingHint: '把它粘贴到主机的设置页。它携带凭据，请当作密码对待。',
+      roleTokenLabel: '凭据',
+      roleTokenHint: '同一个密钥的原始形式，供直接索要凭据的主机使用。',
+      roleIssuedDone: '我已保存',
+      roleStop: '立即停止',
+      roleStopForget: '停止并作废凭据',
+      roleStopHint: '立即生效，且不会联系主机。',
       groupAudit: '最近的裁定',
       auditNone: '尚无裁定记录。',
       auditNote: '追加写入，位置：{p}',
@@ -254,6 +281,33 @@ window.__ModuleLoader__.load({
       approving: 'Sending\u2026',
       approvalAllowed: 'Allowed once',
       approvalDenied: 'Refused',
+      roleArmed: 'This machine is accepting remote driving',
+      roleDisarmed: 'Not accepting remote driving',
+      roleDisarmedNote: 'Nothing is listening. Arming opens a port and lets a paired master run commands here.',
+      roleUptime: 'up',
+      roleToken: 'credential',
+      roleSandbox: 'Confinement',
+      roleSandboxOk: 'sandbox verified',
+      roleSandboxUnknown: 'not verified yet',
+      roleBind: 'Listen on',
+      roleBindHint: 'A specific LAN interface. Binding every interface is not offered, and virtual adapters are listed only so you can see why they are not chosen.',
+      roleVirtual: 'virtual adapter',
+      roleNotOffered: 'not offered',
+      rolePort: 'Port',
+      rolePortHint: 'The master dials this port. 7331 matches the reference worker.',
+      roleCheck: 'Check first',
+      roleArm: 'Arm as a worker',
+      roleCheckOk: 'The sandbox contains this machine and the address is usable. Safe to arm.',
+      roleCheckFailed: 'Cannot arm yet:',
+      roleIssuedOnce: 'Shown ONCE. It will not be displayed again \u2014 re-issuing means stopping the worker role and arming again.',
+      rolePairing: 'Pairing string',
+      rolePairingHint: 'Paste this into the master\u2019s settings page. It carries the credential, so treat it like a password.',
+      roleTokenLabel: 'Credential',
+      roleTokenHint: 'The same secret in raw form, for a master that asks for it directly.',
+      roleIssuedDone: 'I have saved it',
+      roleStop: 'Stop now',
+      roleStopForget: 'Stop and discard the credential',
+      roleStopHint: 'Take effect immediately and never contact the master.',
       groupAudit: 'Recent decisions',
       auditNone: 'No decisions recorded yet.',
       auditNote: 'Append-only, at {p}',
@@ -331,7 +385,10 @@ window.__ModuleLoader__.load({
       '.ru-approval-why{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
       '.ru-approval-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.ru-args{margin:0;padding:6px 8px;max-height:96px;overflow:auto;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-interactive-bg-hover);font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--dsw-alias-label-secondary)}',
-      '.ru-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '\.ru-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '.ru-role-banner{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 11px;margin:8px 0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font-size:12px}',
+      // An open listener is the one state on this page that has to be visible from across the room.
+      '.ru-role-banner.armed{border-color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}',
       '.ru-card{border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:12px 14px;display:flex;flex-direction:column;gap:10px}',
       '.ru-card + .ru-card{margin-top:10px}',
       '.ru-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
@@ -676,6 +733,150 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The worker role: this machine accepting remote execution.
+     *
+     * Decision 6 says the page must show the port, the reachable range, the current confinement
+     * state and how to close it BEFORE anything is opened. So the panel leads with the state and
+     * the gate's verdict, and the arm button stays disabled until a check has actually passed --
+     * rather than offering a button whose failure the operator discovers by clicking it.
+     *
+     * The credential is shown ONCE, immediately after arming, and the panel says so. Every later
+     * render reads `tokenHint` from the status, which is a mask.
+     */
+    function WorkerRolePanel(props) {
+      const { t, role, busy, onPreflight, onArm, onDisarm } = props
+      const [bindAddress, setBindAddress] = React.useState('')
+      const [port, setPort] = React.useState(7331)
+      const [check, setCheck] = React.useState(null)
+      const [issued, setIssued] = React.useState(null)
+
+      const interfaces = Array.isArray(role?.interfaces) ? role.interfaces : []
+      const best = interfaces.find((i) => i.score > 0)
+      const chosen = bindAddress === '' ? (best?.address ?? '') : bindAddress
+      const armed = role?.armed === true
+      const checked = check !== null
+      const blocked = checked && check.ok !== true
+
+      const doCheck = async () => {
+        const result = await onPreflight({ bindAddress: chosen, port: Number(port) })
+        setCheck(result)
+      }
+      const doArm = async () => {
+        const result = await onArm({ bindAddress: chosen, port: Number(port) })
+        if (result?.ok === true) setIssued({ token: result.token, pairing: result.pairing })
+        else setCheck({ ok: false, blockers: result?.blockers ?? [String(result?.error ?? '')] })
+      }
+      const doDisarm = async (forget) => {
+        await onDisarm({ forget })
+        setIssued(null)
+        setCheck(null)
+      }
+
+      const uptime = (ms) => {
+        const s = Math.max(0, Math.round(Number(ms ?? 0) / 1000))
+        if (s < 60) return `${s}s`
+        if (s < 3600) return `${Math.floor(s / 60)}m`
+        return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+      }
+
+      return h('div', null,
+        // The state first, and loudly: an operator who cannot see whether a listener is open has
+        // no way to tell whether they left one open.
+        h('div', { className: armed ? 'ru-role-banner armed' : 'ru-role-banner' },
+          h('span', { className: `ru-badge ${armed ? 'bad' : 'mute'}` }, armed ? t('roleArmed') : t('roleDisarmed')),
+          armed
+            ? h('span', { className: 'ru-dim' },
+              `${String(role.bindAddress)}:${String(role.port)} \u00b7 ${t('roleUptime')} ${uptime(role.uptimeMs)} \u00b7 ${t('roleToken')} ${String(role.tokenHint ?? '')}`)
+            : h('span', { className: 'ru-dim' }, t('roleDisarmedNote'))),
+
+        role?.lastError ? h('p', { className: 'ru-note warn' }, String(role.lastError)) : null,
+
+        // What confinement remote work would actually have.
+        h('div', { className: 'ru-kv' },
+          h('span', { className: 'ru-k' }, t('roleSandbox')),
+          h('span', { className: 'ru-v' },
+            role?.probe?.ok === true
+              ? h('span', { className: 'ru-badge ok' }, t('roleSandboxOk'))
+              : h('span', { className: 'ru-badge warn' }, t('roleSandboxUnknown')))),
+
+        armed ? null : h('div', null,
+          h('label', { className: 'ru-field' },
+            h('span', { className: 'ru-field-label' }, t('roleBind')),
+            h('select', {
+              className: 'ru-input',
+              value: chosen,
+              onChange: (event) => { setBindAddress(event.target.value); setCheck(null) },
+            },
+            // Everything is listed, including the interfaces that must not be chosen, so the page
+            // can explain rather than silently omit and leave the operator guessing.
+            ...interfaces.map((iface) => h('option', {
+              key: iface.address,
+              value: iface.address,
+              disabled: iface.score <= 0,
+            }, `${iface.address}  \u2014  ${iface.name}${iface.virtual ? ` (${t('roleVirtual')})` : ''}${iface.score <= 0 ? ` (${t('roleNotOffered')})` : ''}`))),
+            h('span', { className: 'ru-field-hint' }, t('roleBindHint'))),
+
+          h('label', { className: 'ru-field' },
+            h('span', { className: 'ru-field-label' }, t('rolePort')),
+            h('input', {
+              className: 'ru-input', type: 'number', min: '1', max: '65535',
+              value: port,
+              onChange: (event) => { setPort(event.target.value); setCheck(null) },
+            }),
+            h('span', { className: 'ru-field-hint' }, t('rolePortHint'))),
+
+          h('div', { className: 'ru-actions' },
+            h('button', {
+              type: 'button', className: 'ru-btn', disabled: busy !== '' || chosen === '',
+              onClick: () => void doCheck(),
+            }, busy === 'role-check' ? t('busy') : t('roleCheck')),
+            h('button', {
+              type: 'button', className: 'ru-btn danger',
+              // Disabled until a check has passed. Decision 4 refuses arming when the sandbox
+              // does not contain this machine, and offering a button that can only fail teaches
+              // the operator to click through warnings.
+              disabled: busy !== '' || blocked || !checked || chosen === '',
+              onClick: () => void doArm(),
+            }, busy === 'role-arm' ? t('busy') : t('roleArm'))),
+
+          checked
+            ? h('div', { className: check.ok === true ? 'ru-msg ok' : 'ru-msg err' },
+              check.ok === true
+                ? t('roleCheckOk')
+                : h('div', null,
+                  h('div', null, t('roleCheckFailed')),
+                  ...(check.blockers ?? []).map((b, i) => h('div', { key: String(i) }, `\u00b7 ${String(b)}`))))
+            : null),
+
+        // Shown once, and labelled as such.
+        issued === null ? null : h('div', { className: 'ru-card' },
+          h('p', { className: 'ru-note warn' }, t('roleIssuedOnce')),
+          h('label', { className: 'ru-field' },
+            h('span', { className: 'ru-field-label' }, t('rolePairing')),
+            h('textarea', { className: 'ru-input ru-textarea', rows: '3', readOnly: true, value: String(issued.pairing ?? '') }),
+            h('span', { className: 'ru-field-hint' }, t('rolePairingHint'))),
+          h('label', { className: 'ru-field' },
+            h('span', { className: 'ru-field-label' }, t('roleTokenLabel')),
+            h('input', { className: 'ru-input ru-mono', readOnly: true, value: String(issued.token ?? '') }),
+            h('span', { className: 'ru-field-hint' }, t('roleTokenHint'))),
+          h('div', { className: 'ru-actions' },
+            h('button', { type: 'button', className: 'ru-btn', onClick: () => setIssued(null) }, t('roleIssuedDone')))),
+
+        armed
+          ? h('div', { className: 'ru-actions', style: { marginTop: '10px' } },
+            h('button', {
+              type: 'button', className: 'ru-btn danger', disabled: busy !== '',
+              onClick: () => void doDisarm(false),
+            }, t('roleStop')),
+            h('button', {
+              type: 'button', className: 'ru-btn', disabled: busy !== '',
+              onClick: () => void doDisarm(true),
+            }, t('roleStopForget')),
+            h('span', { className: 'ru-dim' }, t('roleStopHint')))
+          : null)
+    }
+
+    /**
      * The plugin's mark, inline.
      *
      * WHY IT IS INLINED RATHER THAN READ FROM `assets/icon.svg`: this page is a browser
@@ -855,6 +1056,56 @@ window.__ModuleLoader__.load({
         }
       }, [call, refresh, pairingText, t])
 
+      /**
+       * Like `call`, but returns the body instead of throwing on a non-ok reply.
+       *
+       * The arming gate answers 409 with a LIST of blockers -- "the sandbox does not contain
+       * this machine" plus "that address is not on this machine" -- and `call`'s throw would
+       * reduce that to a single message, hiding the rest of what the operator has to fix.
+       */
+      const callRaw = React.useCallback(async (action, payload) => {
+        const response = await fetch(ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action, ...(payload ?? {}) }),
+        })
+        const data = await response.json().catch(() => null)
+        if (data === null) return { ok: false, error: `HTTP ${response.status}` }
+        return data
+      }, [])
+
+      const onRoleCheck = React.useCallback(async (request) => {
+        setBusy('role-check')
+        try {
+          return await callRaw('worker.preflight', request)
+        } finally {
+          setBusy('')
+        }
+      }, [callRaw])
+
+      const onRoleArm = React.useCallback(async (request) => {
+        setBusy('role-arm')
+        try {
+          const result = await callRaw('worker.arm', request)
+          // Re-read either way: a refusal updates the probe verdict, a success the state.
+          await refresh()
+          return result
+        } finally {
+          setBusy('')
+        }
+      }, [callRaw, refresh])
+
+      const onRoleDisarm = React.useCallback(async (opts) => {
+        setBusy('role-disarm')
+        try {
+          await callRaw('worker.disarm', opts ?? {})
+          await refresh()
+        } finally {
+          setBusy('')
+        }
+      }, [callRaw, refresh])
+
       const onAction = React.useCallback(async (action, peerId) => {
         setBusy(action)
         setStatus({ kind: 'idle', text: '' })
@@ -946,7 +1197,20 @@ window.__ModuleLoader__.load({
           snapshot === null
             ? null
             : h('p', { className: 'ru-note dim' },
-              fmt(t('switchHint'), { cmd: String(snapshot?.settings?.enableCommand ?? '/remote-use on') }))),
+              fmt(t('switchHint'), { cmd: String(snapshot?.settings?.enableCommand ?? '/remote-use on') })),
+
+          // The worker role. Rendered only once a snapshot exists: showing "not accepting remote
+          // driving" while the state is still unknown would be a claim the page cannot support.
+          snapshot === null
+            ? null
+            : h(WorkerRolePanel, {
+              t,
+              role: snapshot?.settings?.workerRole ?? null,
+              busy,
+              onPreflight: onRoleCheck,
+              onArm: onRoleArm,
+              onDisarm: onRoleDisarm,
+            })),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupWorkers')),

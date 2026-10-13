@@ -718,6 +718,7 @@ export function apply(ctx, config) {
       sessionsEnabled: () => enabledAgents.size,
       armingStatus: () => arming.status(),
       armWorker: (request) => arming.arm(request),
+      preflightWorker: (request) => arming.preflight(request),
       disarmWorker: (opts) => arming.disarm(opts),
       log,
       currentSettings,
@@ -1016,6 +1017,7 @@ export function makeSettingsRoute(deps) {
   // The worker role lives in apply()'s scope; the route reports it and drives it through these.
   const armingStatus = typeof deps.armingStatus === 'function' ? deps.armingStatus : () => null
   const armWorker = typeof deps.armWorker === 'function' ? deps.armWorker : () => ({ ok: false, error: 'this build cannot arm the worker role' })
+  const preflightWorker = typeof deps.preflightWorker === 'function' ? deps.preflightWorker : () => ({ ok: false, blockers: ['this build cannot check the worker role'], probe: { ok: false, reason: '' } })
   const disarmWorker = typeof deps.disarmWorker === 'function' ? deps.disarmWorker : () => ({ ok: false, error: 'this build cannot disarm the worker role' })
   // The route logs sparingly, but pairing is security-relevant and wants a trace. Injected
   // rather than imported, and defaulted so this function stays usable on its own in tests.
@@ -1270,6 +1272,22 @@ export function makeSettingsRoute(deps) {
             const applied = persistSettings(next)
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
             return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
+          case 'worker.preflight': {
+            // Decision 6: the page must be able to show the port, the reachable range, the
+            // current confinement state and how to close it BEFORE anything is opened. This runs
+            // the same gate `arm` does and starts nothing, so opening the panel costs a probe
+            // rather than a decision.
+            const result = preflightWorker({ bindAddress: body?.bindAddress, port: body?.port })
+            const status = armingStatus()
+            return send(200, {
+              ok: result.ok === true,
+              blockers: result.blockers ?? [],
+              probe: result.probe ?? { ok: false, reason: '' },
+              interfaces: status?.interfaces ?? [],
+              port: status?.port ?? 0,
+            })
           }
 
           case 'worker.arm': {
