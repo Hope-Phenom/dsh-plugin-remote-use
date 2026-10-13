@@ -163,19 +163,55 @@ function expand(node) {
   return { ...node, children: (node.children ?? []).map(expand) }
 }
 
+/** A stand-in translator covering every key the assertions below rely on. */
+function makeTranslator() {
+  return (key, values) => {
+    const table = {
+      title: 'TITLE', description: 'DESC', roleNote: 'ROLE-NOTE', loading: 'LOADING',
+      noWorkers: 'NO-WORKERS', nav: 'NAV', btnAdd: 'BTN-ADD', btnEdit: 'BTN-EDIT',
+      btnDelete: 'BTN-DELETE', btnSave: 'BTN-SAVE', btnCancel: 'BTN-CANCEL',
+      formAddTitle: 'FORM-ADD', fieldId: 'F-ID', fieldUrl: 'F-URL', fieldToken: 'F-TOKEN',
+      fieldTokenNew: 'F-TOKEN-NEW', groupAdvanced: 'GROUP-ADV', groupSource: 'GROUP-SRC',
+      sourceText: 'SOURCE {file}', groupTasks: 'GROUP-TASKS', noTasks: 'NO-TASKS',
+      groupDanger: 'GROUP-DANGER', groupWorkers: 'GROUP-WORKERS', groupRole: 'GROUP-ROLE',
+      roleMaster: 'ROLE-MASTER', tokenStored: 'STORED {hint}', tokenMissing: 'NOT-SET',
+      fieldCwd: 'F-CWD', fieldEnabled: 'F-ENABLED',
+    }
+    const template = table[key] ?? key
+    return values === undefined ? template : String(template).replace(/\{(\w+)\}/g, (w, k) => (k in values ? values[k] : w))
+  }
+}
+
 function renderWith(workers, tasks = []) {
   const { registered, react } = loadClient()
   const Section = registered[0].component
-  // A stand-in translator: the real dictionary is registered on the Host-bound locale
-  // service, so the page is rendered here against stable sentinels instead.
-  const t = (key, values) => {
-    const template = { title: 'TITLE', description: 'DESC', roleNote: 'ROLE-NOTE', noWorkers: 'NO-WORKERS', nav: 'NAV' }[key] ?? key
-    return values === undefined ? template : String(template).replace(/\{(\w+)\}/g, (w, k) => (k in values ? values[k] : w))
-  }
   // Seed the component's first useState (its snapshot) so the populated tree is rendered.
   react.__state.index = 0
-  react.__state.seeds = [{ ok: true, workers, tasks }]
-  return expand(Section({ t }))
+  react.__state.seeds = [{
+    ok: true,
+    workers,
+    tasks,
+    settingsFile: 'C:\\dsh\\settings.json',
+    settings: { requiredTier: 'workspace-write', approvalTimeoutMs: 90000, heartbeatMs: 15000 },
+  }]
+  return expand(Section({ t: makeTranslator() }))
+}
+
+/**
+ * Render with the add/edit form open.
+ *
+ * The form is opened by a click, and the React stub's setters are no-ops, so the `editing`
+ * hook is seeded directly instead. Hook order in the section is
+ * snapshot, loadError, busy, status, editing -- hence index 4.
+ */
+function renderEditing(snapshot, editing) {
+  const { registered, react } = loadClient()
+  const Section = registered[0].component
+  react.__state.index = 0
+  react.__state.seeds = []
+  react.__state.seeds[0] = snapshot
+  react.__state.seeds[4] = editing
+  return expand(Section({ t: makeTranslator() }))
 }
 
 test('the section renders its heading and the honest role note without a worker list', () => {
@@ -273,6 +309,55 @@ test('a worker with no report is described as pending, not as missing', () => {
   assert.match(text, /w1/)
   assert.match(text, /reportPending/, 'a missing report is its own state')
   assert.match(text, /did not finish within 4000 ms/, 'the reason must be shown')
+})
+
+// ---------------------------------------------------------------------------
+// pairing: the controls the page grew so a worker can be added without YAML
+// ---------------------------------------------------------------------------
+
+test('each worker card offers edit and delete', () => {
+  const tree = renderWith([{ peerId: 'w1', name: 'w1', cwd: 'C:\\w', error: '', activeTasks: 0, report: null, connection: {} }])
+  const text = textOf(tree).join(' ')
+  assert.match(text, /BTN-EDIT/)
+  assert.match(text, /BTN-DELETE/)
+})
+
+test('the worker list offers an add button and states where settings are written', () => {
+  const text = textOf(renderWith([])).join(' ')
+  assert.match(text, /BTN-ADD/)
+  // The precedence rule has to be visible, or "I edited the profile and nothing happened"
+  // becomes an unexplainable mystery once a settings file exists.
+  assert.match(text, /GROUP-SRC/)
+  assert.match(text, /C:\\dsh\\settings\.json/)
+})
+
+test('the approval policy controls render when the host reports settings', () => {
+  const text = textOf(renderWith([])).join(' ')
+  assert.match(text, /GROUP-ADV/)
+  assert.match(text, /workspace-write/, 'the current tier is shown')
+})
+
+test('a new worker MUST supply a token before it can be saved', () => {
+  const text = textOf(renderEditing(
+    { ok: true, workers: [], tasks: [], settings: {}, settingsFile: 'C:\\s.json' },
+    { draft: { enabled: true, serialQueue: 1 }, isNew: true },
+  )).join(' ')
+  // The add form asks for a token and says the stored-token rule does not apply to a new one.
+  assert.match(text, /FORM-ADD/)
+  assert.match(text, /F-TOKEN-NEW/)
+  assert.match(text, /NOT-SET/)
+})
+
+test('editing an existing worker offers a blank token that means "keep the stored one"', () => {
+  const text = textOf(renderEditing(
+    { ok: true, workers: [], tasks: [], settings: {}, settingsFile: 'C:\\s.json' },
+    { draft: { id: 'w1', url: 'ws://x', tokenSet: true, tokenHint: '\u2022\u2022abc1', enabled: true, serialQueue: 1 }, isNew: false },
+  )).join(' ')
+  assert.match(text, /F-TOKEN/)
+  // The masked hint proves a token exists without revealing it, and the label is the
+  // "keep" variant rather than the "required" one.
+  assert.match(text, /STORED \u2022\u2022abc1/)
+  assert.doesNotMatch(text, /F-TOKEN-NEW/)
 })
 
 // ---------------------------------------------------------------------------

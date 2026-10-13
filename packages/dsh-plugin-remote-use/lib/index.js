@@ -28,6 +28,14 @@ import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
 import { decideApproval, inferRequiredTier } from './core/review-engine.js'
+import {
+  mergeSettings,
+  publicWorker,
+  readSettings,
+  removeWorker as removeWorkerFromList,
+  upsertWorker,
+  writeSettings,
+} from './core/settings-store.js'
 import { RemoteProvider } from './provider/remote-provider.js'
 import { limitDiagnostic, verifyAgainstUpstream } from './provider/out-of-process-helpers.js'
 import { makeRemoteTools } from './tools/remote-tools.js'
@@ -97,6 +105,13 @@ export const Config = Schema !== null
     injectTaskSummary: Schema.boolean().default(true),
     /** Liveness probe interval per worker, in ms. 0 disables it. */
     heartbeatMs: Schema.number().default(15000),
+    /**
+     * How long a page load may spend probing readiness before it answers without a report.
+     * Raise it for a slow link; the page renders immediately either way.
+     */
+    reportBudgetMs: Schema.number().default(4000),
+    /** How long the page's explicit "re-check now" may spend. */
+    selfcheckBudgetMs: Schema.number().default(25000),
   })
   : {
     // Rendered as "unsupported" in the Settings page; `normalizeConfig` applies the very
@@ -108,6 +123,8 @@ export const Config = Schema !== null
     toolPrefix: 'subagent_remote',
     injectTaskSummary: true,
     heartbeatMs: 15_000,
+    reportBudgetMs: 4_000,
+    selfcheckBudgetMs: 25_000,
     _defaults: WORKER_DEFAULTS,
   }
 
@@ -122,17 +139,32 @@ export const Config = Schema !== null
  */
 export function apply(ctx, config) {
   const log = makeLogger(ctx)
-  const cfg = normalizeConfig(config)
+  // The settings file is the page's storage and takes precedence over the profile patch for
+  // the keys it contains. Absent (the usual case) it changes nothing.
+  const stored = readSettings()
+  if (stored.error !== '') log.warn(`settings file ignored: ${stored.error}`)
+  const merged = mergeSettings(normalizeConfig(config), stored.settings)
+  let cfg = merged.config
+  if (stored.settings !== null) {
+    log.info(`settings file applies: ${Object.entries(merged.sources).filter(([, s]) => s === 'settings').map(([k]) => k).join(', ') || 'nothing'}`)
+  }
   const registry = new TaskRegistry({})
 
   // A single shared cache keyed by `${workerId}:${toolCallId}`; approvals arrive with
   // only a tool call id, so this is the ONLY source of a tool's name and arguments
   // (DESIGN §10.0.1).
   const cache = new ToolCallCache({ maxEntries: 1024 })
-  /** @type {Map<string, TaskMemory>} */
-  const memories = new Map()
   /** @type {Map<string, object>} */
   const peers = new Map()
+  /**
+   * Per-worker teardown, so the page can re-pair without a restart.
+   *
+   * `ctx.effect` returns its own disposer, so wiring can be undone on demand rather than
+   * only when the fiber dies. Before this existed, changing a worker meant editing YAML and
+   * restarting DSH -- which is exactly the friction the settings page is meant to remove.
+   * @type {Map<string, () => unknown>}
+   */
+  const unwire = new Map()
 
   // Validate our frozen capability mirror against the live package. A mismatch means
   // DSH changed the contract and our advertisement is no longer honest.
@@ -146,9 +178,22 @@ export function apply(ctx, config) {
   })
 
   // ---- per-worker wiring -------------------------------------------------
-  for (const worker of cfg.workers) {
-    if (!worker.enabled) continue
+  /**
+   * Bring one worker online: build its connection, publish its runtime, and register its
+   * subagent provider. Undone by the disposer recorded in `unwire`.
+   */
+  function wire(worker) {
     const peerId = worker.id
+    /**
+     * Task memory is PER WORKER, not shared.
+     *
+     * It used to be one map keyed by taskId whose teardown did `memories.clear()`. That was
+     * harmless only because a worker was never removed at runtime; with live re-pairing it
+     * would wipe every OTHER worker's approval memory, making the review engine forget
+     * decisions it had already made. Per-worker ownership removes the footgun structurally.
+     * @type {Map<string, TaskMemory>}
+     */
+    const memories = new Map()
 
     // The connection is LAZY: nothing connects until something needs the worker. An
     // eager connect at load time would fail whenever the worker is off or still booting,
@@ -193,6 +238,13 @@ export function apply(ctx, config) {
       bridge: connection,
       connection,
       defaultCwd: worker.cwd,
+      // Echoed back so `reconfigure` can tell whether a live worker still matches its
+      // configuration. `PeerConnection` captures these at construction, so a change to any
+      // of them requires tearing the connection down rather than mutating it.
+      url: worker.url,
+      token: worker.token,
+      cwd: worker.cwd,
+      serialQueue: worker.serialQueue,
       /**
        * Ask the worker for a fresh readiness report. Falls back to a synthesised
        * "unreachable" report so the gate refuses instead of letting dispatch through.
@@ -223,7 +275,10 @@ export function apply(ctx, config) {
     }
     peers.set(peerId, workerRuntime)
 
-    ctx.effect(() => {
+    // The provider is captured per worker, but `decideApproval` closes over the LIVE `cfg`,
+    // so a settings change that alters `requiredTier` takes effect on the next decision
+    // without re-wiring anything.
+    const dispose = ctx.effect(() => {
       const decider = makeApprovalDecider({ cfg, worker, memories, log })
       const provider = new RemoteProvider({
         peer: workerRuntime,
@@ -237,18 +292,132 @@ export function apply(ctx, config) {
       ctx.effect(() => () => { void connection.dispose() }, 'remote-use: connection teardown')
       return () => {
         disposeProvider()
+        // Only THIS worker's memory: see the note on `memories` in `wire`.
         for (const m of memories.values()) m.dispose()
         memories.clear()
         log.info(`unregistered subagent provider "${provider.name}"`)
       }
     }, `remote-use: provider ${peerId}`)
+
+    unwire.set(peerId, dispose)
+  }
+
+  /** Take one worker offline: dispose its provider, its memory, and its connection. */
+  function unwireWorker(peerId) {
+    const dispose = unwire.get(peerId)
+    unwire.delete(peerId)
+    peers.delete(peerId)
+    if (dispose === undefined) return false
+    dispose()
+    return true
+  }
+
+  /**
+   * Make the live wiring match `workers`.
+   *
+   * Diffed by id, and a worker whose connection details changed is torn down and rebuilt:
+   * `PeerConnection` captures its url, token and httpBase at construction, so editing any
+   * of them cannot be applied to a running instance.
+   *
+   * @param {object[]} workers the desired list
+   * @returns {{ added: string[], removed: string[], changed: string[] }}
+   */
+  function reconfigure(workers) {
+    const desired = new Map()
+    for (const worker of workers) {
+      if (worker?.enabled === false) continue
+      if (typeof worker?.id === 'string' && worker.id !== '') desired.set(worker.id, worker)
+    }
+
+    const removed = []
+    for (const peerId of [...unwire.keys()]) {
+      if (!desired.has(peerId)) { unwireWorker(peerId); removed.push(peerId) }
+    }
+
+    const added = []
+    const changed = []
+    for (const [peerId, worker] of desired) {
+      const existing = peers.get(peerId)
+      if (existing === undefined) {
+        wire(worker)
+        added.push(peerId)
+        continue
+      }
+      // Compare the fields `PeerConnection` and `RemoteProvider` captured at construction.
+      const differs = existing.url !== worker.url
+        || existing.token !== worker.token
+        || existing.cwd !== worker.cwd
+        || existing.serialQueue !== worker.serialQueue
+        || existing.name !== worker.name
+      if (differs) {
+        unwireWorker(peerId)
+        wire(worker)
+        changed.push(peerId)
+      }
+    }
+    return { added, removed, changed }
+  }
+
+  // Bring up whatever the merged configuration asks for.
+  reconfigure(cfg.workers)
+
+  // ---- page-facing configuration control ---------------------------------
+  //
+  // Everything the Settings page may change, plus the persistence and live-apply that make
+  // a change take effect without editing YAML and restarting DSH.
+
+  /** The live configuration's managed subset, i.e. exactly what gets persisted. */
+  function currentSettings() {
+    return {
+      workers: cfg.workers.map((w) => ({ ...w })),
+      requiredTier: cfg.requiredTier,
+      approvalTimeoutMs: cfg.approvalTimeoutMs,
+      heartbeatMs: cfg.heartbeatMs,
+    }
+  }
+
+  /** The policy fields a running approval decider captured at construction. */
+  function policyStamp(settings) {
+    return `${settings.requiredTier}|${settings.approvalTimeoutMs}|${settings.heartbeatMs}`
+  }
+
+  /**
+   * Persist a full settings object and make the live wiring match it.
+   *
+   * A change to the approval policy or the heartbeat interval REBUILDS every worker, because
+   * both are captured when a provider or connection is constructed. Rebuilding also discards
+   * remembered approvals, which is the behaviour we want: a decision made under the old
+   * policy must not silently carry into the new one.
+   *
+   * @returns {{ ok: boolean, error?: string, added?: string[], removed?: string[], changed?: string[], rebuilt?: boolean }}
+   */
+  function persistSettings(settings) {
+    const normalized = normalizeConfig(settings)
+    const written = writeSettings(normalized)
+    if (!written.ok) return { ok: false, error: `could not write ${written.file}: ${written.error}` }
+
+    const before = policyStamp(cfg)
+    cfg = mergeSettings(cfg, normalized).config
+
+    if (policyStamp(cfg) !== before) {
+      for (const peerId of [...unwire.keys()]) unwireWorker(peerId)
+      const diff = reconfigure(cfg.workers)
+      log.info(`settings saved: policy changed, rebuilt every worker (${diff.added.length} added, ${diff.removed.length} removed)`)
+      return { ok: true, ...diff, rebuilt: true }
+    }
+
+    const diff = reconfigure(cfg.workers)
+    log.info(`settings saved: ${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} rebuilt`)
+    return { ok: true, ...diff, rebuilt: false }
   }
 
   // ---- model-facing tools ------------------------------------------------
-  if (peers.size > 0) {
-    for (const def of makeRemoteTools({ registry, peers })) {
-      ctx.effect(() => ctx.tools.register(def), `remote-use: tool ${def.name}`)
-    }
+  // The tools are registered UNCONDITIONALLY. They used to be skipped when there were no
+  // workers, which was fine while the worker list was fixed at load time -- but the page can
+  // now add the first worker at runtime, and a session that started with none would then have
+  // no tools to drive it with.
+  for (const def of makeRemoteTools({ registry, peers })) {
+    ctx.effect(() => ctx.tools.register(def), `remote-use: tool ${def.name}`)
   }
 
   // ---- runtime context: stop the model from forgetting remote work --------
@@ -260,10 +429,18 @@ export function apply(ctx, config) {
     }), 'remote-use: task summary section')
   }
 
-  // ---- settings data route (readiness panel + on-demand self-check) ------
+  // ---- settings data route (availability, diagnostics, pairing) ----------
   ctx.inject(['webServer'], (child) => {
-    child.effect(() => child.webServer.register(makeSettingsRoute({ peers, registry, cache })),
-      'remote-use: settings route')
+    child.effect(() => child.webServer.register(makeSettingsRoute({
+      peers,
+      registry,
+      cache,
+      currentSettings,
+      persistSettings,
+      settingsPath: stored.file,
+      reportBudgetMs: cfg.reportBudgetMs,
+      selfcheckBudgetMs: cfg.selfcheckBudgetMs,
+    })), 'remote-use: settings route')
   })
 }
 
@@ -304,6 +481,8 @@ export function normalizeConfig(config) {
     toolPrefix: String(config?.toolPrefix ?? 'subagent_remote'),
     injectTaskSummary: config?.injectTaskSummary !== false,
     heartbeatMs: Number.isFinite(config?.heartbeatMs) ? Math.max(0, Number(config.heartbeatMs)) : 15_000,
+    reportBudgetMs: Number.isFinite(config?.reportBudgetMs) ? Math.max(1, Number(config.reportBudgetMs)) : 4_000,
+    selfcheckBudgetMs: Number.isFinite(config?.selfcheckBudgetMs) ? Math.max(1, Number(config.selfcheckBudgetMs)) : 25_000,
   }
 }
 
@@ -452,13 +631,33 @@ function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
  * the page a bare 500 with nothing to display.
  *
  * @param {{ peers: Map<string, any>, registry: TaskRegistry, cache: ToolCallCache,
- *           reportBudgetMs?: number, selfcheckBudgetMs?: number }} deps
+ *           currentSettings?: () => object, persistSettings?: (s: object) => object,
+ *           settingsPath?: string, reportBudgetMs?: number, selfcheckBudgetMs?: number }} deps
  */
 export function makeSettingsRoute(deps) {
   const { peers, registry, cache } = deps
+  const currentSettings = deps.currentSettings ?? (() => ({ workers: [] }))
+  const persistSettings = deps.persistSettings ?? (() => ({ ok: false, error: 'this build cannot persist settings' }))
+  const settingsFile = deps.settingsPath ?? ''
   // Injectable so a test can drive the timeout path without waiting the production budget.
   const reportBudgetMs = Number.isFinite(deps.reportBudgetMs) ? Number(deps.reportBudgetMs) : REPORT_BUDGET_MS
   const selfcheckBudgetMs = Number.isFinite(deps.selfcheckBudgetMs) ? Number(deps.selfcheckBudgetMs) : SELFCHECK_BUDGET_MS
+
+  /**
+   * The managed configuration as the PAGE sees it: every worker present, tokens replaced by
+   * `tokenSet`/`tokenHint`. The page must be able to render the form without ever holding a
+   * bearer credential for remote execution.
+   */
+  const publicSettings = () => {
+    const settings = currentSettings()
+    return {
+      workers: (Array.isArray(settings.workers) ? settings.workers : []).map(publicWorker),
+      requiredTier: settings.requiredTier,
+      approvalTimeoutMs: settings.approvalTimeoutMs,
+      heartbeatMs: settings.heartbeatMs,
+    }
+  }
+
   return {
     kind: 'exact',
     path: '/api/dsh/dsh-plugin-remote-use',
@@ -499,6 +698,9 @@ export function makeSettingsRoute(deps) {
           workers,
           tasks: registry.list().slice(0, 50),
           toolCallCache: { size: cache.size, misses: cache.misses },
+          // The vocabulary the page needs to render its own controls, without any secret.
+          settings: publicSettings(),
+          settingsFile,
         }
       }
 
@@ -580,10 +782,41 @@ export function makeSettingsRoute(deps) {
             return send(200, { ok: true, cancelled, failures, considered: active.length })
           }
 
+          case 'worker.save': {
+            // Upsert one worker. An absent/blank token means "keep the stored one": the page
+            // never receives tokens, so requiring re-entry to rename a worker would be both
+            // annoying and pointless.
+            const edited = upsertWorker(currentSettings().workers, body?.worker)
+            if (edited.error !== '') return send(400, { ok: false, error: edited.error })
+            const applied = persistSettings({ ...currentSettings(), workers: edited.workers })
+            if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
+            return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
+          case 'worker.remove': {
+            const { workers, removed } = removeWorkerFromList(currentSettings().workers, String(body?.peerId ?? ''))
+            if (!removed) return send(404, { ok: false, error: `no such worker "${body?.peerId}"` })
+            const applied = persistSettings({ ...currentSettings(), workers })
+            if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
+            return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
+          case 'settings.save': {
+            // Only the managed, non-worker keys. Workers go through `worker.save` so a token
+            // can never be dropped by a form that did not carry one.
+            const incoming = body?.settings ?? {}
+            const next = { ...currentSettings() }
+            if (incoming.requiredTier !== undefined) next.requiredTier = String(incoming.requiredTier)
+            if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
+            if (Number.isFinite(incoming.heartbeatMs)) next.heartbeatMs = Number(incoming.heartbeatMs)
+            const applied = persistSettings(next)
+            if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
+            return send(200, { ok: true, applied, settings: publicSettings() })
+          }
+
           default:
             return send(400, { ok: false, error: `unknown action "${action}"` })
-        }
-      } catch (error) {
+        }      } catch (error) {
         return send(502, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }
     },

@@ -91,6 +91,45 @@ window.__ModuleLoader__.load({
       shotDone: '截图已保存：{p}',
       busy: '处理中…',
       screenshotHint: '截图保存在主机临时目录，可在会话中引用该路径。',
+      // --- pairing ---
+      btnAdd: '添加工作节点',
+      btnEdit: '编辑',
+      btnDelete: '删除',
+      btnSave: '保存',
+      btnCancel: '取消',
+      btnRecheck: '重新自检',
+      confirmDelete: '删除工作节点 {id}？该操作会立即断开连接并写入设置文件。',
+      formAddTitle: '添加工作节点',
+      formEditTitle: '编辑工作节点 {id}',
+      fieldId: '标识（id）',
+      fieldIdHint: '插件内部使用，也是 profile 补丁里的键；保存后不建议再改。',
+      fieldName: '显示名称',
+      fieldUrl: '中继地址',
+      fieldUrlHint: '从机中继的 WebSocket 地址，例如 ws://192.168.1.101:7331。',
+      fieldToken: '访问令牌',
+      fieldTokenHint: '留空表示保持原令牌不变。令牌只写入主机，不会回传到本页面。',
+      fieldTokenNew: '访问令牌（必填）',
+      fieldCwd: '工作目录',
+      fieldCwdHint: '从机上的绝对路径；同时也是从机沙箱允许写入的范围。',
+      fieldEnabled: '启用',
+      fieldSerial: '并发任务数',
+      fieldSerialHint: 'GUI 是独占资源，通常保持 1。',
+      tokenStored: '已保存（{hint}）',
+      tokenMissing: '未设置',
+      savedApplied: '已保存并生效：新增 {a} · 移除 {r} · 重建 {c}',
+      savedRebuilt: '已保存。审批策略变更，所有工作节点已重建。',
+      savedNoChange: '已保存，无需变更。',
+      groupAdvanced: '审批与连接',
+      fieldTier: '默认档位',
+      fieldTierHint: '从机申请宽于该档位时，主机的审阅引擎会拒绝。',
+      fieldApprovalTimeout: '审批超时（毫秒）',
+      fieldApprovalTimeoutHint: '超时按拒绝处理。',
+      fieldHeartbeat: '心跳间隔（毫秒）',
+      fieldHeartbeatHint: '0 表示关闭。用于在两次调用之间发现静默断链。',
+      fieldReportBudget: '页面探测预算（毫秒）',
+      fieldReportBudgetHint: '页面加载时等待就绪报告的上限；超时则只显示连接状态。',
+      groupSource: '配置来源',
+      sourceText: '工作节点由本页管理并写入 {file}；该文件存在时，profile 补丁中的同名配置不再生效。',
     }
 
     const en = {
@@ -155,6 +194,45 @@ window.__ModuleLoader__.load({
       shotDone: 'Screenshot saved: {p}',
       busy: 'Working\u2026',
       screenshotHint: 'Screenshots land in the host temp directory; reference that path from the session.',
+      // --- pairing ---
+      btnAdd: 'Add worker',
+      btnEdit: 'Edit',
+      btnDelete: 'Delete',
+      btnSave: 'Save',
+      btnCancel: 'Cancel',
+      btnRecheck: 'Re-check',
+      confirmDelete: 'Delete worker {id}? This disconnects it immediately and writes the settings file.',
+      formAddTitle: 'Add a worker',
+      formEditTitle: 'Edit worker {id}',
+      fieldId: 'Identifier (id)',
+      fieldIdHint: 'Used internally and as the profile-patch key; best left alone once saved.',
+      fieldName: 'Display name',
+      fieldUrl: 'Relay address',
+      fieldUrlHint: 'The worker relay\u2019s WebSocket address, e.g. ws://192.168.1.101:7331.',
+      fieldToken: 'Access token',
+      fieldTokenHint: 'Leave blank to keep the stored token. It is written on the host only and never returned to this page.',
+      fieldTokenNew: 'Access token (required)',
+      fieldCwd: 'Working directory',
+      fieldCwdHint: 'Absolute path on the worker; also the scope its sandbox allows writes to.',
+      fieldEnabled: 'Enabled',
+      fieldSerial: 'Concurrent tasks',
+      fieldSerialHint: 'The GUI is an exclusive resource on a worker; usually 1.',
+      tokenStored: 'stored ({hint})',
+      tokenMissing: 'not set',
+      savedApplied: 'Saved and applied: {a} added \u00b7 {r} removed \u00b7 {c} rebuilt',
+      savedRebuilt: 'Saved. The approval policy changed, so every worker was rebuilt.',
+      savedNoChange: 'Saved; nothing needed to change.',
+      groupAdvanced: 'Approval and connection',
+      fieldTier: 'Default tier',
+      fieldTierHint: 'A worker asking for more than this is refused by the host\u2019s review engine.',
+      fieldApprovalTimeout: 'Approval timeout (ms)',
+      fieldApprovalTimeoutHint: 'A timeout counts as a refusal.',
+      fieldHeartbeat: 'Heartbeat interval (ms)',
+      fieldHeartbeatHint: '0 disables it. Detects a silently dead link between calls.',
+      fieldReportBudget: 'Page probe budget (ms)',
+      fieldReportBudgetHint: 'How long a page load waits for a readiness report before showing link state alone.',
+      groupSource: 'Configuration source',
+      sourceText: 'Workers are managed here and written to {file}. Once that file exists, same-named keys in the profile patch no longer apply.',
     }
 
     const CSS = [
@@ -200,6 +278,15 @@ window.__ModuleLoader__.load({
       '.ru-dot.fail{background:var(--dsw-alias-state-error-primary)}',
       '.ru-dot.warning,.ru-dot.warn{background:var(--dsw-alias-state-business-primary)}',
       '.ru-dot.unchecked,.ru-dot.skip,.ru-dot.unknown{background:var(--dsw-alias-label-tertiary)}',
+      '.ru-form{gap:2px}',
+      '.ru-field{display:flex;flex-direction:column;gap:4px;padding:8px 0}',
+      '.ru-field-label{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.ru-field-hint{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5}',
+      '.ru-inline{flex-direction:row;align-items:center;gap:7px}',
+      '.ru-input{font:inherit;font-size:12px;padding:5px 8px;border-radius:var(--dsw-radius-sm);border:0.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);width:100%}',
+      '.ru-input:disabled{opacity:.6}',
+      '.ru-input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color);outline-offset:1px}',
+      '.ru-source{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6;word-break:break-all}',
     ].join('')
 
     /** Fill `{name}` placeholders. Kept local so the page does not depend on a t() option API. */
@@ -230,7 +317,7 @@ window.__ModuleLoader__.load({
     const TERMINAL_STATES = ['completed', 'error', 'aborted', 'cancelled']
 
     function WorkerCard(props) {
-      const { t, row, busy, onAction } = props
+      const { t, row, busy, onAction, onEdit, onDelete } = props
       const [showChecks, setShowChecks] = React.useState(false)
       const report = row.report
       const conn = row.connection
@@ -292,6 +379,14 @@ window.__ModuleLoader__.load({
           type: 'button', className: 'ru-btn', disabled: busy !== '',
           onClick: () => onAction('ping', row.peerId),
         }, busy === 'ping' ? t('busy') : t('btnPing')),
+        h('button', {
+          type: 'button', className: 'ru-btn', disabled: busy !== '',
+          onClick: () => onEdit(row),
+        }, t('btnEdit')),
+        h('button', {
+          type: 'button', className: 'ru-btn danger', disabled: busy !== '',
+          onClick: () => onDelete(row),
+        }, t('btnDelete')),
         h('span', { key: 'hint', className: 'ru-note' }, t('screenshotHint')),
       )
 
@@ -331,12 +426,141 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * Add/edit form for one worker.
+     *
+     * The token field starts EMPTY even when one is stored: the host never sends a token to
+     * the browser, so the field can only mean "replace it". Blank therefore reads as "keep
+     * the stored one", which is what makes renaming a worker possible without re-entering a
+     * credential the operator may not have to hand.
+     */
+    function WorkerForm(props) {
+      const { t, draft, onSave, onCancel, busy, isNew } = props
+      const [form, setForm] = React.useState({
+        id: draft.id ?? '',
+        name: draft.name ?? '',
+        url: draft.url ?? '',
+        token: '',
+        cwd: draft.cwd ?? '',
+        enabled: draft.enabled !== false,
+        serialQueue: draft.serialQueue ?? 1,
+      })
+      const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.value }))
+
+      const idOk = form.id.trim() !== ''
+      const urlOk = form.url.trim() !== ''
+      // A new worker with no token would be created and then fail at dispatch; refuse here.
+      const tokenOk = !isNew || form.token.trim() !== ''
+      const valid = idOk && urlOk && tokenOk
+
+      const field = (key, labelKey, hintKey, opts = {}) => h('label', { className: 'ru-field' },
+        h('span', { className: 'ru-field-label' }, t(labelKey)),
+        h('input', {
+          className: 'ru-input',
+          type: opts.type ?? 'text',
+          value: form[key],
+          // The id is the identity the rest of the plugin keys on, so it is fixed after
+          // creation rather than silently renaming an existing worker.
+          disabled: opts.disabled === true,
+          placeholder: opts.placeholder ?? '',
+          onChange: set(key),
+        }),
+        hintKey === undefined ? null : h('span', { className: 'ru-field-hint' }, t(hintKey)))
+
+      const tokenHint = draft.tokenSet === true
+        ? `${t('fieldTokenHint')} \u2014 ${fmt(t('tokenStored'), { hint: draft.tokenHint ?? '' })}`
+        : `${t('fieldTokenHint')} \u2014 ${t('tokenMissing')}`
+
+      return h('div', { className: 'ru-card ru-form' },
+        h('div', { className: 'ru-card-head' },
+          h('span', { className: 'ru-name' }, isNew ? t('formAddTitle') : fmt(t('formEditTitle'), { id: draft.id ?? '' }))),
+
+        field('id', 'fieldId', 'fieldIdHint', { disabled: !isNew }),
+        field('name', 'fieldName'),
+        field('url', 'fieldUrl', 'fieldUrlHint'),
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, isNew ? t('fieldTokenNew') : t('fieldToken')),
+          h('input', { className: 'ru-input', type: 'password', value: form.token, autocomplete: 'new-password', onChange: set('token') }),
+          h('span', { className: 'ru-field-hint' }, tokenHint)),
+        field('cwd', 'fieldCwd', 'fieldCwdHint'),
+
+        h('label', { className: 'ru-field ru-inline' },
+          h('input', { type: 'checkbox', checked: form.enabled, onChange: (e) => setForm((f) => ({ ...f, enabled: e.target.checked })) }),
+          h('span', null, t('fieldEnabled'))),
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldSerial')),
+          h('input', { className: 'ru-input', type: 'number', min: '1', value: form.serialQueue, onChange: set('serialQueue') }),
+          h('span', { className: 'ru-field-hint' }, t('fieldSerialHint'))),
+
+        h('div', { className: 'ru-actions' },
+          h('button', {
+            type: 'button', className: 'ru-btn primary', disabled: !valid || busy !== '',
+            onClick: () => onSave({
+              id: form.id.trim(),
+              name: form.name.trim() === '' ? form.id.trim() : form.name.trim(),
+              url: form.url.trim(),
+              cwd: form.cwd.trim(),
+              enabled: form.enabled,
+              serialQueue: Number(form.serialQueue) || 1,
+              // Omit entirely when blank so the host keeps the stored token.
+              ...(form.token === '' ? {} : { token: form.token }),
+            }),
+          }, busy === 'save' ? t('busy') : t('btnSave')),
+          h('button', { type: 'button', className: 'ru-btn', disabled: busy !== '', onClick: onCancel }, t('btnCancel'))),
+      )
+    }
+
+    /**
+     * Approval policy and connection tuning: the settings that apply to every worker.
+     *
+     * Changing the tier or the timeout rebuilds every worker on the Host, because a running
+     * approval decider captured the old policy. That is deliberate -- a decision remembered
+     * under one policy must not carry into another.
+     */
+    function AdvancedSettings(props) {
+      const { t, settings, busy, onSave } = props
+      const [form, setForm] = React.useState({
+        requiredTier: settings.requiredTier ?? 'workspace-write',
+        approvalTimeoutMs: settings.approvalTimeoutMs ?? 90000,
+        heartbeatMs: settings.heartbeatMs ?? 15000,
+      })
+      const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.value }))
+      const number = (key, labelKey, hintKey, min) => h('label', { className: 'ru-field' },
+        h('span', { className: 'ru-field-label' }, t(labelKey)),
+        h('input', { className: 'ru-input', type: 'number', min: String(min), value: form[key], onChange: set(key) }),
+        h('span', { className: 'ru-field-hint' }, t(hintKey)))
+
+      return h('div', { className: 'ru-group' },
+        h('h3', { className: 'ru-group-title' }, t('groupAdvanced')),
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldTier')),
+          h('select', { className: 'ru-input', value: form.requiredTier, onChange: set('requiredTier') },
+            // Only the tiers the review engine actually understands.
+            ...[['read-only', 'read-only'], ['workspace-write', 'workspace-write'], ['danger-full-access', 'danger-full-access']]
+              .map(([value, label]) => h('option', { key: value, value }, label))),
+          h('span', { className: 'ru-field-hint' }, t('fieldTierHint'))),
+        number('approvalTimeoutMs', 'fieldApprovalTimeout', 'fieldApprovalTimeoutHint', 1000),
+        number('heartbeatMs', 'fieldHeartbeat', 'fieldHeartbeatHint', 0),
+        h('div', { className: 'ru-actions', style: { marginTop: '8px' } },
+          h('button', {
+            type: 'button', className: 'ru-btn', disabled: busy !== '',
+            onClick: () => onSave({
+              requiredTier: form.requiredTier,
+              approvalTimeoutMs: Number(form.approvalTimeoutMs) || 90000,
+              heartbeatMs: Number(form.heartbeatMs) || 0,
+            }),
+          }, busy === 'policy' ? t('busy') : t('btnSave'))),
+      )
+    }
+
     function RemoteUseSection(props) {
       const { t } = props
       const [snapshot, setSnapshot] = React.useState(null)
       const [loadError, setLoadError] = React.useState('')
       const [busy, setBusy] = React.useState('')
       const [status, setStatus] = React.useState({ kind: 'idle', text: '' })
+      /** null = no form; `{ draft, isNew }` = the add/edit form is open. */
+      const [editing, setEditing] = React.useState(null)
 
       const call = React.useCallback(async (action, payload) => {
         const response = await fetch(ROUTE, {
@@ -365,6 +589,65 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { void refresh() }, [refresh])
 
+      /** Describe what a save actually did, so "nothing seemed to happen" is impossible. */
+      const describeApply = React.useCallback((applied, settings) => {
+        const a = Array.isArray(applied?.added) ? applied.added.length : 0
+        const r = Array.isArray(applied?.removed) ? applied.removed.length : 0
+        const c = Array.isArray(applied?.changed) ? applied.changed.length : 0
+        if (applied?.rebuilt === true) return t('savedRebuilt')
+        if (a === 0 && r === 0 && c === 0) return t('savedNoChange')
+        return fmt(t('savedApplied'), { a, r, c })
+      }, [t])
+
+      const saveWorker = React.useCallback(async (draft) => {
+        setBusy('save')
+        setStatus({ kind: 'idle', text: '' })
+        try {
+          const data = await call('worker.save', { worker: draft })
+          setEditing(null)
+          setStatus({ kind: 'ok', text: describeApply(data.applied, data.settings) })
+          await refresh()
+        } catch (error) {
+          setStatus({ kind: 'err', text: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setBusy('')
+        }
+      }, [call, refresh, describeApply])
+
+      const deleteWorker = React.useCallback(async (row) => {
+        // Deleting a worker is a live disconnect, so ask once with the id in the prompt.
+        const ok = typeof window === 'undefined' || typeof window.confirm !== 'function'
+          ? true
+          : window.confirm(fmt(t('confirmDelete'), { id: row.peerId }))
+        if (!ok) return
+        setBusy('delete')
+        setStatus({ kind: 'idle', text: '' })
+        try {
+          const data = await call('worker.remove', { peerId: row.peerId })
+          setEditing(null)
+          setStatus({ kind: 'ok', text: describeApply(data.applied, data.settings) })
+          await refresh()
+        } catch (error) {
+          setStatus({ kind: 'err', text: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setBusy('')
+        }
+      }, [call, refresh, describeApply, t])
+
+      const savePolicy = React.useCallback(async (next) => {
+        setBusy('policy')
+        setStatus({ kind: 'idle', text: '' })
+        try {
+          const data = await call('settings.save', { settings: next })
+          setStatus({ kind: 'ok', text: describeApply(data.applied, data.settings) })
+          await refresh()
+        } catch (error) {
+          setStatus({ kind: 'err', text: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setBusy('')
+        }
+      }, [call, refresh, describeApply])
+
       const onAction = React.useCallback(async (action, peerId) => {
         setBusy(action)
         setStatus({ kind: 'idle', text: '' })
@@ -385,8 +668,7 @@ window.__ModuleLoader__.load({
         }
       }, [call, refresh, t])
 
-      const onStopAll = React.useCallback(async () => {
-        setBusy('stop')
+      const onStopAll = React.useCallback(async () => {        setBusy('stop')
         setStatus({ kind: 'idle', text: '' })
         try {
           const data = await call('interrupt', {})
@@ -439,8 +721,26 @@ window.__ModuleLoader__.load({
                 row,
                 busy: busy === 'stop' ? 'stop' : (busy !== '' && busy !== 'stop' ? busy : ''),
                 onAction: (action, peerId) => void onAction(action, peerId),
+                onEdit: (r) => setEditing({ draft: r, isNew: false }),
+                onDelete: (r) => void deleteWorker(r),
               }))),
+
+          // The add/edit form sits with the list it edits, so there is no second place to
+          // look and no modal state to lose.
+          editing === null ? null : h(WorkerForm, {
+            t,
+            draft: editing.draft,
+            isNew: editing.isNew,
+            busy,
+            onSave: (draft) => void saveWorker(draft),
+            onCancel: () => setEditing(null),
+          }),
+
           snapshot === null ? null : h('div', { className: 'ru-actions', style: { marginTop: '10px' } },
+            h('button', {
+              type: 'button', className: 'ru-btn primary', disabled: anyBusy || editing !== null,
+              onClick: () => setEditing({ draft: { enabled: true, serialQueue: 1 }, isNew: true }),
+            }, t('btnAdd')),
             h('button', {
               type: 'button', className: 'ru-btn', disabled: anyBusy || workers.length === 0,
               onClick: async () => {
@@ -458,6 +758,21 @@ window.__ModuleLoader__.load({
             }, busy === 'all' ? t('busy') : t('btnAll')))),
 
         status.text === '' ? null : h('div', { className: `ru-msg ${status.kind === 'err' ? 'err' : status.kind === 'ok' ? 'ok' : 'mute'}` }, status.text),
+
+        // Approval policy and connection tuning. Separate from the worker list because these
+        // apply to every worker, and changing them is what forces a full rebuild.
+        snapshot === null || snapshot.settings === undefined ? null : h(AdvancedSettings, {
+          t,
+          settings: snapshot.settings,
+          busy,
+          onSave: (next) => void savePolicy(next),
+        }),
+
+        snapshot === null || typeof snapshot.settingsFile !== 'string' || snapshot.settingsFile === ''
+          ? null
+          : h('div', { className: 'ru-group' },
+            h('h3', { className: 'ru-group-title' }, t('groupSource')),
+            h('p', { className: 'ru-source' }, fmt(t('sourceText'), { file: snapshot.settingsFile }))),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupTasks')),
