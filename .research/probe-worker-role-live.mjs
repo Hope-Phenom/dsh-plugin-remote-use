@@ -105,17 +105,38 @@ line(`  selfcheck: ${JSON.stringify(report).slice(0, 200)}`)
 check('a worker self-check ran through the listener (the ACP agent answered)',
   report !== null && report.verdict !== undefined, String(report?.error ?? report?.verdict ?? ''))
 
+// ...AND THAT IT ACTUALLY RAN.
+//
+// The relay returns a DEGRADED report when it cannot run the script at all: verdict 'blocked',
+// blockingFailures 1, and a single check `S0` whose name says what went wrong. That is a
+// well-designed fallback -- it fails closed and carries the reason -- but it is report-SHAPED, so
+// `verdict !== undefined` above is satisfied by "could not run" exactly as well as by "ran".
+//
+// That is not hypothetical. For seven rounds this probe printed
+// `S0 | actual=Unexpected end of JSON input` and counted it as a pass, while the real cause was
+// PowerShell 5.1 being blocked from running scripts on this volume. The check was too weak to see
+// the difference, which is the same defect as a check that reads the wrong path.
+const degraded = Array.isArray(report?.checks)
+  && report.checks.length === 1
+  && report.checks[0]?.id === 'S0'
+check('the self-check produced a REAL report, not the relay\'s degraded one', degraded === false,
+  degraded ? String(report?.checks?.[0]?.actual ?? '').slice(0, 160) : `${report?.checks?.length ?? 0} checks`)
+
 // What the verdict actually rests on. The reference worker reports `ready`; this machine reported
 // `blocked` with four failures WHILE A TASK STILL COMPLETED. A readiness report that does not
 // predict the thing it is named after is worth looking at, not averaging away, so the failing
 // checks are printed in full.
 if (Array.isArray(report?.checks)) {
-  const blocking = report.checks.filter((c) => c?.blocking === true)
+  // `severity`, not a `blocking` boolean -- the report has no such field, and reading the wrong
+  // one made every blocking failure print as a warning. The verdict still said `blocked`, so the
+  // two disagreed and the more detailed one was the wrong one.
+  const blocking = report.checks.filter((c) => c?.severity === 'blocking' && c?.status === 'fail')
   line(`  checks: ${report.checks.length} total, ${blocking.length} blocking; verdict=${report.verdict}`)
   for (const c of report.checks) {
-    const failed = c?.blocking === true || c?.status === 'fail' || c?.ok === false
+    const failed = (c?.severity === 'blocking' && c?.status === 'fail') || c?.status === 'fail' || c?.status === 'warn'
     if (!failed) continue
-    line(`    ${c?.blocking === true ? 'BLOCKING' : 'warn    '} ${String(c?.id ?? c?.name ?? '?')} | expected=${String(c?.expected ?? '').slice(0, 40)} actual=${String(c?.actual ?? c?.detail ?? '').slice(0, 70)}`)
+    const tag = c?.severity === 'blocking' && c?.status === 'fail' ? 'BLOCKING' : String(c?.status ?? '?').toUpperCase().padEnd(8)
+    line(`    ${tag} ${String(c?.id ?? '?')} ${String(c?.name ?? '')} | expected=${String(c?.expected ?? '').slice(0, 26)} actual=${String(c?.actual ?? '').slice(0, 60)}`)
   }
 }
 

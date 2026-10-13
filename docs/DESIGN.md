@@ -3176,3 +3176,63 @@ HTTP 200   3640x2068   4.33 MB   displays=2   1541 ms
 **`Select-Object -First` 会提前终止管道并杀掉上游进程**。
 
 > 三次了：**我用一个近似代替了那个真正会给出答案的东西，而近似总是给出我想要的答案。**
+
+#### 第 17 轮：把上一轮的教训用成搜索 —— 找到的是**我的检查**，不是产品
+
+第 16 轮发现"自检失败返回一份像报告的报告，我的检查看不出来"。这一轮做了两件事。
+
+##### 1. 系统性搜索"失败伪装成数据"的其它位置
+
+扫了 `lib/` 里所有 `catch` 块，逐个看是否吞掉错误并返回默认值。结论：**没有第二处**。
+
+| 位置 | 判断 |
+|---|---|
+| `sandbox-probe.js:87` | **误报** —— 匹配到的是 JS 字符串里的 PowerShell 载荷 |
+| `remote-provider.js:132` / `peer-connection.js:369` | 尽力而为的清理，失败不影响结果 ✓ |
+| `index.js:817`（审计写入） | 注释写"会报告"，catch 却是空的 —— **值得推敲** |
+
+最后一条查到底了：`AuditLog.record` 自己会设 `lastError` + 记 warn + 返回 false，
+`index.js:1120` 把它送到页面，而**页面第 1365 行确实渲染它**。所以那条 catch 是双保险，
+注释准确 ✓ —— **审计写入失败对操作者可见**，这是"留痕"该有的性质。
+
+##### 2. 真正的缺陷在**探针**里，而且有两处
+
+**（a）检查太弱**：`report.verdict !== undefined` 对 relay 的 `degraded` 报告同样成立。
+
+relay 的兜底其实是**设计良好的** —— `verdict: 'blocked'`、`blockingFailures: 1`、
+`checks[0].name = 'self-check produced a report'`、`actual` 带原因，**信息都在**。
+所以问题不在产品：**是我的检查分不出"跑过了"和"根本没跑"**。
+
+这正是它藏了七轮的原因 —— 一个读错东西的检查，与一个读错路径的检查是同一类缺陷。
+
+现在断言**不是**那份单项 `S0` 的兜底报告，并且实测：
+
+```
+[PASS] the self-check produced a REAL report, not the relay's degraded one -- 17 checks
+selfcheck: {"sessionSegment":"ok","blockingFailures":2,...}
+```
+
+`sessionSegment` 从 `"unavailable"` 变成 `"ok"` —— **同时验证了第 16 轮的 `pwsh` 修复真的生效**。
+
+**（b）读错了字段**：探针用 `c.blocking === true` 判断阻断项，而 schema 里是 `severity`。
+于是**每一项阻断都被打印成 warn**，与同一份报告里的 `verdict=blocked` 互相矛盾 ——
+而更详细的那一个（我的）是错的。
+
+修正后：
+
+```
+checks: 17 total, 2 blocking; verdict=blocked
+  WARN     S3 primary resolution | expected=1920x1080 actual=2048x1152
+  BLOCKING S9 sleep/hibernate disabled | expected=AC=0 DC=0 actual=standby=3600/600
+  BLOCKING S12 console QuickEdit off | expected=0 actual=1
+```
+
+数字与 verdict 一致了，剩下的两项**是真事**。
+
+##### 本轮的全栈回环验证（一次运行覆盖第 1 与第 4 项）
+
+沙箱门禁 · 布防 · 配对串只回传一次 · 凭据只留掩码 · `/healthz` · 未授权 401 ·
+ACP 握手 · **真实 17 项自检** · 任务跑完 · **审批放行（命令真的执行）** ·
+**审批拒绝（命令确实没执行）** · 本地停止 · 端口释放 · 凭据作废 —— 全部通过。
+
+无副作用：端口空闲、无 marker 遗留、`slave\shots` 不存在、settings 文件未被改动。
