@@ -380,6 +380,49 @@ if (sawPending === 0) {
 }
 
 // ---------------------------------------------------------------------------
+// 2e. The worker role: this machine's ability to BE a worker
+//
+// NOTHING HERE ARMS ANYTHING. This runs against the operator's real DSH home, where the acp
+// profile exists and the sandbox gate PASSES -- so a successful `worker.arm` would open a real
+// listener on the LAN from inside a test. The safe and still meaningful checks are the ones that
+// cannot start anything: the status shape, and a refusal that happens before any start.
+// ---------------------------------------------------------------------------
+console.log('\n=== 2e. worker role (nothing is armed here) ===')
+
+const roleSnapshot = await callRoute('GET')
+const role = roleSnapshot?.settings?.workerRole
+check('GET reports the worker role', role !== undefined && typeof role === 'object')
+check('the worker role never carries the token', role !== undefined && !('token' in role),
+  Object.keys(role ?? {}).join(','))
+check('the worker role lists the local interfaces', Array.isArray(role?.interfaces) && role.interfaces.length > 0,
+  `${role?.interfaces?.length ?? 0} interfaces`)
+check('the default is disarmed', role?.armed === false)
+// The interface the page would preselect must not be a virtual adapter -- that was the bug the
+// shared scorer exists to prevent.
+const preselect = (role?.interfaces ?? []).find((i) => i.score > 0)
+console.log(`  would offer: ${preselect?.address ?? '(none)'}  (${preselect?.name ?? ''})`)
+check('a usable interface is offered, and it is not a virtual adapter',
+  preselect !== undefined && preselect.virtual !== true, JSON.stringify(preselect))
+
+// The preflight runs the real sandbox gate against this machine's acp profile. It starts
+// nothing, so it is safe, and it is the one check that says whether this host could be a worker
+// at all.
+const pre = await callRoute('POST', { action: 'worker.preflight', bindAddress: preselect?.address, port: 7397 })
+console.log(`  preflight: ok=${pre.ok} blockers=${JSON.stringify(pre.blockers)}`)
+check('preflight answers without arming', typeof pre.ok === 'boolean' && Array.isArray(pre.blockers))
+check('the sandbox gate is reported', pre.probe !== undefined && typeof pre.probe.ok === 'boolean',
+  JSON.stringify(pre.probe))
+
+// An address that is not on this machine is refused BEFORE anything starts, so this exercises
+// the address gate without opening a port.
+const badAddress = await callRoute('POST', { action: 'worker.arm', bindAddress: '203.0.113.7' })
+check('arming on an address this machine does not have is refused',
+  badAddress.ok === false && /not an address of this machine/u.test(String(badAddress.error)),
+  JSON.stringify(badAddress.error))
+const stillOff = await callRoute('GET')
+check('and nothing was armed by it', stillOff?.settings?.workerRole?.armed === false)
+
+// ---------------------------------------------------------------------------
 // 3. Teardown
 // ---------------------------------------------------------------------------
 console.log('\n=== 3. teardown ===')

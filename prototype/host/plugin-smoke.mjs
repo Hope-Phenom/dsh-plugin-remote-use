@@ -17,14 +17,33 @@
  * INSTALLED location (the profile junction) rather than a relative path, which is exactly
  * how the host will load it.
  */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+/**
+ * Isolate the plugin from the operator's real DSH home BEFORE anything imports it.
+ *
+ * WHY: `apply()` reads the settings file, and the settings route can WRITE it. Run against the
+ * real `~/.dsh` this script would read -- and, once it exercises the route, modify -- the
+ * operator's live configuration. It also made a route check unsafe to add at all: the real acp
+ * profile passes the sandbox gate, so arming from a smoke test would have opened a listener on
+ * the operator's LAN.
+ *
+ * A temp home makes the gate REFUSE (no acp profile there), which is both safe and the property
+ * worth asserting.
+ */
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'plugin-smoke-home-'))
+process.env.DSH_HOME = TEST_HOME
+process.on('exit', () => { try { rmSync(TEST_HOME, { recursive: true, force: true }) } catch { /* best effort */ } })
 
 const INSTALLED = 'C:\\Users\\you\\.dsh\\profiles\\desktop\\node_modules\\dsh-plugin-remote-use\\lib\\index.js'
 const entryPath = process.argv[2] ?? INSTALLED
 // Windows: the ESM loader only accepts file:// URLs for absolute paths.
 const entry = pathToFileURL(entryPath).href
 
-const registered = { providers: [], tools: [], effects: [], sections: [], injects: [], guards: [], commands: new Map(), listeners: new Map() }
+const registered = { providers: [], tools: [], effects: [], sections: [], injects: [], guards: [], commands: new Map(), listeners: new Map(), route: undefined }
 const logLines = []
 
 /**
@@ -140,6 +159,9 @@ function makeInjectedCtx() {
     },
     webServer: {
       register(route) {
+        // Kept, not just counted: the settings route is now the only way to reach the approval
+        // queue and the worker role, and those are worth asserting on the load path.
+        registered.route = route
         registered.injects.push(['route:' + String(route?.path)])
         return () => {}
       },
@@ -247,6 +269,64 @@ check('the gate is installed: a command and an execution guard',
   `commands=${[...registered.commands.keys()].join(',') || '(none)'} guards=${registered.guards.length}`)
 check('injected into webServer for the settings route',
   registered.injects.some((d) => Array.isArray(d) && d.includes('webServer')))
+
+// ---- the settings route's shape, on the load path ------------------------
+//
+// Called against a TEMP DSH home (see the top of this file), so nothing here touches the
+// operator's configuration and the sandbox gate cannot pass -- which is what makes the arming
+// check below both safe and meaningful.
+console.log('')
+check('the settings route was registered with a handler',
+  registered.route !== undefined && typeof registered.route.handler === 'function')
+
+if (registered.route !== undefined) {
+  /** Invoke the route the way the web server does. */
+  const callRoute = async (method, payload) => {
+    const body = payload === undefined ? '' : JSON.stringify(payload)
+    const req = {
+      method,
+      on: (event, handler) => {
+        if (event === 'data' && body !== '') handler(Buffer.from(body))
+        if (event === 'end') handler()
+        return req
+      },
+    }
+    const text = await new Promise((resolve) => {
+      registered.route.handler(req, { writeHead: () => {}, end: (s) => resolve(String(s)) })
+    })
+    return JSON.parse(text)
+  }
+
+  const snapshot = await callRoute('GET')
+  check('GET reports the approval queue', snapshot.approvals?.available === true,
+    JSON.stringify(snapshot.approvals?.available))
+  check('GET reports the audit trail', snapshot.audit?.available === true
+    && typeof snapshot.audit?.path === 'string' && snapshot.audit.path.endsWith('audit.jsonl'),
+    String(snapshot.audit?.path))
+  check('the audit trail lives under the temp home, not the operator home',
+    String(snapshot.audit?.path ?? '').startsWith(TEST_HOME), String(snapshot.audit?.path))
+
+  const role = snapshot.settings?.workerRole
+  check('GET reports the worker role, disarmed by default', role?.armed === false, JSON.stringify(role?.armed))
+  check('the worker role NEVER carries the token', role !== undefined && !('token' in role),
+    Object.keys(role ?? {}).join(','))
+  check('the worker role lists the local interfaces', Array.isArray(role?.interfaces) && role.interfaces.length > 0,
+    `${role?.interfaces?.length ?? 0} interfaces`)
+
+  // The gate. In this temp home there is no acp profile, so the sandbox cannot be shown to
+  // contain this machine and arming must be REFUSED -- not warned about, and not attempted.
+  const armed = await callRoute('POST', { action: 'worker.arm', bindAddress: '127.0.0.1' })
+  check('arming is REFUSED when the sandbox cannot be shown to contain this machine',
+    armed.ok === false && /sandbox/u.test(String(armed.error)), JSON.stringify(armed.error))
+  check('the refusal lists what is blocking', Array.isArray(armed.blockers) && armed.blockers.length > 0,
+    JSON.stringify(armed.blockers))
+
+  const after = await callRoute('GET')
+  check('nothing was armed by the refused attempt', after.settings?.workerRole?.armed === false)
+
+  const disarmed = await callRoute('POST', { action: 'worker.disarm' })
+  check('the local stop is safe when nothing was armed', disarmed.ok === true)
+}
 
 // ---- effects must have run during apply() (Cordis runs them immediately) ---
 console.log('')
