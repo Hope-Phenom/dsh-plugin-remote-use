@@ -1978,6 +1978,38 @@ worker token 是远程执行的凭据；把它发到网页会落进 devtools、�
 ⚠️ 这个集成测试是补上**测试接缝**的第三次尝试：此前两次交付的 bug（从未调用 `connect()`、
 工具 schema 不可转换）都是因为没有任何东西跑真实的 `apply()`。
 
+### 15.8 ⚠️ 测试写进了操作者的真实目录（已修，事故已清理）
+
+给 `apply()` 写集成测试时，测试用 `withEnv` 保存/恢复 `process.env.DSH_HOME`：
+
+```js
+function withEnv(fn) {                    // 错误版本
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = tempDir
+  try { return fn(tempDir) }              // ← 没有 await
+  finally { process.env.DSH_HOME = previous; rmSync(tempDir) }
+}
+```
+
+有一个测试是同步调用它的，于是 `finally` 在异步 `worker.save` **还在飞行时**就把 `DSH_HOME`
+恢复成了真实的 `C:\Users\you\.dsh` ⇒ **测试夹具被写进了操作者的真实设置文件**：
+
+```json
+{ "workers": [{ "id": "w1", "url": "ws://10.0.0.1:7331", "token": "token-w1" }] }
+```
+
+**危害不是"测试脏了数据"，而是下次重启时设置文件优先于 profile 补丁** —— 那台真实的从机
+会从配置里消失，而现象是"从机不见了"，与测试毫无关联。
+
+**当时只看到 `generated asynchronous activity after the test ended` 这条警告**，把 `withEnv`
+改成 `await` 就消失了 —— 但文件已经写下。**警告消失 ≠ 副作用消失。**
+
+**修法不是"记得 await"，而是让它在结构上不可能**：整个文件在**模块加载时**把 `DSH_HOME`
+指向一个临时目录并**永不恢复**，`withEnv` 只负责清理设置文件。这样任何异步时序都无法到达真实主目录。
+另加一条守卫测试，断言 `DSH_HOME` 确实在临时目录下。
+
+**教训**：测试装置是**会写用户目录的代码**，必须按这个标准要求它。
+
 ---
 
 ## 16. 对称配对（本机在主/从之间切换）—— 设计，待评审

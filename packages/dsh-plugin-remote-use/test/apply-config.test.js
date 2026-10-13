@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply } from '../lib/index.js'
+import { settingsPath } from '../lib/core/settings-store.js'
 
 // ---------------------------------------------------------------------------
 // fake Cordis context
@@ -76,26 +77,42 @@ function makeContext() {
   return { ctx, registered, tools, sections, routes, logs, disposals }
 }
 
+/**
+ * A single temp DSH home for the WHOLE file, installed at module load and never restored.
+ *
+ * WHY NOT per-test save/restore: an earlier version did exactly that, and one test called
+ * the helper WITHOUT awaiting it -- so the `finally` put the real `C:\Users\you\.dsh` back
+ * while an async save was still in flight, and the suite wrote a fixture worker
+ * (`ws://10.0.0.1:7331`) into the operator's real settings file. On the next restart that
+ * file takes precedence over the profile patch, so the suite would have silently replaced
+ * the real worker list.
+ *
+ * Never restoring means no async timing can reach the real home. This is a test harness
+ * writing to a user directory; it has to be structurally impossible, not merely correct.
+ */
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'remote-use-apply-'))
+process.env.DSH_HOME = TEST_HOME
+process.on('exit', () => {
+  try { rmSync(TEST_HOME, { recursive: true, force: true }) } catch { /* best effort */ }
+})
+
+/** Start a test from a clean settings file, within the temp home. */
 async function withEnv(fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'remote-use-apply-'))
-  const previous = process.env.DSH_HOME
-  process.env.DSH_HOME = dir
-  try {
-    // MUST await: a synchronous `finally` here deleted the temp directory while an async
-    // test was still running, which surfaced as "generated asynchronous activity after the
-    // test ended" rather than as a failure in the test that caused it.
-    return await fn(dir)
-  } finally {
-    if (previous === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previous
-    rmSync(dir, { recursive: true, force: true })
-  }
+  rmSync(join(TEST_HOME, 'storages', 'dsh-plugin-remote-use', 'settings.json'), { force: true })
+  return await fn(TEST_HOME)
 }
 
 /** Mount the plugin with probe budgets small enough that an unreachable worker is cheap. */
 function mount(ctx, config = {}) {
   apply(ctx, { reportBudgetMs: 30, selfcheckBudgetMs: 30, ...config })
 }
+
+test('the suite is isolated from the real DSH home', () => {
+  // A guard on the guard: if this ever fails, every other test in the file is suspect.
+  assert.equal(process.env.DSH_HOME, TEST_HOME)
+  assert.ok(TEST_HOME.startsWith(tmpdir()), 'the harness must only ever write under the temp dir')
+  assert.equal(settingsPath().startsWith(TEST_HOME), true)
+})
 
 function worker(id, overrides = {}) {
   return {
