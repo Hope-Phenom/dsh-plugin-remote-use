@@ -506,6 +506,114 @@ function loadClient() {
 }
 
 // ---------------------------------------------------------------------------
+// the availability badge: WARNINGS ARE NOT "UNAVAILABLE"
+//
+// Found by looking at a screenshot of the running page. The worker card said "unavailable" while
+// the SAME CARD's detail line said `blocking 0`, and the connection line said "connected". The
+// worker was usable; the badge was wrong.
+//
+// The cause was a two-branch test -- `ready` -> ready, `unknown` -> unknown, everything else ->
+// unavailable -- which swept `warn` (advisory) and `partial` (a check could not run) into the
+// unusable bucket. The product's own dispatch gate blocks on a check whose status is `fail` and
+// ignores warnings, so it disagreed with its own page. The live harness had the identical wrong
+// rule and was fixed first; this is the same fix on the browser side.
+// ---------------------------------------------------------------------------
+
+const verdictReport = (verdict, blockingFailures) => ({
+  verdict, blockingFailures, sessionSegment: 'ok', checks: [],
+})
+
+function badgeText(verdict, blockingFailures) {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    workers: [{
+      peerId: 'w1', name: 'W', url: 'ws://h:7331', cwd: 'C:\\w', enabled: true,
+      connected: true, tokenSet: true, tokenHint: '\u2022\u2022\u2022\u2022abcd',
+      connection: { connected: true, connectFailures: 0 },
+      report: verdictReport(verdict, blockingFailures),
+    }],
+    settings: { ...BASE_SNAPSHOT.settings, workers: [{ id: 'w1', url: 'ws://h:7331', tokenSet: true, enabled: true }] },
+  })
+  return { text: textOf(tree).join(' '), tree }
+}
+
+/** The badge element carrying the verdict label, so its COLOUR class can be checked too. */
+function verdictBadge(verdict, blockingFailures) {
+  const { tree } = badgeText(verdict, blockingFailures)
+  let found = null
+  const walk = (node) => {
+    if (node === null || typeof node !== 'object' || found !== null) return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (typeof node.props?.className === 'string' && node.props.className.startsWith('ru-badge ')
+        && Array.isArray(node.children) && /^VERDICT-/u.test(String(node.children[0] ?? ''))) {
+      found = node
+      return
+    }
+    if (Array.isArray(node.children)) node.children.forEach(walk)
+  }
+  walk(tree)
+  return found
+}
+
+test('a worker with warnings but no blocking failure is NOT labelled unavailable', () => {
+  // The exact case in the screenshot: 0 blocking, 1 advisory.
+  assert.equal(badgeText('warn', 0).text.match(/VERDICT-[A-Z]+/u)?.[0], 'VERDICT-WARN')
+  assert.equal(badgeText('warn', 0).text.includes('VERDICT-BLOCKED'), false)
+  // AND THE COLOUR. The badge is the loudest signal on the card, so the class is asserted too: a
+  // mutation that removed only the `warn` branch from `verdictClass` left every text assertion
+  // above passing, which is exactly how this gap was found.
+  assert.equal(verdictBadge('warn', 0)?.props.className, 'ru-badge warn')
+})
+
+test('each verdict gets its own badge, and only a blocking failure reads as unusable', () => {
+  const label = (v, b) => badgeText(v, b).text.match(/VERDICT-[A-Z]+/u)?.[0]
+  assert.equal(label('ready', 0), 'VERDICT-READY')
+  assert.equal(label('blocked', 2), 'VERDICT-BLOCKED', 'a failed blocking check IS unusable')
+  // `partial` means a check could not be evaluated -- its own state, not a fault.
+  assert.equal(label('partial', 0), 'VERDICT-PARTIAL')
+  assert.equal(label('something-new', 0), 'VERDICT-UNKNOWN', 'an unknown verdict must not claim a fault either')
+
+  // Colour, per verdict: only `blocked` may be red.
+  assert.equal(verdictBadge('ready', 0)?.props.className, 'ru-badge ok')
+  assert.equal(verdictBadge('blocked', 2)?.props.className, 'ru-badge bad')
+  assert.equal(verdictBadge('partial', 0)?.props.className, 'ru-badge mute')
+  assert.notEqual(verdictBadge('warn', 0)?.props.className, 'ru-badge bad',
+    'an advisory warning must never be painted as a failure')
+})
+
+// ---------------------------------------------------------------------------
+// the role note must not deny a feature that is on the same screen
+// ---------------------------------------------------------------------------
+
+test('the role note does not claim worker mode is unimplemented while its panel is rendered', () => {
+  const text = textOf(renderRole(ROLE_OFF).tree).join(' ')
+  // The note is a FAKE translation in these tests, so what is asserted is that the note is present
+  // and that the panel's own controls are too -- the invariant is "the note does not contradict
+  // what is on screen". The wording itself is checked against the real dictionary below.
+  assert.match(text, /ROLE-NOTE/u)
+  assert.match(text, /ROLE-ARM/u, 'the arm button is on the same screen as the note')
+  assert.match(text, /ROLE-CHECK/u)
+})
+
+test('no dictionary claims symmetric pairing is unimplemented', () => {
+  const source = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
+  // The VALUE of `roleNote` in each dictionary, checked at the source because the stub replaces
+  // dictionaries with markers. Only the value is inspected: a comment above the line legitimately
+  // quotes the old wording to explain why it changed, and scanning the whole file for the phrase
+  // would flag that explanation.
+  const values = [...source.matchAll(/roleNote:\s*'((?:[^'\\]|\\.)*)'/gu)].map((m) => m[1])
+  assert.equal(values.length, 2, `expected the zh and en role notes, found ${values.length}`)
+  for (const value of values) {
+    for (const phrase of ['尚未实现', 'not implemented', 'not yet']) {
+      assert.equal(value.includes(phrase), false,
+        `the role note still says "${phrase}": ${value.slice(0, 80)} -- worker mode IS implemented, and the note sits directly above its panel`)
+    }
+    // ...and it should point at the panel that exists.
+    assert.match(value, /布防|armed|below|下方/u, `the role note must point at the panel: ${value.slice(0, 80)}`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // hooks discipline: the failure this suite otherwise cannot see
 //
 // The stub invokes components as PLAIN FUNCTIONS, so React's reconciler never runs and a
@@ -728,6 +836,9 @@ function makeTranslator() {
       fieldCwd: 'F-CWD', fieldEnabled: 'F-ENABLED',
       btnAllow: 'BTN-ALLOW', btnDeny: 'BTN-DENY', btnPair: 'BTN-PAIR', btnPairSave: 'BTN-PAIR-SAVE',
       approvalsBudget: 'BUDGET-{s}', auditNote: 'AUDIT-AT-{p}',
+      verdictReady: 'VERDICT-READY', verdictWarn: 'VERDICT-WARN',
+      verdictPartial: 'VERDICT-PARTIAL', verdictBlocked: 'VERDICT-BLOCKED',
+      verdictUnknown: 'VERDICT-UNKNOWN',
       fieldKeepShots: 'F-KEEPSHOTS', fieldPolicy: 'F-POLICY', fieldSessions: 'F-SESSIONS',
       sessionsOn: 'SESSIONS-ON-{n}', sessionsNone: 'SESSIONS-NONE', switchHint: 'SWITCH {cmd}',
       roleArmed: 'ROLE-ARMED', roleDisarmed: 'ROLE-DISARMED', roleDisarmedNote: 'ROLE-DISARMED-NOTE',

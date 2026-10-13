@@ -35,7 +35,9 @@ window.__ModuleLoader__.load({
       description: '把涉及 GUI 的自动化任务派给配对的工作节点执行，避免抢占本机的鼠标与键盘；可用状态、诊断与急停都在这里。',
       groupRole: '本机角色',
       roleMaster: '主机',
-      roleNote: '本机作为主机向工作节点派单。切换为工作节点（对称配对）尚未实现。',
+      // 这条曾经写「切换为工作节点（对称配对）尚未实现」—— 而它下面就是完整的布防面板。
+      // 界面上说「没做」而实际做了，与文档里那类过期声明是同一个问题。
+      roleNote: '本机作为主机向工作节点派单；也可以布防为工作节点（对称配对），见下方。',
       groupWorkers: '工作节点',
       loading: '正在读取工作节点状态…',
       // Points at the step that is actually missing, which is NOT where a worker is configured.
@@ -49,6 +51,9 @@ window.__ModuleLoader__.load({
       noWorkers: '尚未配置工作节点。在这里添加即可；但模型要能调用它，还需要在 profile 补丁中为该节点加一行工具行（每个节点一行），然后重启。',
       reportPending: '就绪报告未在限时内取得 —— 工作节点可能不可达。连接状态见下。',
       verdictReady: '就绪',
+      // 有警告但**阻断项全过** —— 产品的派单门禁只看 status==='fail'，所以这个节点是可用的。
+      verdictWarn: '可用（有警告）',
+      verdictPartial: '检查不完整',
       verdictBlocked: '不可用',
       verdictUnknown: '未知',
       linkConnected: '已连接',
@@ -220,12 +225,14 @@ window.__ModuleLoader__.load({
       description: 'Send GUI automation to paired workers instead of taking over this machine\u2019s mouse and keyboard. Availability, diagnostics and the emergency stop live here.',
       groupRole: 'This machine\u2019s role',
       roleMaster: 'Master',
-      roleNote: 'This machine dispatches to workers. Switching it into worker mode (symmetric pairing) is not implemented yet.',
+      roleNote: 'This machine dispatches to workers. It can also be armed as a worker itself (symmetric pairing) -- see below.',
       groupWorkers: 'Workers',
       loading: 'Reading worker state\u2026',
       noWorkers: 'No workers yet. Add one here; for the model to be able to call it, the profile patch also needs one tool row per worker, then a restart.',
       reportPending: 'The readiness report did not arrive in time \u2014 the worker is probably unreachable. Link state below.',
       verdictReady: 'ready',
+      verdictWarn: 'usable (warnings)',
+      verdictPartial: 'not fully checked',
       verdictBlocked: 'unavailable',
       verdictUnknown: 'unknown',
       linkConnected: 'connected',
@@ -475,13 +482,41 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The verdict drives every colour on the page, so map it once rather than testing the
-     * string at each use site.
+     * The verdict drives every colour and the availability badge on the page, so map it once.
+     *
+     * WHY `warn` IS NOT "unavailable": the worker self-check produces four verdicts, and only two of
+     * them mean the worker cannot be used.
+     *
+     *   ready    -- every check passed
+     *   warn     -- every BLOCKING check passed; some advisory notes remain. The product's own
+     *               dispatch gate (`remote-provider`) blocks on a check whose status is `fail` and
+     *               ignores warnings entirely, so this worker works.
+     *   partial  -- a check could not be evaluated at all
+     *   blocked  -- a blocking check FAILED. This one is unusable.
+     *
+     * The page used to render anything that was not `ready`/`unknown` as "unavailable", so a worker
+     * with zero blocking failures and one advisory note -- which is exactly what the reference
+     * worker reports, and what the screenshot that prompted this showed -- was labelled unusable
+     * while its own detail line said `blocking 0`. Two parts of the same card disagreed, and the
+     * loud one was wrong. That is the same wrong rule the live harness had, fixed there first.
      */
     function verdictClass(verdict) {
       if (verdict === 'ready') return 'ok'
-      if (verdict === 'blocked' || verdict === 'unavailable') return 'bad'
+      // Advisory only: usable, with something worth reading.
+      if (verdict === 'warn' || verdict === 'warning') return 'warn'
+      // Not evaluated -- not a fault of the worker, but not a pass either.
+      if (verdict === 'partial') return 'mute'
+      if (verdict === 'blocked') return 'bad'
       return 'mute'
+    }
+
+    /** The badge text for a verdict. Kept next to `verdictClass` so the two cannot drift apart. */
+    function verdictText(t, verdict) {
+      if (verdict === 'ready') return t('verdictReady')
+      if (verdict === 'warn' || verdict === 'warning') return t('verdictWarn')
+      if (verdict === 'partial') return t('verdictPartial')
+      if (verdict === 'blocked') return t('verdictBlocked')
+      return t('verdictUnknown')
     }
 
     /** A check row's status as a CSS class; DSH reports `warn`, the stylesheet also allows `warning`. */
@@ -538,7 +573,7 @@ window.__ModuleLoader__.load({
         h('span', { key: 'name', className: 'ru-name' }, String(row.name ?? row.peerId ?? '')),
         h('span', { key: 'id', className: 'ru-badge mute ru-mono' }, String(row.peerId ?? '')),
         h('span', { key: 'verdict', className: `ru-badge ${verdictClass(verdict)}` },
-          verdict === 'ready' ? t('verdictReady') : verdict === 'unknown' ? t('verdictUnknown') : t('verdictBlocked')),
+          verdictText(t, verdict)),
       ]
       if (report?.cachedAgeMs !== undefined && report?.cachedAgeMs !== null) {
         head.push(h('span', { key: 'age', className: 'ru-note' }, fmt(t('cachedAge'), { n: report.cachedAgeMs })))
