@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply } from '../lib/index.js'
+import { apply, REMOTE_TOOL_NAMES } from '../lib/index.js'
 import { encodePairing } from '../slave/pairing.mjs'
 import { settingsPath } from '../lib/core/settings-store.js'
 
@@ -247,7 +247,13 @@ test('apply() wires one provider per enabled worker and mounts the settings rout
     assert.equal(routes.length, 1, 'the settings route must be mounted')
     // The tools are registered even for a config that happens to have none, because the page
     // can add the first worker at runtime.
-    assert.deepEqual([...tools.keys()].sort(), ['remote_agents', 'remote_interrupt', 'remote_screenshot', 'remote_selfcheck'])
+    //
+    // Compared against `REMOTE_TOOL_NAMES` rather than a literal list. The invariant that matters is
+    // "the registered set equals the set the session gate knows about": a tool registered but missing
+    // from `REMOTE_TOOL_NAMES` would stay visible AND usable in a session that never ran
+    // `/remote-use on`. A literal can only restate today's names, and (PITFALLS D11) a literal naming
+    // the thing under test goes stale the moment the thing changes.
+    assert.deepEqual([...tools.keys()].sort(), [...REMOTE_TOOL_NAMES].sort())
   })
 })
 
@@ -257,7 +263,7 @@ test('the tools are registered even when no worker is configured', async () => {
     mount(ctx, { workers: [] })
     assert.equal(registered.size, 0)
     // Starting with none and adding one from the page must still leave the session with tools.
-    assert.equal(tools.size, 4)
+    assert.equal(tools.size, REMOTE_TOOL_NAMES.length)
   })
 })
 
@@ -692,11 +698,11 @@ function runCommand(harness, agent, rawInput = '') {
 test('every new session starts with the remote tools denied', () => {
   const h = mountWithGate()
   // The tools exist globally (the model could see them where not restricted).
-  assert.equal(h.tools.size, 4)
+  assert.equal(h.tools.size, REMOTE_TOOL_NAMES.length)
   const agent = h.createAgent('a1')
   // ...but this session's scope denies them, so its model never sees them.
   assert.ok(h.restrictions.has(agent))
-  assert.deepEqual(h.restrictions.get(agent).deny, ['remote_agents', 'remote_interrupt', 'remote_selfcheck', 'remote_screenshot'])
+  assert.deepEqual(h.restrictions.get(agent).deny, [...REMOTE_TOOL_NAMES])
   // The user's rule: nothing injected until a session opts in.
   assert.equal(h.policyFor(agent), '')
 })

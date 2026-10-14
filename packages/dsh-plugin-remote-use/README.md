@@ -41,13 +41,15 @@ npm install --prefix "$env:USERPROFILE\.dsh\profiles\<profile>" @hope_phenom/dsh
 "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@hope_phenom/dsh-plugin-remote-use" ] } }
 ```
 
-Then add **two kinds** of entry to that profile's patch layer:
+Then add **one kind** of entry to that profile's patch layer: the plugin's own config — the worker
+list (url / token / cwd).
 
-1. **The plugin's config** — the worker list (url / token / cwd)
-2. **One tool row per worker** — `provider: remote-<worker id>`
-
-The second kind cannot be skipped. The provider is registered by the plugin at runtime, but the
-**model-facing tool row is a static loader entry**, and a plugin cannot append one at runtime.
+**No per-worker tool row is needed** (0.2.0 and later). Earlier versions asked for a
+`dsh-tool-subagent` row per worker with `provider: remote-<worker id>`; that route does not work
+even when written correctly, because a Web session's model-facing tool catalog is enumerated by the
+**agent preset**, not by the loader tree. The plugin now registers its own delegation tool,
+`remote_subagent`, by the same route its four `remote_*` tools already use. If you wrote a
+`tool-subagent-remote-*` block from the old instructions, you can delete it.
 
 </details>
 

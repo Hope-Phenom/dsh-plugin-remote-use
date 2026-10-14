@@ -154,25 +154,30 @@ profile 的 `package.json` 里那一节长这样（你已有的插件就是这�
     approvalTimeoutMs: 90000
     requiredTier: workspace-write
     injectTaskSummary: true
-
-# ② 每个 worker 一行模型可见的工具行
-- insert:
-    - id: tool-subagent-remote-aoko
-      name: "@deepseek-ai/dsh-tool-subagent"
-      config:
-        provider: remote-worker-pc   # 必须等于 remote-<worker id>
-        toolName: subagent_remote
-        backgroundMode: one-shot
-        maxDepth: provider-managed
-        modelSelectionSettings: false
+# 就这些。0.2.0 起不需要再为每台从机写"工具行"
 ```
 
-**两个容易踩的点：**
+**关于工具行：0.2.0 起不再需要手写。**
 
-- **`insert:` 是必需的。** 在补丁层里，带 `id` 的条目是**覆盖**已有条目，不是新增。忘了写 `insert:` 会得到 `patch: entry "<id>" not found`。
-- **`agentOptions` / `persona` / `toolFilter` 必须完全不出现。** 哪怕写成空值，`dsh-tool-subagent` 的 `provider-added` 监听器也会抛错，而 Cordis 的 `emit` 会传播监听器异常，导致整个 provider 注册被回滚。
+早期版本要求在 profile 补丁里为每台从机加一条 `dsh-tool-subagent` 行（`provider: remote-<worker id>`）。
+那条路**即使写对了也不生效**：Web 会话的模型工具目录由 **agent preset** 枚举
+（`preset-standard.plugins`），不在表里的 loader 行挂了也不会出现在模型面前 —— 详见
+[踩坑与教训 F11](docs/PITFALLS.md)。
 
-**为什么需要第二类条目**：provider 是插件在运行时注册的，但**模型可见的工具行是静态装载器条目**——插件无法在运行时追加。所以每个要能被调用的 worker 都需要自己的一行。
+0.2.0 改为**由插件自己注册委派工具** `remote_subagent`，与它已有的四个 `remote_*` 工具同一条路
+（`ctx.tools.register`，按 agent 作用域）。所以：
+
+- **装完插件就能用**，profile 补丁里只需要上面 ① 那段 worker 列表；
+- 如果你按旧文档写过 `tool-subagent-remote-*` 那一块，**可以整块删掉**；
+- 委派入口的工具名从 `subagent_remote` 改为 **`remote_subagent`**。
+
+**为什么插件不能沿用 `dsh-tool-subagent` 那条现成的路**（记在这里，免得以后有人又去试）：
+provider 确实是插件在运行时注册的，但**模型可见的工具行只能来自静态补丁层**。
+即便把那条行正确地写进 profile 补丁，**模型也看不到它** —— Web 会话的工具目录由 agent preset
+枚举（`preset-standard.plugins`），而那个列表里只有官方自己的四行
+（`subagent` / `subagent_fork` / `subagent_codex` / `subagent_claude_code`）。
+唯一不需要改 preset 的暴露方式，就是插件自己用 `ctx.tools.register()` 注册 —— 它已有的四个
+`remote_*` 工具正是这么工作的。完整推导见 [踩坑与教训 F11](docs/PITFALLS.md)。
 
 </details>
 

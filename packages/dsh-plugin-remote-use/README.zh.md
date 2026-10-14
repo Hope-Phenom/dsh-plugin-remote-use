@@ -39,13 +39,13 @@ profile 的 `package.json` 长这样：
 "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@hope_phenom/dsh-plugin-remote-use" ] } }
 ```
 
-然后在该 profile 的补丁层里加**两类**条目：
+然后在该 profile 的补丁层里加**一类**条目：插件自身的配置 —— worker 列表（url / token / cwd）。
 
-1. **插件配置** —— worker 列表（url / token / cwd）
-2. **每个 worker 一行工具行** —— `provider: remote-<worker id>`
-
-第二部分不能省：provider 是插件在运行时注册的，但**模型可见的工具行是静态装载器条目**，
-插件无法在运行时追加。
+**不需要**为每台从机写"工具行"（0.2.0 起）。早期版本要求加一条 `dsh-tool-subagent` 行、
+`provider: remote-<worker id>`；那条路**即使写对也不生效**，因为 Web 会话的模型工具目录由
+**agent preset** 枚举，而不是由 loader 树决定。插件现在自己注册委派工具 `remote_subagent`，
+走的是它四个 `remote_*` 工具已经在用的那条路。若你按旧文档写过
+`tool-subagent-remote-*` 那一块，可以直接删掉。
 
 </details>
 

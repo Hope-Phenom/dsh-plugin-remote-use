@@ -8,12 +8,17 @@
  *     tools therefore give the model no way to observe or stop remote work.
  *   - These three tools close that gap. They are the reason a remote delegation
  *     feels like a subagent rather than a fire-and-forget RPC.
+ *   - `remote_subagent` (added later, PITFALLS F11) is the delegation entry point itself.
+ *     It has to live here rather than in a profile patch's `dsh-tool-subagent` row, because a
+ *     Web session's tool catalog comes from the agent preset, not the loader tree.
  *
  * Deliberately NOT provided: `remote_send_message`. The subagent provider seam
  * cannot support continuable children (C2), so there is nothing to continue.
  *
  * @module dsh-plugin-remote-use/remote-tools
  */
+
+import { blocksToText } from '../provider/remote-provider.js'
 
 /**
  * Build an object-rooted JSON Schema from a field map.
@@ -240,7 +245,111 @@ export function makeRemoteTools(deps) {
     },
   }
 
-  return [remoteAgents, remoteInterrupt, remoteSelfcheck, remoteScreenshot]
+  /**
+   * Delegate a task to a paired worker.
+   *
+   * WHY THE PLUGIN PROVIDES THIS ITSELF (PITFALLS F11):
+   *
+   * The obvious design is a `dsh-tool-subagent` loader row in the profile patch, one per worker,
+   * with `provider: remote-<id>`. That is what DESIGN.md originally specified, and it does compose
+   * correctly -- `dsh --dump-config` shows the row in the tree. **The model still never sees it.**
+   *
+   * A Web session's model-facing tool catalog is enumerated by the AGENT PRESET, not by the loader
+   * tree: `preset-standard.plugins` lists the tool rows that agent gets, and it lists its own four
+   * `dsh-tool-subagent` rows (`subagent`, `subagent_fork`, `subagent_codex`, `subagent_claude_code`)
+   * -- not ours. A row outside that list mounts nothing for the agent.
+   *
+   * Registering through `ctx.tools.register()` is the other route, and the tools package documents it
+   * as sufficient: "registering a tool is enough to make it visible -- the registry automatically
+   * feeds its schema into system-prompt assembly". The plugin's other four tools already work that
+   * way, which is the empirical proof.
+   *
+   * So this tool exists to close the gap, and it costs almost nothing: `RemoteProvider.start()`
+   * already owns the readiness gate, the serial queue, the TaskRegistry entry and result settling,
+   * and `remote_agents` already reads that registry. This file only builds the request and renders
+   * the answer.
+   */
+  const remoteSubagent = {
+    name: 'remote_subagent',
+    group: 'remote',
+    description:
+      'Delegate a task to a paired LAN worker and drive it like a subagent.\n'
+      + 'Use this instead of `subagent` when the work needs a real desktop on ANOTHER machine: GUI '
+      + 'automation, launching and driving an application, confirming what an interface shows. Do all '
+      + 'code editing, builds and repository work HERE; delegate only what needs that desktop.\n'
+      + 'The worker cannot see this workspace, so anything written there does not come back.\n'
+      + 'The worker must pass its readiness check first; a worker that fails is refused rather than '
+      + 'half-run, so call `remote_selfcheck` if a delegation is refused.\n'
+      + 'Set `run_in_background: true` to get a task id back immediately and keep working; then watch '
+      + 'it with `remote_agents` and stop it with `remote_interrupt`.\n'
+      + 'A remote task CANNOT be continued: there is no `remote_send_message`. Delegate a fresh task '
+      + 'instead of trying to reply to one.',
+    parameters: objectSchema({
+      prompt: { type: 'string', required: true, description: 'The complete, self-contained task for the worker.' },
+      description: { type: 'string', description: 'Short label for this delegation, shown in remote_agents.' },
+      peerId: { type: 'string', description: 'Worker to use. Omit when only one is paired.' },
+      run_in_background: {
+        type: 'boolean',
+        description: 'Return a task id immediately instead of waiting. Defaults to false (foreground).',
+      },
+    }),
+    output: {
+      schema: { type: 'string' },
+      render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],
+    },
+    async execute(args) {
+      const prompt = typeof args?.prompt === 'string' ? args.prompt.trim() : ''
+      if (prompt === '') return 'remote_subagent: prompt is required'
+
+      const wanted = typeof args?.peerId === 'string' && args.peerId !== ''
+        ? peers.get(args.peerId)
+        : [...peers.values()][0]
+      if (wanted === undefined) {
+        return typeof args?.peerId === 'string' && args.peerId !== ''
+          ? `remote_subagent: no worker with peerId "${args.peerId}"`
+          : 'remote_subagent: no paired workers. Pair one in the plugin settings page.'
+      }
+      if (wanted.provider === undefined) {
+        // The provider is attached when the worker is wired. Absent means wiring has not finished
+        // (or this worker was just reconfigured), not that the worker is unusable.
+        return `remote_subagent: worker "${wanted.peerId}" is not ready to accept a delegation yet; check Settings -> Remote work nodes.`
+      }
+
+      const label = typeof args?.description === 'string' ? args.description : ''
+      let run
+      try {
+        run = await wanted.provider.start({ prompt, label })
+      } catch (error) {
+        const code = error?.code === undefined ? '' : ` [${error.code}]`
+        return `remote_subagent: delegation to "${wanted.peerId}" was refused${code}: ${error instanceof Error ? error.message : String(error)}`
+      }
+
+      if (args?.run_in_background === true) {
+        return [
+          `Delegated to ${wanted.name} in the background.`,
+          `taskId: ${run.id}`,
+          '',
+          `Watch it with remote_agents action="status" taskId="${run.id}", or action="wait" to block.`,
+          `Stop it with remote_interrupt taskId="${run.id}".`,
+          'This task cannot be continued once it settles; delegate a fresh one.',
+        ].join('\n')
+      }
+
+      // Foreground: the provider's result never rejects -- a rejected promise after publication
+      // would strand the caller's bookkeeping -- so a failure arrives as stopReason/diagnostic.
+      const settled = await run.result
+      const text = blocksToText(settled?.output).trim()
+      const lines = [`Remote task ${run.id} on ${wanted.name}: ${settled?.stopReason ?? 'unknown'}`]
+      if (settled?.diagnostic !== undefined && settled.diagnostic !== '') {
+        lines.push(`diagnostic: ${settled.diagnostic}`)
+      }
+      lines.push('')
+      lines.push(text === '' ? '(the worker produced no text)' : text)
+      return lines.join('\n')
+    },
+  }
+
+  return [remoteAgents, remoteInterrupt, remoteSelfcheck, remoteScreenshot, remoteSubagent]
 }
 
 /**

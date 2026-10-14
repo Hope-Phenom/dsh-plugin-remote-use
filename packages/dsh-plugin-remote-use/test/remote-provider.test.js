@@ -9,6 +9,7 @@ import { NO_START_CAPABILITIES, limitDiagnostic } from '../lib/provider/out-of-p
 import {
   makeRemoteTools, renderSelfcheck, renderTaskDetail, waitForTask, objectSchema,
 } from '../lib/tools/remote-tools.js'
+import { REMOTE_TOOL_NAMES } from '../lib/index.js'
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -336,8 +337,11 @@ test('tools are registered under the documented names and all declare output.ren
   const registry = new TaskRegistry({})
   const peers = new Map()
   const tools = makeRemoteTools({ registry, peers })
-  assert.deepEqual(tools.map((t) => t.name).sort(),
-    ['remote_agents', 'remote_interrupt', 'remote_screenshot', 'remote_selfcheck'])
+  // Set equality with `REMOTE_TOOL_NAMES`, not a literal list (PITFALLS D11). The invariant that
+  // matters is that every tool the registry exposes is also a name the SESSION GATE covers: a tool
+  // registered without being listed there stays visible and callable in a session that never ran
+  // `/remote-use on`.
+  assert.deepEqual(tools.map((t) => t.name).sort(), [...REMOTE_TOOL_NAMES].sort())
   for (const t of tools) {
     assert.equal(typeof t.output?.schema, 'object', `${t.name} must declare output.schema`)
     assert.equal(typeof t.output?.render, 'function', `${t.name} must declare output.render`)
@@ -454,6 +458,80 @@ test('remote_agents wait returns immediately for a settled task and times out ot
   const u = registry.create({ peerId: 'p', prompt: 'y', cwd: 'c' })
   const timedOut = await waitForTask(registry, u.taskId, 10)
   assert.match(timedOut, /timed out/)
+})
+
+// ---------------------------------------------------------------------------
+// remote_subagent: the delegation entry point the plugin provides itself
+//
+// It exists because a Web session's tool catalog comes from the AGENT PRESET, not the loader tree
+// (PITFALLS F11), so a profile-patch `dsh-tool-subagent` row never reaches the model. Registering
+// through `ctx.tools` is the route that works, and these tests pin the tool's contract:
+//   - it delegates through the worker's EXISTING provider (same gate, same queue, same registry)
+//   - foreground returns the worker's answer; background returns a task id and does not block
+//   - every failure mode is a readable message, never a throw
+// ---------------------------------------------------------------------------
+
+/** A provider stand-in that records the request and answers on demand. */
+function fakeProvider({ result, reject } = {}) {
+  return {
+    starts: [],
+    async start(request) {
+      this.starts.push(request)
+      if (reject !== undefined) throw reject
+      return { id: 'task-1', localAgent: undefined, result: Promise.resolve(result), dispose: async () => {} }
+    },
+  }
+}
+
+const settled = (text, extra = {}) => ({ output: [{ type: 'text', text }], stopReason: 'completed', ...extra })
+
+test('remote_subagent delegates through the worker provider in the foreground', async () => {
+  const registry = new TaskRegistry({})
+  const provider = fakeProvider({ result: settled('worker says: notepad is open') })
+  const peers = new Map([['labpc', { peerId: 'labpc', name: 'lab-pc', provider }]])
+  const tool = makeRemoteTools({ registry, peers }).find((t) => t.name === 'remote_subagent')
+
+  const out = String(await tool.execute({ prompt: 'open notepad', description: 'gui check' }))
+  // It must go through the provider -- that is what carries the gate, the serial queue and the
+  // TaskRegistry entry. A tool that called the bridge directly would bypass all three.
+  assert.equal(provider.starts.length, 1)
+  assert.equal(provider.starts[0].prompt, 'open notepad')
+  assert.equal(provider.starts[0].label, 'gui check')
+  assert.match(out, /notepad is open/)
+  assert.match(out, /completed/)
+})
+
+test('remote_subagent in the background returns a task id without waiting', async () => {
+  const registry = new TaskRegistry({})
+  // A result that never settles: if the tool waited, this test would hang.
+  const provider = { starts: [], async start() { return { id: 'bg-7', result: new Promise(() => {}), dispose: async () => {} } } }
+  const peers = new Map([['labpc', { peerId: 'labpc', name: 'lab-pc', provider }]])
+  const tool = makeRemoteTools({ registry, peers }).find((t) => t.name === 'remote_subagent')
+
+  const out = String(await tool.execute({ prompt: 'long job', run_in_background: true }))
+  assert.match(out, /bg-7/)
+  assert.match(out, /remote_agents/)
+  assert.match(out, /cannot be continued/)
+})
+
+test('remote_subagent reports every failure mode instead of throwing', async () => {
+  const registry = new TaskRegistry({})
+  const tool = (peers) => makeRemoteTools({ registry, peers }).find((t) => t.name === 'remote_subagent')
+
+  assert.match(String(await tool(new Map()).execute({ prompt: 'x' })), /no paired workers/)
+  assert.match(String(await tool(new Map()).execute({ prompt: '   ' })), /prompt is required/)
+  assert.match(
+    String(await tool(new Map([['p', { peerId: 'p', name: 'n' }]])).execute({ prompt: 'x' })),
+    /not ready to accept a delegation/,
+  )
+  // A refusal from the gate must arrive as the provider's own message plus its code, not as a
+  // rejected tool call: the model needs to read WHY it was refused.
+  const refused = Object.assign(new Error('REMOTE_WORKER_NOT_READY: S4 primary at (0,0)'), { code: 'REMOTE_WORKER_NOT_READY' })
+  const peers = new Map([['p', { peerId: 'p', name: 'n', provider: fakeProvider({ reject: refused }) }]])
+  const out = String(await tool(peers).execute({ prompt: 'x' }))
+  assert.match(out, /refused/)
+  assert.match(out, /REMOTE_WORKER_NOT_READY/)
+  assert.match(out, /S4/)
 })
 
 test('remote_interrupt refuses a task whose worker is not connected', async () => {

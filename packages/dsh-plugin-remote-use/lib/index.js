@@ -108,6 +108,12 @@ export const REMOTE_TOOL_NAMES = Object.freeze([
   'remote_interrupt',
   'remote_selfcheck',
   'remote_screenshot',
+  // The delegation entry point. It is in this list for the same reason as the others: the list
+  // drives BOTH the per-session deny mask (hides these tools from a session that has not run
+  // `/remote-use on`) and the fail-closed execution guard. Registering a remote tool without
+  // listing it here would leave it visible AND callable in a session that never asked for remote
+  // work -- proven by mutation: removing this line fails four guards.
+  'remote_subagent',
 ])
 
 /** The slash command that switches remote work on and off for one session. */
@@ -440,8 +446,20 @@ export function apply(ctx, config) {
       })
       const disposeProvider = ctx.subagents.registerProvider(provider)
       log.info(`registered subagent provider "${provider.name}" -> ${worker.url}`)
+
+      // Hand the SAME provider instance to the model-facing tools.
+      //
+      // `remote_subagent` (lib/tools/remote-tools.js) has to reach the delegation path, and the
+      // provider is where that path lives: it owns the readiness gate, the serial queue, the
+      // TaskRegistry entry and result settling. Building a second one would duplicate the queue and
+      // bypass the gate. The tools read it off the peer runtime they already receive.
+      workerRuntime.provider = provider
+
       ctx.effect(() => () => { void connection.dispose() }, 'remote-use: connection teardown')
       return () => {
+        // Clear it FIRST, so a tool called during teardown reports "not ready" instead of calling
+        // into a provider whose registration has just been withdrawn.
+        if (workerRuntime.provider === provider) delete workerRuntime.provider
         disposeProvider()
         // Only THIS worker's memory: see the note on `memories` in `wire`.
         for (const m of memories.values()) m.dispose()
