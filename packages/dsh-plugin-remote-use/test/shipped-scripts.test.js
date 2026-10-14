@@ -397,6 +397,51 @@ test('an unanswered remote check is reported as unverified, never as a failed on
   assert.match(text, /exit 3/u, 'and must end with its own exit code, distinct from success and failure')
 })
 
+// ---------------------------------------------------------------------------
+// Every hard peer dependency of a runtime dependency must be declared here
+//
+// The plugin failed to load on a real worker with:
+//
+//   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod'
+//     imported from ...\@agentclientprotocol\sdk\dist\schema-deserialize.js
+//
+// The SDK lists `zod` under peerDependencies. A peer dependency is the CONSUMER's obligation, and
+// this package never declared it -- so it was never installed. The reason development never noticed
+// is the whole point of this guard:
+//
+//   * npm 7+ INSTALLS peer dependencies automatically, so `zod` appeared in node_modules by accident
+//     and everything worked.
+//   * pnpm does NOT. Its layout is strict, so the import failed on the worker.
+//
+// "Works on my machine" was literally that: a package manager difference. Optional peers are
+// excluded (`peerDependenciesMeta`), which is what keeps `ws`'s optional `bufferutil` and
+// `utf-8-validate` from being demanded here.
+// ---------------------------------------------------------------------------
+
+test('every non-optional peer dependency of our runtime dependencies is declared', () => {
+  const mine = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const declared = new Set([...Object.keys(mine.dependencies ?? {}), ...Object.keys(mine.peerDependencies ?? {})])
+  const problems = []
+  let inspected = 0
+  for (const dep of Object.keys(mine.dependencies ?? {})) {
+    const manifest = join(PKG_ROOT, 'node_modules', dep, 'package.json')
+    if (!existsSync(manifest)) {
+      problems.push(`${dep} is declared but not installed -- run npm install before the tests`)
+      continue
+    }
+    inspected += 1
+    const j = JSON.parse(readFileSync(manifest, 'utf8'))
+    const meta = j.peerDependenciesMeta ?? {}
+    for (const peer of Object.keys(j.peerDependencies ?? {})) {
+      if (meta[peer]?.optional === true) continue
+      if (!declared.has(peer)) problems.push(`${dep} requires peer "${peer}", which this package does not declare`)
+    }
+  }
+  assert.ok(inspected > 0, 'no dependency manifests could be read; the check would be vacuous')
+  assert.deepEqual(problems, [],
+    `an undeclared peer will be installed by npm and NOT by pnpm, so this only breaks for users:\n${problems.join('\n')}`)
+})
+
 test('param() is the first statement in the scripts that take parameters', () => {  // PowerShell rejects `param()` after any executable statement, and PS 5.1 reports it as a
   // confusing "invalid assignment operator" at the lines that FOLLOW. The deploy gate catches it
   // too, but only when someone runs the gate.

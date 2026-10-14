@@ -1,6 +1,6 @@
 {
   "name": "@hope_phenom/dsh-plugin-remote-use",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
   "license": "MIT",
   "author": "Hope.Phenom <hope.phenom@foxmail.com>",
@@ -56,7 +56,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
-    "ws": "8.22.0"
+    "ws": "8.22.0",
+    "zod": "4.6.5"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "*"
