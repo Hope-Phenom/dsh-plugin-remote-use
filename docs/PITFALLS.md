@@ -52,6 +52,7 @@
   - [E7. asar 内的路径不可 `Test-Path`](#e7-asar-内的路径不可-test-path)
   - [E8. `Set-Content -Encoding UTF8` 写出的文件带 BOM，而 DSH 拒绝解析它](#e8-set-content--encoding-utf8-写出的文件带-bom而-dsh-拒绝解析它)
   - [E9. `Start-Process -ArgumentList @(...)` 会切断带空格的路径](#e9-start-process--argumentlist--会切断带空格的路径)
+  - [E9b. `-replace` 的替换串里，反斜杠会被再解释一层](#e9b--replace-的替换串里反斜杠会被再解释一层)
 - [F. 上游与协议事实](#f-上游与协议事实)
   - [F1. `ctx.tools.restrict()` 强制 per-agent](#f1-ctxtoolsrestrict-强制-per-agent)
   - [F2. `defineTool` 是唯一的 schema 转换点](#f2-definetool-是唯一的-schema-转换点)
@@ -63,6 +64,7 @@
   - [F7. 陈旧的 lockfile 会让 `pnpm add` 静默装回旧版本](#f7-陈旧的-lockfile-会让-pnpm-add-静默装回旧版本)
   - [F8. 改包名要同步的两类标识符，而且规则相反](#f8-改包名要同步的两类标识符而且规则相反)
   - [F9. DSH 起不来时，第一件事是读它自己写的崩溃日志](#f9-dsh-起不来时第一件事是读它自己写的崩溃日志)
+  - [F10. 布防被拒："the sandbox mediator is not materialized" —— 而它明明物化过](#f10-布防被拒the-sandbox-mediator-is-not-materialized--而它明明物化过)
 - [G. 需求本身的坑](#g-需求本身的坑)
   - [G1. "主屏必须是虚拟屏" —— 一条忠实实现后让机器无法登录的要求](#g1-主屏必须是虚拟屏--一条忠实实现后让机器无法登录的要求)
 - [这些教训的共同形状](#这些教训的共同形状)
@@ -1971,6 +1973,52 @@ Start-Process -FilePath $exe -ArgumentList $args -PassThru
 
 ---
 
+## E9b. `-replace` 的替换串里，反斜杠**会被再解释一层**
+
+**现象**
+
+给 YAML 生成一条 Windows 路径，要求文件里是**两个**反斜杠（YAML 双引号里 `\\` 表示一个 `\`），
+结果生成出**四个**：
+
+```yaml
+- "C:\\\\Program Files\\\\nodejs\\\\node.exe"     # 错的
+- "C:\\Program Files\\nodejs\\node.exe"           # 对的
+```
+
+**根因**
+
+```powershell
+$path -replace '\\', '\\\\'      # ✗
+```
+
+`-replace` 用的是**正则**，**替换串**里的反斜杠还有自己的一层解释 —— 于是每个 `\` 变成了两个 `\`，
+两个又变成四个。而且这一行**看起来完全正确**，因为模式串那侧确实要用两个反斜杠。
+
+**修法**
+
+要按字面替换时用 **`String.Replace`**（不是 `-replace`），并用 `[char]92` 拼出反斜杠，
+避免在源码里数不清自己写了几个：
+
+```powershell
+$bs  = [string][char]92
+$quad = $bs + $bs + $bs + $bs
+$duo  = $bs + $bs
+$text = $text.Replace($quad, $duo)     # 字面替换，无反斜杠语义
+```
+
+**而且必须验证归一化后的结果**，不能只看生成出来的文本：
+
+```powershell
+# 照抄消费方的归一化逻辑，再断言它认得这个路径
+$norm = $entry.Replace($duo, $bs).Replace('"', '')
+if (-not $norm.Contains($expected)) { throw "still does not match after normalisation" }
+```
+
+> 这个坑的代价：配置写对了**目录**、写对了**字段**，却因为多出来的两个反斜杠
+> 让门禁继续报"未物化" —— 而错误信息完全指向别处。
+
+---
+
 # F. 上游与协议事实
 
 这一类的条目不是"缺陷"，而是**必须按上游的形状写代码**的事实 —— 违反它们时症状往往离原因很远。
@@ -2375,6 +2423,88 @@ Uncaught Error: client-modules: duplicate factory registration for "dsh-plugin-r
 
 **反例（这次付出的代价）**：在拿到这些日志之前，我先按推测改了三轮配置 ——
 其中一轮（E8 的 BOM）**把一个"界面起不来"升级成了"应用完全起不来"**。
+
+---
+
+---
+
+## F10. 布防被拒："the sandbox mediator is not materialized" —— 而它**明明物化过**
+
+**现象**
+
+从机点"布防为工作节点"，被门禁拦下：
+
+```
+暂时不能布防：
+· the sandbox does not contain this machine: the sandbox mediator is not materialized
+```
+
+而**同一台机器上那个 mediator 是完整存在的**（1304 个文件、`shim.mjs`、`runner.js` 全在）。
+
+**根因：三处必须同时成立，缺一即报"未物化"**
+
+插件的探测（`lib/core/sandbox-probe.js`）不看"机器上有没有"，而是看**配置指的那一个**：
+
+```js
+const mediator = deps.mediator ?? 'C:\\dsh-sandbox-mediator'   // ← 硬编码默认
+const shim     = join(mediator, 'shim.mjs')
+const runner   = join(mediator, 'node_modules', ... 'runner.js')
+if (!existsSync(shim) || !existsSync(runner)) → 'the sandbox mediator is not materialized'
+```
+
+1. **目录必须在那个默认路径**。本次它被物化在 `C:\dsh-remote\sandbox-mediator`
+   （当时那才是部署目录），于是**存在却不可见**；
+2. **profile 补丁必须有一条 `sandbox` 行指名那个 shim**，且**路径完全一致** ——
+   `profileNamesShim()` 的原话是"路径必须精确，否则上一个版本遗留的 mediator 按文件名看也对，
+   却驱动着旧的 runner"；
+3. **同一行里必须有 `runnerFailureSignatures`** —— 少了它 `sandbox-local` 直接拒绝。
+
+**为什么非要有 mediator 不可**（这才是它存在的理由）：
+
+`dsh-sandbox-local` 用 **`process.execPath`** 当 mediator 解释器。在这个部署里那是
+`DeepSeek Harness.exe` —— **GUI 子系统**镜像（PE subsystem 2；`node.exe` 是 3）。
+Windows **从不给 GUI 子系统镜像分配控制台**，于是它创建的受限子进程在 DLL 初始化阶段
+就以 `0xC0000142` 死掉，**每一条 shell 命令都失败且没有任何输出**。
+`shim.mjs` 以 **`node.exe`** 启动，这正是重点。
+
+**修法**
+
+```yaml
+- id: sandbox
+  name: "@deepseek-ai/dsh-sandbox-local"
+  config:
+    runnerCommand:
+      - "C:\\Program Files\\nodejs\\node.exe"
+      - "C:\\dsh-sandbox-mediator\\shim.mjs"
+    runnerFailureSignatures:
+      - "windows-acl-run: "
+```
+
+加上**把已物化的 mediator 复制到默认路径**（不必重新抽取）。脚本：
+`.research/materialize-mediator-for-arming.ps1` + `.research/fix-sandbox-paths.ps1`。
+
+**验收方式（这一步才是关键）**
+
+不要靠"再点一次按钮看看"。**直接跑门禁本身** —— 它是插件导出的一个函数：
+
+```
+OK   the mediator is materialized
+OK   the mediator can execute a command at all            [exit=0]
+OK   a write INSIDE the workspace succeeds (the control)  [exit=0 exists=true]   ← 正对照
+OK   a write OUTSIDE the workspace is refused             [exit=9]              ← 反对照
+OK   read-only cannot write the workspace either          [exit=9]
+OK   read-only can still read                             [exit=0]
+```
+
+脚本：`.research/run-sandbox-probe.ps1`（按**文件路径**导入，因为包的 `exports` 不允许引用内部子路径）。
+
+> **两个附加教训**
+>
+> - **文档与部署不一致**：`DESIGN.md` §14 记的是 `C:\dsh-sandbox-mediator`，
+>   而实际抽取的 `target` 是 `C:\dsh-remote\sandbox-mediator`（当时的部署目录）。
+>   两者都没错，但**没有一处断言它们必须相同** —— 直到门禁来断言。
+> - **改了 profile 补丁，探测立刻生效，但 `sandbox-local` 要重启才消费它**：
+>   只重启前会得到"布防能过、跑任务时沙箱仍然坏"的状态，比直接失败更难查。
 
 ---
 
