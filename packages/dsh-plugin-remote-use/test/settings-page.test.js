@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
 
-import { makeSettingsRoute } from '../lib/index.js'
+import { makeSettingsRoute, crossSitePostProblem } from '../lib/index.js'
 import { ApprovalQueue } from '../lib/core/approval-queue.js'
 import { AuditLog } from '../lib/core/audit-log.js'
 import { TaskRegistry } from '../lib/core/task-registry.js'
@@ -1183,9 +1183,12 @@ function fakeRes() {
 }
 
 /** A request that emits `body` then ends, like a real JSON POST. */
-function fakeReq(method, body) {
+function fakeReq(method, body, headers) {
   const req = new EventEmitter()
   req.method = method
+  // Real Node requests always carry `headers`; the origin guard reads `origin`/`host` from it.
+  // Passing none at all is the NON-BROWSER caller (curl, the live harness), which must stay allowed.
+  if (headers !== undefined) req.headers = headers
   req.destroy = () => {}
   queueMicrotask(() => {
     if (body !== undefined) req.emit('data', Buffer.from(body))
@@ -1249,9 +1252,9 @@ function makeRegistry(active = []) {
   return registry
 }
 
-async function callRoute(route, method, body, deps) {
+async function callRoute(route, method, body, headers) {
   const res = fakeRes()
-  await route.handler(fakeReq(method, body), res)
+  await route.handler(fakeReq(method, body, headers), res)
   return { status: res.statusCode, body: JSON.parse(res.body) }
 }
 
@@ -1570,4 +1573,83 @@ test('a self-check that times out is reported as a timeout, not a worker fault',
   assert.equal(status, 504)
   assert.equal(body.ok, false)
   assert.match(body.error, /did not finish within 40 ms/)
+})
+
+// ---------------------------------------------------------------------------
+// F17: the route refuses a CROSS-SITE POST
+//
+// DSH authenticates the app shell (`GET /` answers 401) but not a plugin's own route, so this check
+// has to live in the plugin. The case that matters is a browser "simple request": the body is parsed
+// as JSON whatever the `Content-Type`, so a page on any site could POST `text/plain` without a
+// preflight and have the action run. It cannot read the reply, but `interrupt` and `worker.disarm`
+// need no id, and `worker.arm` opens a listener that accepts remote execution.
+//
+// The refusal is proven by the ABSENCE OF THE SIDE EFFECT, not by the status code alone: a 403 that
+// still interrupted the task would pass a status-only assertion.
+// ---------------------------------------------------------------------------
+
+test('a cross-site POST is refused, and the action does not run', async () => {
+  const cancelled = []
+  const peers = new Map([['w1', makePeer({ bridge: { async cancel() { cancelled.push('w1') } } })]])
+  const active = [{ taskId: 't1', peerId: 'w1', state: 'running' }]
+  const { route } = makeRoute({ peers, active })
+  const SELF = { origin: 'http://127.0.0.1:19387', host: '127.0.0.1:19387' }
+
+  const hostile = await callRoute(route, 'POST', JSON.stringify({ action: 'interrupt' }),
+    { origin: 'http://evil.example', host: '127.0.0.1:19387' })
+  assert.equal(hostile.status, 403)
+  assert.match(String(hostile.body.error), /cross-site/)
+  assert.deepEqual(cancelled, [], 'a refused request must not reach the action')
+
+  // ...while the same request from this server's own page does go through, so the guard is a gate
+  // and not a wall.
+  const own = await callRoute(route, 'POST', JSON.stringify({ action: 'interrupt' }), SELF)
+  assert.equal(own.status, 200)
+  assert.deepEqual(cancelled, ['w1'])
+})
+
+test('an opaque or cross-site-declared request is refused', async () => {
+  const { route } = makeRoute()
+  const body = JSON.stringify({ action: 'nope' })
+  const opaque = await callRoute(route, 'POST', body, { origin: 'null', host: '127.0.0.1:19387' })
+  assert.equal(opaque.status, 403)
+  const declared = await callRoute(route, 'POST', body,
+    { origin: 'http://127.0.0.1:19387', host: '127.0.0.1:19387', 'sec-fetch-site': 'cross-site' })
+  assert.equal(declared.status, 403)
+  const noHost = await callRoute(route, 'POST', body, { origin: 'http://127.0.0.1:19387' })
+  assert.equal(noHost.status, 403, 'an Origin that cannot be checked must fail closed')
+})
+
+test('a POST from a non-browser caller, and a GET from anywhere, are both allowed', async () => {
+  // The live harness is the non-browser caller: it sends no headers at all, and it must keep working.
+  const { route } = makeRoute()
+  const noHeaders = await callRoute(route, 'POST', JSON.stringify({ action: 'nope' }))
+  assert.equal(noHeaders.status, 400, 'no Origin means no hostile page: the body is still processed')
+  // Reads need no gate: no response carries `Access-Control-Allow-Origin`, so a cross-origin page
+  // cannot see the reply anyway.
+  const read = await callRoute(route, 'GET', undefined, { origin: 'http://evil.example', host: '127.0.0.1:19387' })
+  assert.equal(read.status, 200)
+})
+
+test('the origin comparison follows the Host header, so a localhost page also works', async () => {
+  // The operator may open the page as 127.0.0.1 or as localhost. Comparing against the request's own
+  // Host keeps both working without a configured address to keep in sync.
+  const { route } = makeRoute()
+  const viaLocalhost = await callRoute(route, 'POST', JSON.stringify({ action: 'nope' }),
+    { origin: 'http://localhost:19387', host: 'localhost:19387' })
+  assert.equal(viaLocalhost.status, 400, 'a same-origin request from localhost reaches the handler')
+})
+
+test('the origin guard rejects every shape that is not plainly this server', async () => {
+  const ok = { headers: { origin: 'http://127.0.0.1:19387', host: '127.0.0.1:19387' } }
+  assert.equal(crossSitePostProblem(ok), '')
+  assert.equal(crossSitePostProblem({ headers: { host: '127.0.0.1:19387' } }), '', 'no Origin at all')
+  assert.equal(crossSitePostProblem({}), '', 'a request with no headers property')
+  assert.equal(crossSitePostProblem(undefined), '')
+  // A different port on the same host is a different origin.
+  assert.match(crossSitePostProblem({ headers: { origin: 'http://127.0.0.1:9999', host: '127.0.0.1:19387' } }), /cross-site/)
+  // A scheme a browser would not use for this listener.
+  assert.match(crossSitePostProblem({ headers: { origin: 'ftp://127.0.0.1:19387', host: '127.0.0.1:19387' } }), /scheme/)
+  assert.match(crossSitePostProblem({ headers: { origin: 'not-a-url', host: '127.0.0.1:19387' } }), /not a URL/)
+  assert.match(crossSitePostProblem({ headers: { origin: 'null', host: '127.0.0.1:19387' } }), /opaque/)
 })

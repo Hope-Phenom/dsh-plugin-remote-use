@@ -602,7 +602,17 @@ const jobId = ctx.jobs.start({          // 返回 JobId 字符串（形如 "suba
 
 ### 5.9 Settings 页
 
-`/api/dsh/dsh-plugin-remote-use`（参考 `dsh-plugin-notify` 的做法：自写 `sameOrigin()` 校验、body 上限、原子写）。
+`/api/dsh/dsh-plugin-remote-use`（参考 `dsh-plugin-notify` 的做法：body 上限、原子写、**拒绝跨站 POST**）。
+
+⚠️ **第三项曾经只是文档里的一句话，代码里没有。** 本节从第一次提交就写着"自写 `sameOrigin()` 校验"，
+但实现里从来没有 —— 直到 **0.2.2** 才真正加上（PITFALLS F17）。写在这里是因为这条边界容易漏：
+**DSH 保护应用外壳（裸 `GET /` 返回 401），但不保护插件自己注册的路由** ——
+路由怎么被访问到，是插件自己的责任。而 `Content-Type` 不被检查，所以浏览器可以跨站
+**盲发**一个 `text/plain` 的 POST（无 preflight），动作会执行。
+
+现在的契约是：**POST 且 `Origin` 头存在且不同源（含 `null`）→ 403，且在任何动作被分发之前**；
+**没有 `Origin` 头则放行**（浏览器对 POST 一律带 Origin，所以这不可能来自恶意页面，
+只可能是 curl / 脚本 / 真机 harness）。
 
 内容：从机列表与在线状态 / 配对与解除 / 每台从机的默认审查规则 / 审计查看（最近 N 条 + 统计）/ 急停入口 / **启动自检（见 §5.10）**。
 

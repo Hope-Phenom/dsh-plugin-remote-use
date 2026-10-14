@@ -1051,6 +1051,67 @@ function rejectUnusableCwd(cwd, ctx) {
 }
 
 /**
+ * Refuse a cross-site POST to the settings route.
+ *
+ * WHY THIS EXISTS: DSH's web server authenticates the APP SHELL (a bare `GET /` answers 401) but not
+ * a plugin's own API route -- how a route is reached is the plugin's own responsibility. Nothing
+ * checked where a request came from, and `readJsonBody` parses the body as JSON **whatever the
+ * `Content-Type`**, so a page on any site could POST here as a "simple request" (no CORS preflight,
+ * `Content-Type: text/plain`) and have the action EXECUTE. It could not read the reply, but that is
+ * not needed: `interrupt` takes no id, `worker.disarm` takes none either, and `worker.arm` opens a
+ * listener that accepts remote execution. `DESIGN.md` §5.9 promised this check from the first commit
+ * ("自写 `sameOrigin()` 校验、body 上限、原子写"); the body limit and the atomic write were
+ * implemented and the origin check never was (PITFALLS F17).
+ *
+ * WHY ONLY POST, AND WHY A MISSING `Origin` IS ALLOWED:
+ *   * a cross-origin READ is already impossible -- no response carries `Access-Control-Allow-Origin`,
+ *     so a page cannot see the reply at all; GET therefore needs no gate;
+ *   * a browser sends `Origin` on EVERY POST, same-origin ones included, so a MISSING header cannot
+ *     come from a hostile page. It means curl, a script, or this repo's own harness -- callers that
+ *     can already do anything to this machine. Refusing them would break the harness and buy nothing.
+ *
+ * The comparison uses the request's own `Host`, not a configured address, so it holds whether the
+ * operator opened the page as `127.0.0.1:19387` or `localhost:19387`.
+ *
+ * @param {{ headers?: Record<string, unknown> }} req
+ * @returns {string} a refusal message, or '' when the request may proceed
+ */
+export function crossSitePostProblem(req) {
+  const headers = req?.headers ?? {}
+  const origin = typeof headers.origin === 'string' ? headers.origin.trim() : ''
+  // Not a browser. See the doc comment: this cannot be a hostile page.
+  if (origin === '') return ''
+
+  const host = typeof headers.host === 'string' ? headers.host.trim().toLowerCase() : ''
+  if (host === '') {
+    return 'this request carries an Origin but no Host, so it cannot be checked; refusing rather than guessing'
+  }
+  if (origin.toLowerCase() === 'null') {
+    // A sandboxed iframe, a `data:` page or a redirected POST: no origin to compare, so no trust.
+    return 'cross-site request refused: the Origin is opaque (null)'
+  }
+
+  let parsed
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return `cross-site request refused: Origin is not a URL (${origin.slice(0, 60)})`
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `cross-site request refused: Origin scheme ${parsed.protocol}`
+  }
+  if (parsed.host.toLowerCase() !== host) {
+    return `cross-site request refused: Origin ${parsed.host} is not this server (${host})`
+  }
+  // Browsers also declare how the request relates to its page. Honour it when it is present.
+  const site = typeof headers['sec-fetch-site'] === 'string' ? headers['sec-fetch-site'].trim().toLowerCase() : ''
+  if (site !== '' && site !== 'same-origin') {
+    return `cross-site request refused: Sec-Fetch-Site: ${site}`
+  }
+  return ''
+}
+
+/**
  * The Settings page's data route.
  *
  * GET  reports worker reachability, the readiness report, and the in-flight task list.
@@ -1183,6 +1244,11 @@ export function makeSettingsRoute(deps) {
 
       if (req.method === 'GET') return send(200, await snapshot())
       if (req.method !== 'POST') return send(405, { ok: false, error: 'method-not-allowed' })
+
+      // BEFORE the body is read and before any action is dispatched (PITFALLS F17). A 403 here
+      // means nothing ran: no settings written, no listener opened, no task interrupted.
+      const crossSite = crossSitePostProblem(req)
+      if (crossSite !== '') return send(403, { ok: false, error: crossSite })
 
       let body
       try {
