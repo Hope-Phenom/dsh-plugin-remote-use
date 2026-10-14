@@ -334,6 +334,58 @@ test('the display check blocks on the origin, and merely reports whether the pri
   assert.match(call.slice(0, 220), /\$okOrigin\)/u, 'the S4 verdict must be decided by the origin alone')
 })
 
+// ---------------------------------------------------------------------------
+// The bundled patch: `name` is a MODULE SPECIFIER, `id` is a row identity
+//
+// Renaming the package to `@hope_phenom/dsh-plugin-remote-use` silently broke the plugin on a real
+// worker. The plugin manager still listed it -- it reads package.json -- and the toggle still moved,
+// but the Settings section never appeared. The cause was one line:
+//
+//     - insert:
+//         - id: dsh-plugin-remote-use
+//           name: dsh-plugin-remote-use        <-- the loader imports THIS
+//
+// The two fields held the same string while the package was unscoped, so nothing forced anyone to
+// notice that only one of them is the module name. The loader tried to import the old bare name,
+// found nothing under it, and the server half never loaded.
+//
+// The two guards below pull in OPPOSITE directions on purpose: `name` must follow the package name,
+// and `id` must not -- it is the row identity that profiles already point at, so "fixing" it to match
+// would break every installed profile instead.
+// ---------------------------------------------------------------------------
+
+/**
+ * The bundled patch with its comments removed.
+ *
+ * The comments deliberately quote the broken form (and the example tool row quotes `id: labpc`), so
+ * scanning the raw text finds those instead of the real entries. The first version of these guards
+ * did exactly that and failed for the wrong reason.
+ */
+function patchBody() {
+  return readFileSync(join(PKG_ROOT, 'cordis.patch.yml'), 'utf8')
+    .split('\n')
+    .filter((line) => !/^\s*#/u.test(line))
+    .join('\n')
+}
+
+test('the bundled patch imports this package by its real name, scope included', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const body = patchBody()
+  const names = [...body.matchAll(/^[ \t]*(?:-[ \t]+)?name:[ \t]*'?([^'\s]+)'?[ \t]*$/gmu)].map((m) => m[1])
+  assert.ok(names.length > 0, 'the bundled patch has no `name:` at all')
+  assert.ok(names.includes(pkg.name),
+    `the patch must import "${pkg.name}" but imports ${JSON.stringify(names)} -- a bare name that is not in node_modules cannot resolve, so the plugin never loads`)
+})
+
+test('the bundled patch row id stays stable, because profiles point at it', () => {
+  const body = patchBody()
+  const insertAt = body.indexOf('- insert:')
+  assert.ok(insertAt >= 0, 'the bundled patch has no insert entry')
+  const id = /^[ \t]*(?:-[ \t]+)?id:[ \t]*'?([^'\s]+)'?[ \t]*$/mu.exec(body.slice(insertAt))?.[1]
+  assert.equal(id, 'dsh-plugin-remote-use',
+    'the row id is what existing profile patches override; changing it silently un-configures every installed master')
+})
+
 test('an unanswered remote check is reported as unverified, never as a failed one', () => {
   // `ssh` reserves exit 255 for its OWN failures. Treating that as the remote command's answer is
   // how a transient name-resolution blip reported every file as missing while all of them were

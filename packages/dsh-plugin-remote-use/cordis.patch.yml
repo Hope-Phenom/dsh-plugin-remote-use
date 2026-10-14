@@ -33,8 +33,18 @@
 #       maxDepth: provider-managed
 # ---------------------------------------------------------------------------
 
+# `id` is the ROW identity -- this plugin's stable name in the Settings page, and what a profile
+# patch refers to when it overrides this row's config. It deliberately does NOT have to match the
+# package name, and changing it would break every profile that already points at it.
+#
+# `name` is the MODULE SPECIFIER -- what the loader imports. It MUST be the package name exactly,
+# scope included. These two were the same string while the package was unscoped, which is why
+# renaming the package to `@hope_phenom/dsh-plugin-remote-use` silently broke the plugin: the
+# manager still listed it (it reads package.json) and the toggle still moved, but the loader tried
+# to import `dsh-plugin-remote-use`, found nothing under that name, and the server half never
+# loaded -- so the Settings section never appeared.
 - insert:
     - id: dsh-plugin-remote-use
-      name: dsh-plugin-remote-use
+      name: '@hope_phenom/dsh-plugin-remote-use'
       config:
         workers: []
