@@ -59,6 +59,7 @@
   - [F4. Cordis patch：新增行需要 `insert:`](#f4-cordis-patch新增行需要-insert)
   - [F5. `dsh-client-modules` 的元数据缓存需要重启](#f5-dsh-client-modules-的元数据缓存需要重启)
   - [F6. DSH 的 pnpm 带三层供应链策略，每层都能让安装静默变形](#f6-dsh-的-pnpm-带三层供应链策略每层都能让安装静默变形)
+  - [F6b. `minimumReleaseAge` 会拦住卸载，而 `minimumReleaseAgeExclude` 拦不住它](#f6b-minimumreleaseage-会拦住卸载而-minimumreleaseageexclude-拦不住它)
   - [F7. 陈旧的 lockfile 会让 `pnpm add` 静默装回旧版本](#f7-陈旧的-lockfile-会让-pnpm-add-静默装回旧版本)
   - [F8. 改包名要同步的两类标识符，而且规则相反](#f8-改包名要同步的两类标识符而且规则相反)
   - [F9. DSH 起不来时，第一件事是读它自己写的崩溃日志](#f9-dsh-起不来时第一件事是读它自己写的崩溃日志)
@@ -2160,14 +2161,15 @@ no-such-plugin-xyz             -> 404   （对照）
 
 - 从**刚发布**的版本安装，报错的却是"锁文件校验失败"；
 - 卸载时报 `ERR_PNPM_TARBALL_URL_MISMATCH`，而不是任何跟卸载有关的话；
-- 想补一个缺失的依赖，整个操作被**回滚**，`package.json` 和 `node_modules` 都没变。
+- 想补一个缺失的依赖，整个操作被**回滚**，`package.json` 和 `node_modules` 都没变；
+- **卸载刚发布的插件也失败** —— 而且理由和安装时一模一样（见 F6b）。
 
 **根因**：DSH 的 profile 用 pnpm，而 `pnpm-workspace.yaml` 里预置了策略：
 
 ```yaml
 nodeLinker: hoisted
 autoInstallPeers: false          # ← 不会自动装 peer 依赖（npm 会）
-minimumReleaseAgeExclude:        # ← 其余包有"隔离期"：太新的版本不允许装
+minimumReleaseAgeExclude:        # ← 逐包白名单：@hope_phenom 自家的包
   - '@hope_phenom/dsh-plugin-code-quality@0.1.0'
 ```
 
@@ -2192,6 +2194,66 @@ minimumReleaseAgeExclude:        # ← 其余包有"隔离期"：太新的版本
    管理器会自己往 `minimumReleaseAgeExclude` 里加例外，手工操作则需要自己处理。
 3. **改 profile 用插件管理器**，不要手工 `pnpm add`：管理器会成组地写清单、lockfile、
    profile 补丁与策略例外；手工操作会漏掉其中一部分（F8 的 profile 覆盖条目就是这么漏的）。
+
+---
+
+## F6b. `minimumReleaseAge` 会拦住**卸载**，而 `minimumReleaseAgeExclude` **拦不住它**
+
+**现象**
+
+刚发布的插件装好之后，**连卸载都不行**：
+
+```
+卸载失败:
+✓ Verifying lockfile against supply-chain policies (10 entries)...
+dependencies:
+- @hope_phenom/dsh-plugin-remote-use ^0.1.3
+Already up to date
+✗ Lockfile failed supply-chain policy check (10 entries in 1.6s)
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
+  @hope_phenom/dsh-plugin-remote-use@0.1.3 was published at 2026-10-14T04:57:01.210Z,
+  within the minimumReleaseAge cutoff (2026-10-13T05:42:05.560Z)
+```
+
+注意 `Already up to date` 那行：**它什么事都没做就失败了** ——
+而且失败理由是"**这个版本太新**"，和"卸载"这件事本身毫无关系。
+
+**根因**
+
+1. **这条策略是 pnpm 11 自己的**（默认 24 小时），不是 DSH 设的：
+   `pnpm config get minimumReleaseAge` 返回 `undefined`，走的是内置默认；
+2. **`minimumReleaseAgeExclude` 覆盖不到它。** 白名单作用于**解析**阶段，
+   而**锁文件校验**会重新检查**每一个**条目 —— 官方指南把这一点写得很明确：
+
+   > "this zero-age override keeps fresh installs deterministic when pnpm's **lockfile policy
+   > re-checks entries the exclusion list above cannot enumerate**"
+
+   实测吻合：profile 里**已经**列了 `'@hope_phenom/dsh-plugin-remote-use@0.1.3'`，
+   卸载**仍然**被拒。
+
+**修法（官方记载）**
+
+在 profile 的 `pnpm-workspace.yaml` 里加一行 —— 这是
+[dsh-plugin-guide](https://github.com/PerryLink/dsh-plugin-guide/blob/main/pnpm-workspace.yaml) 的做法：
+
+```yaml
+minimumReleaseAge: 0
+```
+
+另一种记载的做法是在命令上带参数 —— 见
+[dsh-web PR #263](https://github.com/zhu1090093659/dsh-web/pull/263)
+（标题即 "更新命令携带 `--config.minimumReleaseAge=0` 绕过 pnpm 11 发布年龄门禁"）：
+
+```powershell
+pnpm install --config.minimumReleaseAge=0
+```
+
+**这是一个真实的取舍**：写 `0` 等于**关掉**"新发布包隔离 24 小时"这层保护。
+本仓库的做法是**加这行、但带注释标明可以删**（`.research/relax-release-age.ps1`），
+等需要的版本超过 24 小时之后再删掉以恢复默认。
+
+> **它拦的是"发布后 24 小时内"的一切操作** —— 包括**装、卸、改**。
+> 反直觉的地方在于：报错说"这个条目太新"，而你的意图恰恰是**把它拿掉**。
 
 ---
 
