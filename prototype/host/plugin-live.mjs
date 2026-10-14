@@ -15,14 +15,42 @@
  * Usage:
  *   node plugin-live.mjs --url ws://192.168.1.101:7331 --token <secret> --cwd C:\dsh-remote\p0work
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-// DERIVED FROM THE ENVIRONMENT: the literal that used to be here named one developer's profile
-// directory, so the harness ran on that machine and nowhere else (the S14/S15 defect again).
-const INSTALLED = join(process.env.USERPROFILE ?? homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-plugin-remote-use', 'lib', 'index.js')
+/**
+ * The plugin the LOADER actually imports, resolved the same way the loader resolves it.
+ *
+ * WHY THIS IS NOT A HARDCODED PATH (it used to be one, and it lied):
+ *
+ * The literal here was `...\node_modules\dsh-plugin-remote-use\lib\index.js` -- the UNSCOPED name,
+ * left over from before the package was scoped (PITFALLS F8). That path DOES exist in the operator's
+ * profile, but as a **junction into the source checkout**, so this harness loaded the developer's
+ * working tree while printing a path that reads like the installed artifact. Both runs passed,
+ * because at that moment the checkout and the install happened to be byte-identical. That is exactly
+ * what makes it dangerous: the day they differ is the day this reports on code nobody shipped.
+ *
+ * So: the profile's `dependencies` and `bundles` both name `@hope_phenom/dsh-plugin-remote-use`, and
+ * the bundle patch's `name:` (what the loader imports) is that same string. Resolve THAT, and say out
+ * loud when the result is a link, so a junction can never masquerade as an install again.
+ */
+const PKG_NAME = '@hope_phenom/dsh-plugin-remote-use'
+const PROFILE = join(process.env.USERPROFILE ?? homedir(), '.dsh', 'profiles', 'desktop')
+const INSTALLED = join(PROFILE, 'node_modules', ...PKG_NAME.split('/'), 'lib', 'index.js')
+
+/** A one-line provenance report: where the entry resolved to, and whether it is a link. */
+function describeEntry(file) {
+  let real = file
+  try {
+    real = realpathSync(file)
+  } catch (error) {
+    return `unresolvable (${error instanceof Error ? error.message : String(error)})`
+  }
+  const same = real.toLowerCase() === file.toLowerCase()
+  return same ? 'a real directory in the profile' : `a LINK -> ${real}`
+}
 
 /**
  * Isolate the DSH home BEFORE importing the plugin, so `--url` is actually the worker under test.
@@ -55,7 +83,9 @@ const CWD = arg('cwd', 'C:\\dsh-remote\\p0work')
 const PROMPT = arg('prompt',
   'Create a file named plugin-live-proof.txt in the current working directory containing exactly LIVE_OK, '
   + 'then read it back and report the exact content.')
-const entry = pathToFileURL(arg('entry', INSTALLED)).href
+const entryArg = arg('entry', '')
+const entryFile = entryArg === '' ? INSTALLED : entryArg
+const entry = pathToFileURL(entryFile).href
 
 let failures = 0
 const check = (label, ok, detail = '') => {
@@ -127,7 +157,14 @@ function makeCtx() {
   }
 }
 
-console.log(`entry : ${entry}`)
+console.log(`entry : ${entryFile}`)
+// Printed, not assumed: this is the line that would have shown the junction. Without a --entry the
+// harness must be reporting on the INSTALLED artifact, and a link means it is not -- it is reporting
+// on whatever the link points at.
+console.log(`        ${entryArg === '' ? 'resolved from the profile manifest' : 'OVERRODE with --entry'}: ${describeEntry(entryFile)}`)
+if (entryArg === '' && describeEntry(entryFile).startsWith('a LINK')) {
+  console.log('        WARNING: this run is NOT testing the installed artifact. Pass --entry to make that explicit.')
+}
 console.log(`worker: ${URL_}\n`)
 
 const mod = await import(entry)

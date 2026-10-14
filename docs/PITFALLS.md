@@ -42,6 +42,7 @@
   - [D9. 在错误的会话里测量，然后据此下了结论](#d9-在错误的会话里测量然后据此下了结论)
   - [D10. 用 shell 的字符串替换去改文件：同一天失败四次](#d10-用-shell-的字符串替换去改文件同一天失败四次)
   - [D11. 测试里写死被测对象的名字：它会接受 bug、拒绝修复](#d11-测试里写死被测对象的名字它会接受-bug拒绝修复)
+  - [D12. 真机 harness 说它在测安装件，实际测的是源码检出（一个 junction）](#d12-真机-harness-说它在测安装件实际测的是源码检出一个-junction)
 - [E. 环境与平台的坑](#e-环境与平台的坑)
   - [E1. PowerShell 5.1 在一个卷上被按路径拦截，而 `-ExecutionPolicy Bypass` 无效](#e1-powershell-51-在一个卷上被按路径拦截而--executionpolicy-bypass-无效)
   - [E2. 沙箱内跑自检：合成输入的假阴性](#e2-沙箱内跑自检合成输入的假阴性)
@@ -1561,6 +1562,65 @@ assert.equal(definition.id, PKG.name)   // ← 名字以 manifest 为唯一真�
 **推论（比这一条更重要）**：`全绿` 说明不了"检查是有效的"。
 这条 harness 在 bug 存在期间一直是绿的 —— 要发现它，只能靠**变异检验**
 （把正确的值改回错的，看它是否立刻失败）。这次的每一条新守卫都做了变异检验。
+
+---
+
+## D12. 真机 harness 说它在测**安装件**，实际测的是**源码检出**（一个 junction）
+
+**现象**
+
+0.2.2 装好之后跑真机回归，全绿。而"装的件 == 我提交的那份"这个核对是用
+`node_modules\@hope_phenom\dsh-plugin-remote-use`（**带作用域**）做的哈希比对 —— 看起来两条结论互相支持。
+
+直到 harness 自己把那行打印出来：
+
+```
+entry : C:/Users/dev/.dsh/profiles/desktop/node_modules/dsh-plugin-remote-use/lib/index.js
+```
+
+**不带作用域。** 这是包改作用域名（PITFALLS F8）之前留下的硬编码路径。
+
+**根因**
+
+那个路径**确实存在**，而且**确实能解析** —— 但它是：
+
+```
+node_modules\dsh-plugin-remote-use             → Junction → F:\WorkSpace\dsh-plugin-remote-use\packages\dsh-plugin-remote-use
+node_modules\@hope_phenom\dsh-plugin-remote-use → 真目录（正常安装）
+```
+
+所以 harness 加载的是**开发者的工作树**，而**运行中的 DSH 加载的是带作用域的那份真安装件**
+（补丁里的 `name: '@hope_phenom/dsh-plugin-remote-use'` 才是 loader 导入的模块名 ——
+不带作用域的那个字符串只是**行 id**，F8 说过这两个标识符必须不同）。
+
+**为什么"两次都通过"反而更危险**
+
+那一刻检出与安装件**逐字节相同**，所以谁都没错。但**它们不相同的那一天**，
+这个 harness 会对**没人发布过的代码**给出"发布件通过"的结论 —— 而且它打印的路径读起来像安装件。
+这和 B1（settings 覆盖 harness 的配置）、D8（把本地路径当作两机共享路径）是同一个族：
+**你以为在测 A，其实在测 B。**
+
+**修法**
+
+入口路径**从权威来源推导**，与 loader 同一条规则：profile 清单里的包名 →
+`node_modules/<scope>/<name>/lib/index.js`。并且**把"这是不是链接"打印出来**：
+
+```
+entry : C:\Users\you\.dsh\profiles\desktop\node_modules\@hope_phenom\dsh-plugin-remote-use\lib\index.js
+        resolved from the profile manifest: a real directory in the profile
+```
+
+是链接时打 `WARNING: this run is NOT testing the installed artifact.`；用 `--entry` 显式覆盖时也说明。
+旁证：Harness 里那条 `[remote-use] ... not importable ... imported from <路径>` 的 stderr
+**会自己报出它实际从哪个文件加载** —— 那行一直都写着真路径，只是以前没人拿它对照入口。
+
+**顺带发现**：那个旧 junction **没有任何东西引用**（profile 的 `dependencies`/`bundles`、
+插件补丁的 `name:` 全是带作用域的名字；`~/.dsh/cordis.patch.yml` 里一个字都没有）。
+它是开发期遗留，**但它的存在会让"不带作用域的名字也能解析"这件事为真** —— 那正是 F8 那类改名事故的掩护。
+
+> **方法上的教训**："我测的是 X" 这句话里的 X 是一个**路径**，而路径可以被链接指向别处。
+> 让权威来源（manifest）推导它，并且**把解析结果打印出来**；
+> 硬编码的路径不会失效，它只会**继续存在并指向另一个东西**。
 
 ---
 

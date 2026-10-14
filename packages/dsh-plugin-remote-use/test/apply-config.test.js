@@ -529,6 +529,11 @@ test('worker.pair fills url, token and name from one paste', async () => {
     const added = body.settings.workers.find((w) => w.url === 'ws://192.168.1.101:7331')
     assert.ok(added !== undefined, 'the worker must be configured')
     assert.equal(added.tokenSet, true)
+    // The TASK DIRECTORY comes from the paste too. That is the whole point of putting it in the
+    // string: only the worker can know a path on the worker, so the operator must not have to
+    // retype it. Without this assertion, a paste that silently dropped `cwd` would still pass --
+    // and would produce a worker that cannot accept a task (F16).
+    assert.equal(added.cwd, 'C:\\dsh-remote\\p0work')
     // The token itself must never travel back to the browser.
     assert.equal('token' in added, false)
     assert.equal(JSON.stringify(body).includes('tok-secret-value'), false)
