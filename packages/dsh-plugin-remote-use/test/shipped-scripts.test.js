@@ -303,32 +303,35 @@ test('the deployment script copies everything the relay imports, and proves it r
 })
 
 // ---------------------------------------------------------------------------
-// S4 must check BOTH halves of its own criterion
+// S4: what it blocks, and what it must NOT block
 //
-// The design says S4 is "the virtual screen IS primary AND sits at (0,0)". The implementation
-// checked only the origin, and that gap was found on a real worker: its physical monitor kept
-// presenting its EDID after being switched to another machine (KVM behaviour), so Windows still
-// treated it as attached and kept it primary at (0,0). S4 passed, the worker was dispatched to,
-// and the desktop was a PORTRAIT panel on the Intel adapter while the intended virtual display sat
-// unused. S3 only warns about the resolution, so nothing else caught it.
+// This one has been wrong in BOTH directions, so the guard pins the reasoning rather than a slogan.
 //
-// This guard is source-level because the script runs on a worker and cannot be reached from here --
-// the same reason the rest of this file exists.
+//   * Originally it checked only the origin, while DESIGN worded it as "the virtual screen is
+//     primary AND at (0,0)". That looked like a missing half and was "fixed" -- and the fix made a
+//     real deployment unusable, because Windows 11 draws the LOGON UI on the PRIMARY display only:
+//     with the virtual display primary, the login screen renders on a display with no physical
+//     output and the operator's monitor stays black.
+//   * So the origin is what blocks (an offset origin silently shifts every coordinate), and whether
+//     the primary is the virtual display is REPORTED, not enforced.
+//
+// A guard cannot encode "this is the right trade-off", but it can stop the enforced half from
+// creeping back in without someone deliberately changing this comment too.
 // ---------------------------------------------------------------------------
 
-test('the display check requires the primary to BE the virtual display, not merely at the origin', () => {
+test('the display check blocks on the origin, and merely reports whether the primary is virtual', () => {
   const text = readFileSync(join(SLAVE, 'selfcheck.ps1'), 'utf8')
-  // Slice from the S4 COMMENT, not from the `Add-Check` line: the origin test is computed above the
-  // call, and slicing at the call hid it -- which made this guard fail for the wrong reason.
   const from = text.indexOf('# S4')
   const s4 = text.slice(from, text.indexOf('# S5'))
   assert.ok(from >= 0 && s4.length > 0, 'S4 is missing from the self-check')
-  // The half that was missing: the primary's adapter must be matched against the virtual ones.
-  assert.match(s4, /virtual/i, 'S4 must consider whether the primary is virtual')
-  // ...and the half that was there must still be there.
-  assert.match(s4, /Bounds\.X -eq 0/u, 'S4 must still require the origin')
-  assert.match(s4, /\$okOrigin -and \$primaryIsVirtual/u,
-    'S4 must pass only when BOTH conditions hold -- either half alone is the bug this guards')
+  // Blocks on the origin...
+  assert.match(s4, /Bounds\.X -eq 0/u, 'S4 must require the origin')
+  // ...and reports the virtual-ness without gating on it.
+  assert.match(s4, /primaryIsVirtual/u, 'S4 must report whether the primary is the virtual display')
+  assert.equal(/\$okOrigin -and \$primaryIsVirtual/u.test(s4), false,
+    'S4 must NOT block on the primary being virtual: that puts the login screen on a display nobody can see')
+  const call = text.slice(text.indexOf("Add-Check 'S4'"))
+  assert.match(call.slice(0, 220), /\$okOrigin\)/u, 'the S4 verdict must be decided by the origin alone')
 })
 
 test('an unanswered remote check is reported as unverified, never as a failed one', () => {

@@ -113,19 +113,23 @@ Add-Check 'S2' 'virtual display present (not WinDisc fallback)' 'blocking' $(if 
 # S3 resolution
 $res = if ($primary) { "$($primary.Bounds.Width)x$($primary.Bounds.Height)" } else { '?' }
 Add-Check 'S3' 'primary resolution' 'warning' $(if ($res -eq '1920x1080') { 'pass' } else { 'warn' }) '1920x1080' $res 'put the target resolution first in vdd_settings.xml'
-# S4 primary at origin AND the primary is the VIRTUAL display
+# S4 primary at origin -- AND the report says whether that primary is the virtual display
 #
-# BOTH HALVES ARE REQUIRED, and for a while only one was implemented. DESIGN says S4 is
-# "the virtual screen is primary AND at (0,0)"; the code checked only the origin. That gap was
-# found on a real worker whose physical monitor presents its EDID even after being switched to
-# another machine (KVM behaviour, DESIGN 7.8): Windows still considered it attached, kept it
-# primary at (0,0), and the check passed -- while the desktop was a PORTRAIT 1080x1920 panel from
-# an Intel adapter and the intended 1920x1080 virtual display sat unused. The worker was dispatched
-# to with a layout nobody agreed to. S3 only warns about the resolution, so nothing else caught it.
+# WHY THIS IS NOT A BLOCKING "MUST BE VIRTUAL" CHECK, after it briefly was one:
 #
-# The reason it matters is the one DESIGN gives: a primary that is not the agreed display is a
-# coordinate space that is not the agreed one, and the symptom is "it clicked, slightly wrong" --
-# no error anywhere. Half a check is worse than none, because it reports the reassuring half.
+# DESIGN words S4 as "the virtual screen is primary AND at (0,0)". Enforcing the first half made a
+# real deployment unusable, and the reason is worth keeping: Windows 11 draws the LOGON UI on the
+# PRIMARY display only. Make the virtual display primary and the login screen is rendered on a
+# display with no physical output -- the operator's monitor stays black and they cannot log in.
+#
+# The requirement existed to guarantee "a coordinate space independent of the operator's monitor".
+# On a KVM that keeps presenting the monitor's EDID, Windows never sees the display disappear, so
+# that guarantee is already provided by the hardware -- and insisting on the virtual display only
+# moves the logon screen somewhere nobody can see it.
+#
+# What still blocks is the half that protects a running task: a primary that is not at (0,0) means
+# every absolute coordinate is silently offset. Whether the primary is the virtual display or the
+# operator's own is reported in `actual`, so the situation is visible without being fatal.
 $okOrigin = $false; $origin = '?'; $primaryIsVirtual = $false; $primaryAdapter = ''
 if ($primary) {
   $origin = "primary=$($primary.DeviceName) at $($primary.Bounds.X),$($primary.Bounds.Y)"
@@ -137,7 +141,7 @@ if ($primary) {
 }
 $primaryDesc = $origin + ' virtual=' + $primaryIsVirtual
 if ($primaryAdapter) { $primaryDesc = $primaryDesc + ' [' + (($primaryAdapter -split ' \| ')[1]) + ']' }
-Add-Check 'S4' 'primary is the VIRTUAL display at origin' 'blocking' $(if ($okOrigin -and $primaryIsVirtual) { 'pass' } else { 'fail' }) 'VDD primary at 0,0' $primaryDesc 'make the virtual display primary and put it at (0,0)'
+Add-Check 'S4' 'primary monitor at origin' 'blocking' $(if ($okOrigin) { 'pass' } else { 'fail' }) 'primary at (0,0)' $primaryDesc 'ChangeDisplaySettingsEx CDS_SET_PRIMARY|CDS_NORESET then commit'
 # S5 DPI
 $scale = 1.00
 try { $g = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); if ($g) { $scale = [math]::Round($g.DpiX / 96.0, 2); $g.Dispose() } } catch {}
