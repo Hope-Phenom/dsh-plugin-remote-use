@@ -25,6 +25,15 @@ const TAIL_BYTES = 256 * 1024
 /** Rows kept in memory for the page, newest last. */
 const MEMORY_LIMIT = 200
 
+/**
+ * The `by` values that mean "nobody decided this".
+ *
+ * `timeout` is the queue's own budget expiring; `disposed` is the plugin unloading with the
+ * request still open; `no-answerer` is the engine finding no one who could answer. All three
+ * are refusals the operator had no chance to see at the moment they happened.
+ */
+const MISSED_BY = new Set(['timeout', 'disposed', 'no-answerer'])
+
 /** @param {Record<string, string | undefined>} [env] */
 export function auditPath(env = process.env) {
   return join(resolveDshHome(env), 'storages', 'dsh-plugin-remote-use', 'audit.jsonl')
@@ -94,6 +103,35 @@ export class AuditLog {
   /** Recent rows, newest first. */
   tail(limit = 30) {
     return this.rows.slice(-Math.max(0, limit)).reverse()
+  }
+
+  /**
+   * Approvals that expired with nobody answering -- the ones the operator never saw.
+   *
+   * WHY THIS IS NOT JUST `tail()` FILTERED IN THE PAGE: six such rows sat in the live trail on
+   * 2026-10-14 (five of them inside eight minutes) and the operator had never seen a single
+   * prompt. A refusal that leaves no trace the page can surface is indistinguishable from the
+   * plugin being broken, so the misses get their own accessor instead of hiding among the rows
+   * that were decided.
+   *
+   * `disposed` counts as missed: the request was still waiting when the plugin unloaded, so no
+   * person ever answered it either. The page labels the two differently.
+   *
+   * @param {number} [limit] how many to return, newest first
+   */
+  missed(limit = 20) {
+    return this.missedAll().slice(0, Math.max(0, limit))
+  }
+
+  /** Every miss still in memory, newest first. */
+  missedAll() {
+    return this.rows
+      .filter((row) => row?.kind === 'approval' && MISSED_BY.has(String(row.by ?? '')))
+      .reverse()
+  }
+
+  get missedCount() {
+    return this.rows.reduce((n, row) => (row?.kind === 'approval' && MISSED_BY.has(String(row.by ?? '')) ? n + 1 : n), 0)
   }
 
   get size() {

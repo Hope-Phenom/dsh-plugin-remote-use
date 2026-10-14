@@ -41,8 +41,14 @@ import * as acp from '@agentclientprotocol/sdk'
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client'
 import { WebSocket as WsWebSocket } from 'ws'
 
-/** 默认审批超时（DESIGN §8.4 硬性要求）。 */
-export const DEFAULT_APPROVAL_TIMEOUT_MS = 90_000
+/**
+ * 默认审批超时（DESIGN §8.4 硬性要求）。
+ *
+ * 180 秒而不是 90 秒：2026-10-14 实测，这个窗口是"人能不能看见"的唯一约束，而 88 秒
+ * 里没人盯屏幕就等于静默拒绝（审计里连着六次 `by=timeout`）。加长窗口不放松任何东西 ——
+ * 超时依然是拒绝，它只是让"看见"这件事来得及。
+ */
+export const DEFAULT_APPROVAL_TIMEOUT_MS = 180_000
 
 /** ACP 审批应答的 optionId（DESIGN §2.3，ACP 硬编码两个值）。 */
 export const OPTION_ALLOW_ONCE = 'allow-once'

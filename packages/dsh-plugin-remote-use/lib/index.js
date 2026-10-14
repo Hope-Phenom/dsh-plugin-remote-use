@@ -30,6 +30,7 @@ import { TaskMemory } from './core/task-memory.js'
 import { assertUsableCwd } from './core/task-cwd.js'
 import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
 import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
+import { notifyDesktop, loggerMethods } from './core/desktop-notify.js'
 import { dirname, join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { AuditLog } from './core/audit-log.js'
@@ -172,7 +173,7 @@ export const Config = Schema !== null
       /** Per-worker serial concurrency. GUI is an exclusive resource: 1. */
       serialQueue: Schema.number().default(1),
     })).default([]),
-    approvalTimeoutMs: Schema.number().default(90_000),
+    approvalTimeoutMs: Schema.number().default(180_000),
     /** Tier a task needs unless the delegation narrows it. */
     requiredTier: Schema.string().default('workspace-write'),
     /** Prefix a remote tool's name; one row per worker uses `<toolPrefix>` + worker id. */
@@ -206,7 +207,7 @@ export const Config = Schema !== null
     // same defaults, so behaviour is identical for a patch-configured install.
     [SCHEMA_UNAVAILABLE]: true,
     workers: [],
-    approvalTimeoutMs: 90_000,
+    approvalTimeoutMs: 180_000,
     requiredTier: 'workspace-write',
     toolPrefix: 'subagent_remote',
     injectTaskSummary: true,
@@ -270,9 +271,13 @@ export function apply(ctx, config) {
     // would reject first and the page would keep a ghost entry nobody could act on.
     timeoutMs: Math.max(1_000, cfg.approvalTimeoutMs - QUEUE_LEAD_MS),
     onSettle: (outcome) => {
-      audit.record({ kind: 'approval', gate: 'human', ...outcome })
+      // `gate` says WHICH gate handled it; `by` says who was behind it. They differ for a
+      // timeout: nobody answered, so calling that a human gate is how a silent refusal read as a
+      // human decision in the trail.
+      const noAnswer = outcome.by === 'timeout' || outcome.by === 'disposed' || outcome.by === 'no-answerer'
+      audit.record({ kind: 'approval', gate: noAnswer ? 'timeout' : 'human', ...outcome })
       log.info(`approval ${outcome.toolCallId} tool=${outcome.toolName} `
-        + `required=${outcome.requiredTier} -> ${outcome.optionId} (gate=human by=${outcome.by}) `
+        + `required=${outcome.requiredTier} -> ${outcome.optionId} (gate=${noAnswer ? 'timeout' : 'human'} by=${outcome.by}) `
         + `waited=${outcome.waitedMs}ms`)
     },
   })
@@ -729,7 +734,14 @@ export function apply(ctx, config) {
     ctx.effect(() => ctx.systemPrompt.section({
       name: 'remote-use:in-flight',
       order: ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'),
-      text: () => registry.summary(),
+      // The approval notice rides in the same section as the task list because it is the same
+      // fact from the model's side: something of its own is stuck, and only a person can unstick
+      // it. Left on the settings page alone, a blocked task just looks like a hang.
+      text: () => {
+        const parts = [registry.summary()]
+        if (queue !== undefined) parts.push(approvalNotice(queue.list(), queue.timeoutMs))
+        return parts.filter((part) => part !== '').join('\n\n')
+      },
     }), 'remote-use: task summary section')
   }
 
@@ -791,7 +803,7 @@ export function normalizeConfig(config) {
       enabled: w.enabled !== false,
       serialQueue: Number.isFinite(w.serialQueue) ? Math.max(1, Number(w.serialQueue)) : 1,
     })),
-    approvalTimeoutMs: Number.isFinite(config?.approvalTimeoutMs) ? Number(config.approvalTimeoutMs) : 90_000,
+    approvalTimeoutMs: Number.isFinite(config?.approvalTimeoutMs) ? Number(config.approvalTimeoutMs) : 180_000,
     requiredTier: String(config?.requiredTier ?? 'workspace-write'),
     toolPrefix: String(config?.toolPrefix ?? 'subagent_remote'),
     injectTaskSummary: config?.injectTaskSummary !== false,
@@ -895,7 +907,7 @@ export function makeApprovalDecider(deps) {
     // this a widening of what is POSSIBLE rather than a loosening of what is ALLOWED.
     log.info(`approval ${toolCallId} tool=${toolName} required=${requiredTier} `
       + `[NEEDS HUMAN] queued (${engine.reason})`)
-    const optionId = await queue.request({
+    const waiting = queue.request({
       peerId: worker.id,
       taskId,
       toolCallId,
@@ -905,6 +917,10 @@ export function makeApprovalDecider(deps) {
       reason: engine.reason,
       source: engine.source,
     })
+    // Announce it before awaiting: the await lasts the whole budget, and a notification sent
+    // after it would arrive once there is nothing left to decide.
+    announceApproval({ queue, log, peerId: worker.id, taskId, toolName, requiredTier })
+    const optionId = await waiting
 
     // The queue's `onSettle` writes the audit row for this one: it holds the `by` detail
     // (human / timeout / disposed) that the decision alone cannot express.
@@ -1048,6 +1064,101 @@ function rejectUnusableCwd(cwd, ctx) {
       + 'been saved.'
   }
   return assertUsableCwd(cwd)
+}
+
+/**
+ * Tell the MODEL that a person is being waited on.
+ *
+ * WHY THIS IS NOT JUST THE SETTINGS PAGE: the page only reaches someone who is looking at it, and
+ * the model is the one party guaranteed to be talking to that person right now. Measured
+ * 2026-10-14: six approval requests expired unanswered over two days and the operator had never
+ * seen a prompt -- the request had nowhere to go but a page nobody had open.
+ *
+ * English, because it lands in the same injected section as `TaskRegistry.summary()`: the reader
+ * is the model, not the operator. The desktop notification (see `announceApproval`) is the
+ * operator-facing half and is written in Chinese.
+ *
+ * @param {object[]} pending entries from `ApprovalQueue.list()`
+ * @param {number} timeoutMs the queue's budget, used to say how long is left
+ * @returns {string} an injectable block, or '' when nothing is waiting
+ */
+export function approvalNotice(pending, timeoutMs) {
+  const rows = Array.isArray(pending) ? pending.filter((row) => row !== null && typeof row === 'object') : []
+  if (rows.length === 0) return ''
+  const budget = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 0
+  const lines = rows.map((row) => {
+    const left = Math.max(0, Math.round((budget - Number(row.ageMs ?? 0)) / 1000))
+    const tool = String(row.toolName ?? '?')
+    const tier = String(row.requiredTier ?? '')
+    const task = String(row.taskId ?? '')
+    const peer = String(row.peerId ?? '')
+    return `- ${tool}${tier === '' ? '' : ` needs ${tier}`}${task === '' ? '' : ` for ${task}`}`
+      + `${peer === '' ? '' : ` (peer ${peer})`} -- refused automatically in ~${left}s if nobody answers`
+  })
+  return [
+    `APPROVALS WAITING ON A HUMAN (${rows.length}): the worker stays BLOCKED until someone answers.`,
+    ...lines,
+    'Tell the user to open Settings -> Remote use -> "Approvals waiting on you" and click "Allow once". '
+      + 'If nobody answers, the request is refused and the task will report that failure; it is not a bug to retry.',
+  ].join('\n')
+}
+
+/**
+ * Fire the operator-facing desktop notification for an approval that just started waiting.
+ *
+ * Best-effort by contract: it runs on the approval path, so a missing notifier, a blocked
+ * PowerShell or a full disk must all be silent no-ops. The approval is reachable either way --
+ * on the page, and through the model's injected context.
+ *
+ * @param {object} opts
+ * @param {object} opts.queue
+ * @param {(level: string, message: string) => void} opts.log
+ * @param {(opts: object) => boolean} [opts.notify] injectable so tests never spawn anything
+ */
+export function announceApproval(opts) {
+  const { queue, log } = opts
+  const notify = opts.notify ?? notifyDesktop
+  // Pulled off the object defensively: this runs on the approval path, so a logger that is missing
+  // a method must not be the thing that turns a waiting request into an exception.
+  const { info, warn } = loggerMethods(log)
+  try {
+    const rows = queue.list()
+    const row = rows.length === 0 ? undefined : rows[rows.length - 1]
+    if (row === undefined) return false
+    const seconds = Math.max(0, Math.round((queue.timeoutMs - Number(row.ageMs ?? 0)) / 1000))
+    const sent = notify({
+      title: '远程任务：等待你批准',
+      message: `${String(row.toolName ?? '?')} 申请 ${String(row.requiredTier ?? '?')}`
+        + `（${String(row.peerId ?? '')}${row.taskId === '' ? '' : ` · ${String(row.taskId)}`}）`
+        + `；请在设置页点「允许一次」，约 ${seconds} 秒后自动按拒绝处理。`,
+      log,
+    })
+    if (sent !== true) info('approval is waiting; no desktop notifier available (settings page + model notice only)')
+    return sent === true
+  } catch (error) {
+    warn(`could not announce the approval: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+}
+
+/**
+ * Where a decision on the settings route came from.
+ *
+ * WHY: `queue.decide` used to record every caller as `human`, which made the audit trail claim a
+ * person had approved a request that this repo's own harness had approved over the route. A
+ * browser sends `Origin` on EVERY POST -- the same fact `crossSitePostProblem` leans on -- so its
+ * presence separates a click from a script cheaply.
+ *
+ * THIS IS EVIDENCE, NOT A BOUNDARY. A script can send the header, so `page` only ever changes how
+ * the trail reads. Never branch an authorization decision on it.
+ *
+ * @param {{ headers?: Record<string, unknown> }} req
+ * @returns {'page'|'api'}
+ */
+export function requestProvenance(req) {
+  const headers = req?.headers ?? {}
+  const origin = typeof headers.origin === 'string' ? headers.origin.trim() : ''
+  return origin === '' || origin.toLowerCase() === 'null' ? 'api' : 'page'
 }
 
 /**
@@ -1234,8 +1345,17 @@ export function makeSettingsRoute(deps) {
           // `available: false` rather than an empty list when the queue is absent: the page
           // must be able to tell "nothing is waiting" from "this build cannot ask".
           approvals: queue === undefined
-            ? { available: false, pending: [], recent: [], timeoutMs: 0 }
-            : { available: true, pending: queue.list(), recent: queue.recent(10), timeoutMs: queue.timeoutMs },
+            ? { available: false, pending: [], recent: [], missed: [], missedCount: 0, timeoutMs: 0 }
+            : {
+                available: true,
+                pending: queue.list(),
+                recent: queue.recent(10),
+                // Derived from the append-only trail rather than the queue's in-memory history, so
+                // a request nobody saw is still visible after a restart -- which is the whole point.
+                missed: audit === undefined ? [] : audit.missed(20),
+                missedCount: audit === undefined ? 0 : audit.missedCount,
+                timeoutMs: queue.timeoutMs,
+              },
           audit: audit === undefined
             ? { available: false, path: '', error: '', recent: [] }
             : { available: true, path: audit.file, error: audit.lastError, recent: audit.tail(20) },
@@ -1460,7 +1580,7 @@ export function makeSettingsRoute(deps) {
             // than quietly accepted -- the page is showing a row that no longer exists, and
             // pretending otherwise would let a stale click look like a fresh approval.
             if (queue === undefined) return send(503, { ok: false, error: 'this build has no approval queue' })
-            const result = queue.decide(String(body?.id ?? ''), body?.decision)
+            const result = queue.decide(String(body?.id ?? ''), body?.decision, requestProvenance(req))
             if (result.ok !== true) return send(409, { ok: false, error: result.error })
             return send(200, { ok: true, optionId: result.optionId, pending: queue.list() })
           }

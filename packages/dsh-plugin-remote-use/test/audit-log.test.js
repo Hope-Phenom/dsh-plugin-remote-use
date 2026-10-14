@@ -109,6 +109,45 @@ test('the in-memory window is bounded so a long run cannot grow without limit', 
   })
 })
 
+test('missed() surfaces the refusals nobody answered, and only those', () => {
+  // The whole point: six `by=timeout` rows sat in the live trail and the operator had never seen a
+  // prompt. A miss has to be findable after the fact, separately from what was decided.
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    log.record({ ...ROW, by: 'timeout', n: 1 })
+    log.record({ ...ROW, by: 'page', n: 2, optionId: 'allow-once' })
+    log.record({ ...ROW, by: 'api', n: 3, optionId: 'allow-once' })
+    log.record({ ...ROW, by: 'disposed', n: 4 })
+    log.record({ ...ROW, by: 'no-answerer', n: 5 })
+    log.record({ ...ROW, by: 'engine', n: 6, optionId: 'allow-once' })
+    log.record({ kind: 'other', by: 'timeout', n: 7 })
+
+    assert.deepEqual(log.missed().map((r) => r.n), [5, 4, 1], 'newest first, only the unanswered')
+    assert.deepEqual(log.missed(2).map((r) => r.n), [5, 4], 'the limit keeps the newest')
+    assert.equal(log.missedCount, 3, 'the count is over every miss in memory, not just the page size')
+  })
+})
+
+test('a miss survives a restart, because the page must be able to report what it missed', () => {
+  withHome((env) => {
+    const first = new AuditLog({ env })
+    first.record({ ...ROW, by: 'timeout', n: 1 })
+    const reopened = new AuditLog({ env })
+    assert.deepEqual(reopened.missed().map((r) => r.n), [1])
+    assert.equal(reopened.missedCount, 1)
+  })
+})
+
+test('a trail with nothing missed reports zero, not undefined', () => {
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    assert.deepEqual(log.missed(), [])
+    assert.equal(log.missedCount, 0)
+    log.record({ ...ROW, by: 'page' })
+    assert.equal(log.missedCount, 0, 'a decided request is not a miss')
+  })
+})
+
 test('a missing file is the normal starting state', () => {
   withHome((env) => {
     assert.equal(existsSync(auditPath(env)), false)

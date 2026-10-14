@@ -1245,9 +1245,29 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 
 因为从机 turn 是**挂着**的（不是失败、不是超时），必须主动通知，否则任务静默卡死。
 
-- 主机 Settings 页顶部常驻「待审批 (N)」区域
-- 桌面通知（可复用 `dsh-plugin-notify` 的思路）
-- 从机侧「工作节点」页同步显示"正在等待主机审批"
+**2026-10-14 实测：这一节当时只是计划。** 审计里有 6 行 `by=timeout`（其中 5 行集中在 8 分钟内），
+而操作者的原话是"**核心问题是我真的没见过权限审批提示**"——设置页只在挂载与自身操作后读快照、
+队列窗口 88 秒、过期即静默拒绝并删掉那一行。也就是说"主动性"完全没有落地：**与 F17 同一个形状，
+文档写了、代码没做**（见 PITFALLS F18）。
+
+三条计划逐一对照现状：
+
+| 计划 | 现状 |
+|---|---|
+| 主机 Settings 页常驻「待审批 (N)」 | ✅ 审批组内有待批准列表，**页面可见时每 2.5 秒轮询**（所以行会自己出现，不必手动刷新）；无人应答的请求另列「有 N 件请求因无人应答被拒」，数据取自**追加式审计**，重启后仍在 |
+| 桌面通知（复用 `dsh-plugin-notify` 的思路） | ✅ `lib/core/desktop-notify.js`：**调用**该插件自带的 `scripts/notify.ps1`（文件级契约，不 import 它的内部；未安装／无解释器／PowerShell 被挡都静默降级）。入队即发，且**在 `await` 之前**发 —— await 持续整个预算，之后发就等于事后通知 |
+| 从机侧「工作节点」页显示"正在等待主机审批" | ⚠️ 主机侧任务表已用 `WAITING-FOR-APPROVAL` 标记（`TaskRegistry` 有该字段）；**从机本地那一页没有单独验证过** |
+
+**还有一条比页面更可靠的通道：告诉模型。** 审批等待期间，运行时上下文注入里会多一段
+`APPROVALS WAITING ON A HUMAN (n)`，写明工具、档位、剩余秒数，以及"让用户去设置页点允许"。
+模型是唯一一个**此刻正在和人说话**的当事人 —— 页面需要人去看，模型只需要被告诉。
+
+**窗口默认 180 秒**（`approvalTimeoutMs`）。这个数字不是审美问题：它就是"人能不能看见"的唯一约束。
+超时依然是拒绝 —— 加长窗口不放松任何东西，它只是让"看见"这件事来得及。
+
+**来源必须可辨**：`approvals.decide` 现在记录 `by ∈ {page, api, timeout, disposed}`。
+页面点击（浏览器 POST 必带 `Origin`）才是 `page`，其余一律 `api` —— 默认值取**保守**的那个，
+因为把脚本记成"人批的"会让"人在环里"这个结论无法被验证（PITFALLS F19）。
 
 ### 8.7 数据不出局域网
 
@@ -1284,6 +1304,14 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 
 1. **参数存摘要不存原文**：审批参数常带凭据、token、路径；审计日志自身变成泄露源是常见翻车方式。需要完整参数时按 `taskId` 回看会话日志。
 2. **`decisionSource` 必须记**：DSH 原生 auto-review 的放行行为**无留痕**；插件自己记这个字段，才能回答"这条是规则自动放的、还是我亲手批的"。
+
+> **实测字段（2026-10-14，与上面这张草图的差异是真实的）**：行写成
+> `$DSH_HOME/storages/dsh-plugin-remote-use/audit.jsonl`（单文件，不是按日切分），字段为
+> `{at, kind:'approval', gate, peerId, taskId, toolCallId, toolName, requiredTier, source, reason,
+> optionId, by, createdAt, settledAt, waitedMs}`。草图中的 `decisionSource` 落成了 **`by`**，
+> 取值 `page | api | timeout | disposed | no-answerer`（另有两个历史值 `human` / `engine`）。
+> **`page` 与 `api` 必须分开**：两者都走同一个路由，混在一起就会把脚本批准记成"人批的"（F19）。
+> `gate` 同步区分：超时不再写 `gate: 'human'`。
 
 **保留**：默认 30 天，可配。**轮转**：单文件 64MB。**配额**：总大小上限，超限告警而非静默丢弃。
 

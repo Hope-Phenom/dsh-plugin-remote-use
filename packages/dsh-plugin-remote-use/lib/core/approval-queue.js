@@ -67,7 +67,7 @@ export class ApprovalQueue {
    */
   constructor(opts = {}) {
     this.now = opts.now ?? (() => Date.now())
-    this.timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(1, Number(opts.timeoutMs)) : 80_000
+    this.timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(1, Number(opts.timeoutMs)) : 178_000
     this.onSettle = typeof opts.onSettle === 'function' ? opts.onSettle : () => {}
     this.disposed = false
     this.seq = 0
@@ -136,12 +136,22 @@ export class ApprovalQueue {
   }
 
   /**
-   * Apply a human decision.
+   * Apply a decision made outside the queue.
+   *
+   * `by` records WHERE the decision came from, and it is not decoration: the settings page calls
+   * this through the same route a script would, so labelling every call `human` made the audit
+   * claim human involvement for approvals a harness had granted. Measured 2026-10-14: the only
+   * `allow-once` row in the live trail came from this repo's own probe, and it read `by=human`.
+   *
+   * The default is `api` -- the conservative label. A caller that cannot prove a person clicked
+   * must not be recorded as one.
+   *
    * @param {string} id
    * @param {'allow'|'deny'} decision
+   * @param {'page'|'api'} [by] `page` only for a request that carried a browser Origin header
    * @returns {{ ok: boolean, error?: string, optionId?: string }}
    */
-  decide(id, decision) {
+  decide(id, decision, by = 'api') {
     if (decision !== 'allow' && decision !== 'deny') {
       return { ok: false, error: `decision must be "allow" or "deny", got ${JSON.stringify(decision)}` }
     }
@@ -151,7 +161,7 @@ export class ApprovalQueue {
       return { ok: false, error: `no pending approval "${id}" (it may have timed out)` }
     }
     const optionId = decision === 'allow' ? 'allow-once' : 'reject-once'
-    this.#settle(id, optionId, 'human')
+    this.#settle(id, optionId, by === 'page' ? 'page' : 'api')
     return { ok: true, optionId }
   }
 

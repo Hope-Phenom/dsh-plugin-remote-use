@@ -1,6 +1,6 @@
 {
   "name": "@hope_phenom/dsh-plugin-remote-use",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
   "license": "MIT",
   "author": "Hope.Phenom <hope.phenom@foxmail.com>",

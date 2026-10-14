@@ -702,7 +702,10 @@ test('构造函数校验：没有 url/stream 时抛错；approvalTimeoutMs 非�
   assert.throws(() => new AcpBridge({}), /opts\.url/)
   assert.throws(() => new AcpBridge({ approvalTimeoutMs: -1, url: 'ws://x' }), /approvalTimeoutMs/)
   const bridge = new AcpBridge({ url: 'ws://x' })
-  assert.equal(DEFAULT_APPROVAL_TIMEOUT_MS, 90_000)
+  // 180s since 2026-10-14: the window is the only thing standing between "a person can answer" and
+  // a silent refusal, and 90s was short enough that six requests expired unseen (PITFALLS F18).
+  assert.equal(DEFAULT_APPROVAL_TIMEOUT_MS, 180_000)
+  assert.ok(bridge instanceof AcpBridge, 'the default must construct without an explicit timeout')
 })
 
 // ------------------------- 9 per-call 回调（集成缝修正：一条 bridge 服务多个任务）

@@ -199,6 +199,49 @@ test('the allow button is wired to a handler, and the row carries its id', () =>
   assert.equal(rows.length, 1)
 })
 
+test('refusals nobody answered are listed, with the reason and how long they waited', () => {
+  // The operator's question after "why did that task fail?" is "was I asked?". Before this block
+  // the answer was only in the JSONL file: six requests had expired unanswered and the page showed
+  // nothing at all.
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: {
+      available: true,
+      timeoutMs: 180_000,
+      recent: [],
+      pending: [],
+      missedCount: 3,
+      missed: [
+        { at: '2026-10-14T10:46:28.000Z', toolName: 'pwsh', requiredTier: 'danger-full-access', peerId: '192.168.1.101', waitedMs: 178_000, by: 'timeout' },
+        { at: '2026-10-13T09:03:22.000Z', toolName: 'write', requiredTier: 'danger-full-access', peerId: 'w1', waitedMs: 88_000, by: 'disposed' },
+      ],
+    },
+    audit: { available: true, path: 'p', error: '', recent: [] },
+  })
+  const text = textOf(tree).join(' ')
+
+  assert.match(text, /MISSED-3/, 'the count is shown, not just the rows that fitted on screen')
+  assert.match(text, /MISSED-NOTE/)
+  assert.match(text, /COL-SETTLED/)
+  assert.match(text, /pwsh/)
+  assert.match(text, /danger-full-access/)
+  assert.match(text, /192\.168\.1\.101/)
+  // Each row says WHY it was refused, in words: a timeout and an unload are different stories.
+  assert.match(text, /AUDIT-BY-TIMEOUT/)
+  assert.match(text, /AUDIT-BY-DISPOSED/)
+})
+
+test('a host that never sent the missed list still renders (older snapshot)', () => {
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: { available: true, pending: [], recent: [], timeoutMs: 180_000 },
+    audit: { available: true, path: 'p', error: '', recent: [] },
+  })
+  const text = textOf(tree).join(' ')
+  assert.match(text, /APPROVALS-NONE/)
+  assert.doesNotMatch(text, /MISSED/, 'no misses: no block, and no crash reading an absent field')
+})
+
 test('a build with no approval queue says so rather than showing an empty list', () => {
   // "nothing is waiting" and "this build cannot ask" are different facts. Rendering the empty
   // state for both would tell the operator their request is merely idle when it was refused.
@@ -909,9 +952,11 @@ function makeTranslator() {
       roleStop: 'ROLE-STOP', roleStopForget: 'ROLE-STOP-FORGET', roleStopHint: 'ROLE-STOP-HINT',
       fieldPairing: 'F-PAIRING', fieldPairingHint: 'PAIR-HINT', fieldPairingPlaceholder: 'dshpair1.', pairDone: 'PAIR-DONE',
       approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
+      approvalsMissed: 'MISSED-{n}', approvalsMissedNote: 'MISSED-NOTE', colSettled: 'COL-SETTLED',
       auditNone: 'AUDIT-NONE',
       auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',
       auditByEngine: 'AUDIT-BY-ENGINE', auditByTimeout: 'AUDIT-BY-TIMEOUT',
+      auditByDisposed: 'AUDIT-BY-DISPOSED', auditByPage: 'AUDIT-BY-PAGE', auditByApi: 'AUDIT-BY-API',
     }
     const template = table[key] ?? key
     return values === undefined ? template : String(template).replace(/\{(\w+)\}/g, (w, k) => (k in values ? values[k] : w))

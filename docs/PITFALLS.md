@@ -73,6 +73,10 @@
   - [F15. 后台委派的**答案无处可取** —— 状态齐全，而"结果是什么"不存在](#f15-后台委派的答案无处可取--状态齐全而结果是什么不存在)
   - [F16. 配对建立了一个**没有任务目录**的 worker：错误推迟到第一次派单才出现](#f16-配对建立了一个没有任务目录的-worker错误推迟到第一次派单才出现)
   - [F17. 设置路由**没有**来源校验，而设计文档从第一次提交就写着有](#f17-设置路由没有来源校验而设计文档从第一次提交就写着有)
+  - [F18. 审批窗口 88 秒且页面从不刷新：六次请求静默超时，操作者一次提示都没见过](#f18-审批窗口-88-秒且页面从不刷新六次请求静默超时操作者一次提示都没见过)
+  - [F19. 审计把**程序调用**记成 `by=human`](#f19-审计把程序调用记成-byhuman)
+  - [F20. 从机沙箱要求任务目录授予 WRITE_OWNER，继承来的 Modify 不够 —— 整台从机的 shell 全废](#f20-从机沙箱要求任务目录授予-write_owner继承来的-modify-不够--整台从机的-shell-全废)
+  - [F21. 沙箱里 GUI 程序起不来：explorer 0xC0000142、notepad 创建后即消失、`start` 报 Access denied](#f21-沙箱里-gui-程序起不来explorer-0xc0000142notepad-创建后即消失start-报-access-denied)
 - [G. 需求本身的坑](#g-需求本身的坑)
   - [G1. "主屏必须是虚拟屏" —— 一条忠实实现后让机器无法登录的要求](#g1-主屏必须是虚拟屏--一条忠实实现后让机器无法登录的要求)
 - [这些教训的共同形状](#这些教训的共同形状)
@@ -2970,6 +2974,173 @@ FAIL  a cross-site text/plain POST is refused -- status=400 {"ok":false,"error":
 # G. 需求本身的坑
 
 前六类都是"实现没做到要求"。这一类相反：**要求本身是错的**，而且实现得越忠实，坏得越彻底。
+
+## F18. 审批窗口 88 秒且页面从不刷新：六次请求静默超时，操作者一次提示都没见过
+
+**现象**
+
+用户在跑完一个真机任务后说了一句：**"核心问题是我真的没见过权限审批提示。"** 审计文件
+（`~/.dsh/storages/dsh-plugin-remote-use/audit.jsonl`）当时一共 7 行：
+
+| 时间 | 结果 | 谁决定的 |
+|---|---|---|
+| 10-13 08:55:22 / 08:57:09 / 08:59:08 / 09:01:44 / 09:03:22 | `reject-once` | **`by=timeout`** |
+| 10-14 10:46:28 | `reject-once` | **`by=timeout`**（那次 Inno Setup 任务的升级请求） |
+| 10-13 03:42:24 | `allow-once` | `by=human`（其实是 harness 探针，见 F19） |
+
+**也就是说：机制一直在工作，而人从来没看见过它。** 那 5 次集中在 8 分钟内、约每 2 分钟一次，
+每次都老老实实排队、等满窗口、被拒。
+
+**根因（三件事叠加，等于功能不存在）**
+
+1. **窗口只有 ≤88 秒。** 队列预算 = `approvalTimeoutMs − QUEUE_LEAD_MS(2000)`；到点即
+   `#settle('reject-once','timeout')`，**并把条目从 `pending` 里删掉** —— 晚来的人点不了，
+   `decide()` 会回 `no pending approval`。
+2. **设置页从不刷新自己。** `client.js` 只在**挂载时**与**你自己的操作之后**调 `refresh()`，
+   全文没有 `setInterval`。于是那一行只有在你"恰好停在该页且恰好重新加载"时存在。
+3. **没有任何推送。** 入队只改一个页面片段。
+
+**为什么两天都没发现**
+
+每个部件单独看都是"正常工作"：排队✓ 等待✓ 超时按拒绝✓ 审计留痕✓。失败以**成功的形式**出现 ——
+和本项目最贵的那类缺陷同形（见文末"最后一句"）。而"任务为什么失败"的答案只存在于 JSONL 文件里，
+页面上一个字都没有。
+
+**修复**
+
+| 改动 | 落点 |
+|---|---|
+| 页面**可见时**每 2.5 秒轮询快照（隐藏时不轮询） | `lib/client.js` |
+| 入队即桌面通知，**在 await 之前**发（await 持续整个预算，之后发等于事后通知） | `lib/core/desktop-notify.js` + `announceApproval()` |
+| 默认窗口 90s → **180s** | `index.js` / `acp-bridge.js` / `client.js` 的四处默认值 + 现网设置 |
+| 审计里的超时行在页面上单列「有 N 件请求因无人应答被拒」 | `AuditLog.missed()/missedCount` + 审批组 |
+| 模型侧：运行时上下文注入 `APPROVALS WAITING ON A HUMAN (n)`（工具/档位/剩余秒/该做什么） | `approvalNotice()` |
+
+**教训**
+
+`DESIGN.md` §8.6「待审批的主动通知」写了两天，而代码里只有"等人然后超时"——
+**一个只在特定页面、特定时刻可见的状态，等于不存在。** 判断一个"通知"是否真的存在，
+标准不是"有没有这个字段"，而是**"人不在那个页面时，他会不会知道"**。
+
+---
+
+## F19. 审计把**程序调用**记成 `by=human`
+
+**现象**
+
+审计里唯一一行 `allow-once` 写着 `by=human`。它不是人批的：那是本仓库自己的 harness 通过
+设置路由 `approvals.decide` 批准的（`prototype/host/plugin-live.mjs` 的审批探针）。
+`ApprovalQueue.decide()` 里**硬编码**了 `'human'` —— 而页面和脚本走的是**同一个路由**。
+
+**为什么这比"少一个字段"严重**
+
+审计的全部价值就是回答"谁批的"。把脚本记成人，是在**最需要可信的地方**失真；它还让
+"人类真的在监督"这个结论**无法被验证** —— 而"人在环里"正是这套设计的核心主张。
+
+**修复**
+
+`decide(id, decision, by)`，`by` 默认 **`'api'`**（保守：证明不了是人点的，就不记成人）；
+路由用 `requestProvenance(req)` 判定 —— 浏览器对**每个** POST 都带 `Origin`（`crossSitePostProblem`
+依赖的正是这个事实），有则 `'page'`，无/`null` 则 `'api'`。审计的 `gate` 也跟着区分：
+超时不再写成 `gate: 'human'`。
+
+**这是证据，不是边界**：脚本也能伪造 `Origin`。所以 `page` 只用来**读起来对**，绝不能拿来
+做授权判断 —— 代码注释与测试都写明了这一点。
+
+**教训**
+
+来源字段的**默认值要选保守的那个**。"人"必须是能被证明的，而不是方便时的假设。
+
+---
+
+## F20. 从机沙箱要求任务目录授予 WRITE_OWNER，继承来的 Modify 不够 —— 整台从机的 shell 全废
+
+**现象**
+
+用户把从机的任务目录换到 `E:\WorkSpace\dsh-remote` 之后派了一个真机任务，从机 agent 报告：
+每一步 `pwsh` 都被拒 ——
+
+```
+sandbox mode "workspace-write" is requested but no sandbox backend is usable on this host;
+refusing to run the command unconfined.
+Runner failure: windows-acl-run: SetNamedSecurityInfoW failed (Win32 5):
+                grantWrite(E:\WorkSpace\dsh-remote)
+```
+
+而**文件后端仍然可用**（`read`/`glob` 能读工作区）—— 所以从机 agent 正确地把它与"路径写错"
+区分开了，这个指纹很重要。
+
+**根因（读源码得到，不是猜的）**
+
+沙箱给任务目录**写强制标签**，而标签存在 SACL 里，需要 **WRITE_OWNER**；
+owner 隐式权限只覆盖 `READ_CONTROL` 与 `WRITE_DAC`。源码原话
+（`dsh-sandbox-windows-acl/lib/types-*.js:583`）：
+
+> The directory **must be owned by the caller AND grant WRITE_OWNER** … a **Full-control workspace**
+> satisfies both.
+
+`E:\WorkSpace` 从盘根只继承到 `Authenticated Users:(I)(M)`（**Modify，不含 WO**），所以 apply 失败。
+而旧目录 `C:\dsh-remote\p0work` **能用，只因为它带着一次（提权）成功运行留下的三件套**
+（能力 SID 的 `(W,D,DC)` + `Everyone:(CI)(DENY)(DC)` + Low 标签），命中**幂等快路径**直接返回
+（`:595`），根本不需要 apply。
+
+**先猜错的三个假设（全错，记下来）**
+
+| 假设 | 反证 |
+|---|---|
+| 目录所有者不对 | 能用的 `p0work` 归 `BUILTIN\Administrators`，失败的归 `sheng` —— **正好相反** |
+| 卷类型（ReFS/VHD） | `fsutil fsinfo volumeinfo E:` → 普通 **NTFS 固定卷** |
+| 配置缺失（runnerCommand / shim） | acp profile 里 `runnerCommand` 与 `shim.mjs` 都在，且 shim 确实跑起来了（它转发了那个 Win32 错误） |
+
+**修复**
+
+```powershell
+# 账户就是"从机上跑 DSH 的那个" —— 这里按约定写成占位符，别把真名写进仓库
+icacls "E:\WorkSpace\dsh-remote" /grant "<任务账户>:(OI)(CI)F"   # 回滚: /remove:g "<任务账户>"
+```
+
+该目录的所有者就是那个用户，所以这正是文档所说的 **Full-control workspace**，不是削弱安全。
+修复后立刻：shell 可用（解压出 91 个文件），且目录上出现沙箱写入的痕迹 → **端到端确认**。
+
+**教训**
+
+三个"看起来最像"的假设全错，答案在**源码里那一句前置条件**。以及：报错发生在环境层时，
+先用"文件后端能用而 shell 不能用"这个指纹分清是**命令错**还是**环境不允许** ——
+从机 agent 当时就是这么分的，这一步做得对。
+
+---
+
+## F21. 沙箱里 GUI 程序起不来：explorer 0xC0000142、notepad 创建后即消失、`start` 报 Access denied
+
+**现象（同一台从机、同一策略、同一次任务）**
+
+| 探测 | 结果 |
+|---|---|
+| 解压 91 个文件（shell 写入） | ✅ 成功 —— 所以问题不在"沙箱整体不可用" |
+| `Start-Process notepad.exe` | 返回 **PID 5076**，几秒后进程**消失** |
+| `cmd /c start "" <目录>` | `$LASTEXITCODE=1`，stderr = **`Access is denied.`** |
+| `explorer.exe` | 弹 `explorer.exe - Application Error 应用程序无法正常启动(0xc0000142)` |
+| 带主窗口的进程（从机侧两次复核） | **0 个** |
+| 主机截图 | 除从机自己的 DSH 窗口外，**没有任何 GUI 窗口** |
+
+**为什么这是最要紧的一条**
+
+**GUI 自动化放到从机上跑，正是这个插件存在的理由。** 而受限令牌下的 GUI 初始化失败
+（0xC0000142，与 DESIGN §14.2 记的同源）意味着"最该跑到从机上的那类任务"恰好跑不了。
+F14 曾记录 `winver.exe` **能**显示 —— 所以边界不是"所有 GUI 都起不来"：记事本在 Win11 是
+Store 包装、explorer 是外壳进程，两者都有各自的失败机理，**定论需要一次纯 Win32 GUI 的对照实验**。
+
+**两个副产品（都会误导取证）**
+
+1. **那张错误对话框不随任务进程树被清理。** F14 说"任务结束后它启动的 GUI 进程会被一起清理"，
+   但系统错误报告对话框**不属于任务子树**：打断两个任务之后它仍在桌面上，而 `WerFault.exe` 与
+   `notepad.exe` 都不在进程表里 —— 只能人工点「确定」。**这是 F14 漏掉的一类残留。**
+2. **在 Session 0 里查 Session 2 的窗口 = 又一个 D9。** 我的 SSH 落在 Session 0，而 GUI 在
+   Session 2，于是 `Get-Process | Where MainWindowTitle` **全程报空**——包括那张明明在屏幕上的
+   错误对话框。差一点据此得出"没有窗口"的结论。**任务自己（跑在 Session 2）能看到窗口标题，
+   我的探针不能**；探针与它所测量的对象必须在同一会话（D9）。
+
+---
 
 ## G1. "主屏必须是虚拟屏" —— 一条**忠实实现后让机器无法登录**的要求
 

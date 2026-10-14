@@ -38,22 +38,44 @@ test('a request stays pending until a human decides, then resolves with the opti
   assert.equal(entry.requiredTier, 'danger-full-access')
   assert.equal(queue.pendingCount, 1)
 
-  const result = queue.decide(entry.id, 'allow')
+  const result = queue.decide(entry.id, 'allow', 'page')
   assert.equal(result.ok, true)
   assert.equal(result.optionId, 'allow-once')
   assert.equal(await answer, 'allow-once')
   assert.equal(queue.pendingCount, 0)
   assert.equal(settled.length, 1)
-  assert.equal(settled[0].by, 'human')
+  assert.equal(settled[0].by, 'page')
 })
 
-test('an explicit denial resolves as reject-once and is recorded as a human decision', async () => {
+test('a decision with no provenance is recorded as an API call, never as a person', async () => {
+  // The live trail's only `allow-once` row came from this repo's own harness and read `by=human`,
+  // because `decide()` hardcoded it. A caller that cannot prove a click must not be recorded as one.
   const { queue, settled } = makeQueue()
   const answer = queue.request(ASK)
-  queue.decide(queue.list()[0].id, 'deny')
+  queue.decide(queue.list()[0].id, 'allow')
+  assert.equal(await answer, 'allow-once')
+  assert.equal(settled[0].by, 'api')
+
+  const page = makeQueue()
+  const second = page.queue.request(ASK)
+  page.queue.decide(page.queue.list()[0].id, 'allow', 'page')
+  assert.equal(await second, 'allow-once')
+  assert.equal(page.settled[0].by, 'page')
+
+  const unknown = makeQueue()
+  const third = unknown.queue.request(ASK)
+  unknown.queue.decide(unknown.queue.list()[0].id, 'allow', 'whatever')
+  assert.equal(await third, 'allow-once')
+  assert.equal(unknown.settled[0].by, 'api', 'only the exact string "page" may claim a page')
+})
+
+test('an explicit denial resolves as reject-once and is recorded with its source', async () => {
+  const { queue, settled } = makeQueue()
+  const answer = queue.request(ASK)
+  queue.decide(queue.list()[0].id, 'deny', 'page')
   assert.equal(await answer, 'reject-once')
   assert.equal(settled[0].optionId, 'reject-once')
-  assert.equal(settled[0].by, 'human')
+  assert.equal(settled[0].by, 'page')
 })
 
 test('NOBODY answering means refusal -- the queue never allows on its own', async () => {

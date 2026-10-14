@@ -123,6 +123,9 @@ window.__ModuleLoader__.load({
       approvalsUnavailable: '此构建没有审批队列，引擎无法自行裁定的请求会被直接拒绝。',
       approvalsNote: '审阅引擎无法自行裁定的请求会停在这里等待，而不是直接失败；超过下面的时限仍未处理则按拒绝处理 —— 所以"放行"永远是一个明确的动作。',
       approvalsBudget: '每个请求最多等待 {s} 秒',
+      approvalsMissed: '有 {n} 件请求因无人应答被拒',
+      approvalsMissedNote: '这些请求等过、但没人来得及处理，于是按拒绝处理了。列在这里是为了让"错过"事后也看得见 —— 它们不会自己消失。',
+      colSettled: '处理时间',
       colTool: '工具',
       colTier: '所需档位',
       colWaited: '已等待',
@@ -165,7 +168,9 @@ window.__ModuleLoader__.load({
       auditNone: '尚无裁定记录。',
       auditNote: '追加写入，位置：{p}',
       auditByEngine: '引擎',
-      auditByHuman: '你',
+      auditByPage: '你在设置页点的',
+      auditByApi: '程序调用（脚本/API）',
+      auditByHuman: '人（旧记录：来源未区分）',
       auditByTimeout: '超时未处理',
       auditByNoAnswerer: '无人可问',
       auditByDisposed: '插件已卸载',
@@ -306,6 +311,9 @@ window.__ModuleLoader__.load({
       approvalsUnavailable: 'This build has no approval queue, so a request the engine cannot justify is refused outright.',
       approvalsNote: 'The review engine refuses anything it cannot justify on its own. Those requests wait here instead of failing, until the budget expires \u2014 and expiry is a refusal, so allowing one is always an explicit act.',
       approvalsBudget: 'Each waits up to {s}s',
+      approvalsMissed: '{n} request(s) were refused because nobody answered',
+      approvalsMissedNote: 'These waited and nobody got to them, so they were refused. They are listed here so a miss stays visible after the fact \u2014 they do not disappear on their own.',
+      colSettled: 'Settled',
       colTool: 'Tool',
       colTier: 'Required',
       colWaited: 'Waited',
@@ -348,7 +356,9 @@ window.__ModuleLoader__.load({
       auditNone: 'No decisions recorded yet.',
       auditNote: 'Append-only, at {p}',
       auditByEngine: 'engine',
-      auditByHuman: 'you',
+      auditByPage: 'you, on the settings page',
+      auditByApi: 'a script/API call',
+      auditByHuman: 'a person (legacy row: source not distinguished)',
       auditByTimeout: 'expired unanswered',
       auditByNoAnswerer: 'nobody to ask',
       auditByDisposed: 'plugin unloaded',
@@ -541,6 +551,16 @@ window.__ModuleLoader__.load({
     }
 
     const TERMINAL_STATES = ['completed', 'error', 'aborted', 'cancelled']
+
+    /**
+     * How often the settings page re-reads the snapshot while it is visible.
+     *
+     * Sized against the approval budget, not against taste: a request may only be answerable for
+     * the configured window (180s by default), so a row that takes much longer than a couple of
+     * seconds to appear eats into the time a person has to react. `refresh()` touches only the
+     * snapshot, so this cannot disturb a half-filled form or an in-flight action.
+     */
+    const APPROVAL_POLL_MS = 2500
 
     function WorkerCard(props) {
       const { t, row, busy, onAction, onEdit, onDelete } = props
@@ -751,7 +771,7 @@ window.__ModuleLoader__.load({
       const { t, settings, busy, onSave } = props
       const [form, setForm] = React.useState({
         requiredTier: settings.requiredTier ?? 'workspace-write',
-        approvalTimeoutMs: settings.approvalTimeoutMs ?? 90000,
+        approvalTimeoutMs: settings.approvalTimeoutMs ?? 180000,
         heartbeatMs: settings.heartbeatMs ?? 15000,
         keepShots: settings.keepShots ?? 20,
         delegationPolicy: settings.delegationPolicy ?? '',
@@ -791,7 +811,7 @@ window.__ModuleLoader__.load({
             type: 'button', className: 'ru-btn', disabled: busy !== '',
             onClick: () => onSave({
               requiredTier: form.requiredTier,
-              approvalTimeoutMs: Number(form.approvalTimeoutMs) || 90000,
+              approvalTimeoutMs: Number(form.approvalTimeoutMs) || 180000,
               heartbeatMs: Number(form.heartbeatMs) || 0,
               keepShots: Number.isFinite(Number(form.keepShots)) ? Number(form.keepShots) : 20,
               // An empty string is a real choice -- it switches the injected prompt off while
@@ -1033,6 +1053,22 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { void refresh() }, [refresh])
 
+      // THE PAGE NEVER USED TO REFRESH ITSELF. Measured 2026-10-14: six approval requests expired
+      // unanswered and the operator had never seen a prompt -- the snapshot was read on mount and
+      // after their own actions, so a request that arrived while this page sat open stayed
+      // invisible unless they happened to reload inside a ~88 second window.
+      //
+      // Poll only while the page is VISIBLE: a background tab polling forever is a cost with no
+      // reader, and the one thing that must be timely here is what a person is looking at.
+      React.useEffect(() => {
+        if (typeof document === 'undefined' || typeof setInterval !== 'function') return undefined
+        const timer = setInterval(() => {
+          if (document.visibilityState !== 'visible') return
+          void refresh()
+        }, APPROVAL_POLL_MS)
+        return () => clearInterval(timer)
+      }, [refresh])
+
       /** Describe what a save actually did, so "nothing seemed to happen" is impossible. */
       const describeApply = React.useCallback((applied, settings) => {
         const a = Array.isArray(applied?.added) ? applied.added.length : 0
@@ -1116,6 +1152,10 @@ window.__ModuleLoader__.load({
       /** Turn a `by` value from the audit trail into words. */
       const describeBy = React.useCallback((by) => {
         if (by === 'engine') return t('auditByEngine')
+        // `page` and `api` replaced the single `human`, which a harness's own decision also got.
+        // A row written before that split still says `human` and cannot be told apart any more.
+        if (by === 'page') return t('auditByPage')
+        if (by === 'api') return t('auditByApi')
         if (by === 'human') return t('auditByHuman')
         if (by === 'timeout') return t('auditByTimeout')
         if (by === 'no-answerer') return t('auditByNoAnswerer')
@@ -1252,10 +1292,37 @@ window.__ModuleLoader__.load({
       // Approvals waiting on the operator, and the trail of what was decided. `available` is
       // distinct from an empty list on purpose: "nothing is waiting" and "this build cannot
       // ask" are different facts and the page must not conflate them.
-      const approvals = snapshot?.approvals ?? { available: false, pending: [], recent: [], timeoutMs: 0 }
+      const approvals = snapshot?.approvals ?? { available: false, pending: [], recent: [], missed: [], missedCount: 0, timeoutMs: 0 }
       const pending = Array.isArray(approvals.pending) ? approvals.pending : []
+      // Refusals nobody answered. Read from the HOST, which derives them from the append-only
+      // trail, so they survive a restart; the queue's in-memory history would not.
+      const missed = Array.isArray(approvals.missed) ? approvals.missed : []
+      const missedCount = Number.isFinite(Number(approvals.missedCount)) ? Number(approvals.missedCount) : missed.length
       const audit = snapshot?.audit ?? { available: false, path: '', error: '', recent: [] }
       const recentAudit = Array.isArray(audit.recent) ? audit.recent : []
+
+      // Refusals that were never seen. Kept in the SAME group as the live requests on purpose: the
+      // operator's question after "why did that task fail?" is "was I asked?", and a list one group
+      // further down with no heading of its own does not answer it.
+      const missedBlock = missed.length === 0 ? null : h('div', { className: 'ru-missed' },
+        h('p', { className: 'ru-note warn' }, fmt(t('approvalsMissed'), { n: missedCount })),
+        h('p', { className: 'ru-note dim' }, t('approvalsMissedNote')),
+        h('div', { className: 'ru-scroll' },
+          h('table', { className: 'ru-table' },
+            h('thead', null, h('tr', null,
+              h('th', null, t('colSettled')),
+              h('th', null, t('colTool')),
+              h('th', null, t('colTier')),
+              h('th', null, t('colWaited')),
+              h('th', null, t('colWorker')))),
+            h('tbody', null, missed.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
+              h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
+              h('td', { className: 'ru-mono' }, String(row.toolName ?? '\u2014')),
+              h('td', null, String(row.requiredTier ?? '\u2014')),
+              h('td', null,
+                `${Math.round(Number(row.waitedMs ?? 0) / 1000)}s `,
+                h('span', { className: 'ru-dim' }, describeBy(row.by))),
+              h('td', null, String(row.peerId ?? ''))))))))
 
       return h('div', { className: 'ru-page' },
         h('style', null, CSS),
@@ -1457,7 +1524,8 @@ window.__ModuleLoader__.load({
                         onClick: () => void onDecide(id, 'deny'),
                       }, t('btnDeny')),
                       h('span', { className: 'ru-dim' }, `${t('colWaited')} ${Math.round(Number(row.ageMs ?? 0) / 1000)}s`)))
-                })))),
+                })),
+              missedBlock)),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupAudit')),
