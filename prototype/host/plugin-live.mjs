@@ -16,11 +16,13 @@
  *   node plugin-live.mjs --url ws://192.168.1.101:7331 --token <secret> --cwd C:\dsh-remote\p0work
  */
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const INSTALLED = 'C:\\Users\\you\\.dsh\\profiles\\desktop\\node_modules\\dsh-plugin-remote-use\\lib\\index.js'
+// DERIVED FROM THE ENVIRONMENT: the literal that used to be here named one developer's profile
+// directory, so the harness ran on that machine and nowhere else (the S14/S15 defect again).
+const INSTALLED = join(process.env.USERPROFILE ?? homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-plugin-remote-use', 'lib', 'index.js')
 
 /**
  * Isolate the DSH home BEFORE importing the plugin, so `--url` is actually the worker under test.

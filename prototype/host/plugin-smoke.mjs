@@ -18,7 +18,7 @@
  * how the host will load it.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -38,7 +38,12 @@ const TEST_HOME = mkdtempSync(join(tmpdir(), 'plugin-smoke-home-'))
 process.env.DSH_HOME = TEST_HOME
 process.on('exit', () => { try { rmSync(TEST_HOME, { recursive: true, force: true }) } catch { /* best effort */ } })
 
-const INSTALLED = 'C:\\Users\\you\\.dsh\\profiles\\desktop\\node_modules\\dsh-plugin-remote-use\\lib\\index.js'
+// DERIVED FROM THE ENVIRONMENT, not written out. The literal that used to be here named one
+// developer's profile directory, so the harness ran on that machine and nowhere else -- the same
+// defect as the hardcoded paths in `selfcheck.ps1` (S14/S15), and found the same way: by the script
+// failing somewhere else. `USERPROFILE` is what Windows sets; `homedir()` is the fallback.
+const HOME = process.env.USERPROFILE ?? homedir()
+const INSTALLED = join(HOME, '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-plugin-remote-use', 'lib', 'index.js')
 const entryPath = process.argv[2] ?? INSTALLED
 // Windows: the ESM loader only accepts file:// URLs for absolute paths.
 const entry = pathToFileURL(entryPath).href

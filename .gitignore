@@ -86,3 +86,5 @@ packages/dsh-plugin-remote-use/slave/selfcheck.txt
 packages/dsh-plugin-remote-use/slave/shots/
 packages/dsh-plugin-remote-use/slave/pairing.txt
 packages/dsh-plugin-remote-use/slave/screenshot-report.txt
+# Contains the literal values being scrubbed -- committing it would undo the scrub.
+.research/privacy-replacements.txt

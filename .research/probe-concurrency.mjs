@@ -18,7 +18,7 @@
 // Usage: node .research/probe-concurrency.mjs <urlA> <tokenA> <cwdA> <urlB> <tokenB> <cwdB>
 //        (pass the same url/token twice for the single-worker case)
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -53,7 +53,7 @@ const check = (label, ok, detail = '') => {
 // ---------------------------------------------------------------------------
 // Mount the REAL plugin against a stand-in context, exactly as plugin-live does.
 // ---------------------------------------------------------------------------
-const ENTRY = 'C:\\Users\\you\\.dsh\\profiles\\desktop\\node_modules\\dsh-plugin-remote-use\\lib\\index.js'
+const ENTRY = join(process.env.USERPROFILE ?? homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-plugin-remote-use', 'lib', 'index.js')
 const mounted = { providers: [], tools: [], guards: [], commands: new Map(), listeners: new Map(), routes: [], logs: [] }
 const effectHost = () => (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} }
 const makeCtx = () => ({
