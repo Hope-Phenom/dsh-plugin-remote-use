@@ -90,7 +90,7 @@ export class RelaySupervisor {
     // relay's own designed path (`--cmd-file`) and it exists for the same reason this module
     // builds an argv array: the install directory contains a space, and every attempt to pass
     // it as a string has been split somewhere along the way -- once already, as
-    // `Cannot find module 'C:\Users\you\AppData\Local\Programs\DeepSeek'`.
+    // `Cannot find module 'C:\Users\<user>\AppData\Local\Programs\DeepSeek'`.
     const specFile = join(this.tempDir, `acp-spec-${process.pid}-${port}.json`)
     try {
       mkdirSync(this.tempDir, { recursive: true })

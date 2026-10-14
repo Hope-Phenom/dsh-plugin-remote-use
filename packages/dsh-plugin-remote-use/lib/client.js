@@ -184,7 +184,7 @@ window.__ModuleLoader__.load({
       fieldUrl: '中继地址',
       // Recommends a HOSTNAME, not an IP.
       //
-      // It used to show `ws://192.168.1.101:7331` -- one particular machine's address, from DHCP.
+      // It used to show a hardcoded address -- one particular machine's, from DHCP.
       // An operator following that hint writes an address that rots the next time the worker
       // reboots and gets a different lease, and the symptom is "the worker is unreachable", which
       // looks exactly like the worker being powered off. A name survives that, as long as the

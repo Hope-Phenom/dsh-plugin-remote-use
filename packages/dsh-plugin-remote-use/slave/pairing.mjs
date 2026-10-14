@@ -1,7 +1,7 @@
 /**
  * The pairing string: everything the master needs to reach one worker, in one paste.
  *
- * WHY IT EXISTS: pairing meant typing `ws://192.168.1.101:7331` and a 40-character bearer
+ * WHY IT EXISTS: pairing meant typing an address literal and a 40-character bearer
  * token by hand, from a value the operator had to go and read off the other machine. That is
  * slow and gets a character wrong about as often as it is attempted.
  *

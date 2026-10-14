@@ -165,7 +165,7 @@ Add-Check 'S12' 'console QuickEdit off' 'blocking' $(if ("$qe" -eq '0') { 'pass'
 # The path is DERIVED, not hardcoded -- but "derive it from $env:LOCALAPPDATA" is NOT enough, and
 # getting that wrong once already is why this comment is long.
 #
-# The history: it used to be the literal 'C:\Users\worker\...', correct on exactly one machine. The
+# The history: it used to be a literal path under one user's profile, correct on exactly one machine. The
 # first fix derived it from the environment, which is correct for an interactive run and WRONG for
 # the other mode this script has -- a boot check under a SYSTEM scheduled task, where
 # $env:LOCALAPPDATA points at C:\Windows\system32\config\systemprofile and no candidate matches.

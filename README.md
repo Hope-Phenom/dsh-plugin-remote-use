@@ -57,7 +57,14 @@ npm install --prefix packages/dsh-plugin-remote-use/slave
 
 > 漏掉第二条时 `tools/deploy-slave.ps1` 会**拒绝执行并给出修复命令** —— 它不会拷一个跑不起来的中继过去。
 
-然后把包放进某个 profile 的 `node_modules`（开发时用 `link:` 指向本仓库），**并在同一个 profile 的补丁层里加两类条目**。
+然后把包放进某个 profile 的 `node_modules`，**并在同一个 profile 的补丁层里加两类条目**。
+
+```powershell
+# 装到某个 profile 里（DSH 从 profile 的 node_modules 解析插件）
+npm install --prefix "$env:USERPROFILE\.dsh\profiles\desktop" dsh-plugin-remote-use
+
+# 或者在开发时用 link: 指向本仓库
+```
 
 <details>
 <summary><code>%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml</code> 里要加什么</summary>
@@ -342,4 +349,4 @@ node tools\arm-loopback-worker.mjs                    # 宣告一行 JSON，含 
 
 ## 许可
 
-（待补充）
+[MIT](LICENSE) © Hope.Phenom

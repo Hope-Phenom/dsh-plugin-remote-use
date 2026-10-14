@@ -1,12 +1,17 @@
 {
   "name": "dsh-plugin-remote-use",
   "version": "0.1.0",
-  "private": true,
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
+  "license": "MIT",
   "author": "Hope.Phenom <hope.phenom@foxmail.com>",
+  "homepage": "https://github.com/OWNER/dsh-plugin-remote-use",
   "repository": {
     "type": "git",
-    "url": "git@github.com:OWNER/dsh-plugin-remote-use.git"
+    "url": "git@github.com:OWNER/dsh-plugin-remote-use.git",
+    "directory": "packages/dsh-plugin-remote-use"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/dsh-plugin-remote-use/issues"
   },
   "keywords": [
     "dsh",

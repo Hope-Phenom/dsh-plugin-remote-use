@@ -6,7 +6,7 @@
  *
  *   * The install directory contains a space (`...\Programs\DeepSeek Harness`). Building a
  *     command line and handing it to `Start-Process -ArgumentList` split it, and node reported
- *     `Cannot find module 'C:\Users\you\AppData\Local\Programs\DeepSeek'` -- an error that points
+ *     `Cannot find module 'C:\Users\<user>\AppData\Local\Programs\DeepSeek'` -- an error that points
  *     at the module system while the actual fault is a missing quote.
  *   * `dsh.cmd` is a shim, and Node refuses to spawn a `.cmd` without a shell (EINVAL); asking
  *     `cmd /c` to run it loses quotes through the PowerShell -> node hand-off.

@@ -67,8 +67,82 @@ test('no shipped script hardcodes a particular user profile path', () => {
   assert.deepEqual(offenders, [], `a worker script names a specific user's profile:\n${offenders.join('\n')}`)
 })
 
-test('the worker self-check derives its install and credential paths from the environment', () => {
-  // Named explicitly rather than left to the scan above, so the intent survives a refactor of the
+// ---------------------------------------------------------------------------
+// PUBLISHING: what a reader of the tarball can see
+//
+// The guard above deliberately SKIPS comments ("a comment that quotes the bug it fixed is not the
+// bug"). That is the right rule for code, and the wrong rule for a published package: a comment
+// ships. Every file in `files` is readable by anyone who runs `npm view dsh-plugin-remote-use`, so
+// the author's LAN subnet, machine names and usernames are disclosures even though none of them is
+// a credential.
+//
+// This is not a secret scan -- that is a separate, manual step before the first publish. It is a
+// guard against re-introducing the specific literals that were genericised, which is the failure
+// mode this project keeps finding: the fix is applied and nothing stops it coming back.
+// ---------------------------------------------------------------------------
+
+/** Every file the tarball carries, excluding third-party dependencies. */
+function shippedTextFiles() {
+  const out = []
+  const roots = [join(PKG_ROOT, 'lib'), join(PKG_ROOT, 'locale'), join(PKG_ROOT, 'assets')]
+  for (const root of roots) if (existsSync(root)) out.push(...listFiles(root))
+  out.push(join(PKG_ROOT, 'cordis.patch.yml'), join(PKG_ROOT, 'package.json'), join(PKG_ROOT, 'README.md'))
+  for (const name of readdirSync(SLAVE)) {
+    if (/\.(mjs|ps1)$/u.test(name)) out.push(join(SLAVE, name))
+  }
+  return out.filter((f) => existsSync(f) && statSync(f).isFile())
+}
+
+test('no shipped file names this author\'s machines, network or users -- comments included', () => {
+  const FORBIDDEN = [
+    { pattern: /192\.168\.1\./gu, what: 'the author\'s LAN subnet' },
+    // The generic CIDRs in `net-address.mjs` (`192.168.0.0/16`) must keep passing: the check is for
+    // one machine's address, not for private-range arithmetic.
+    { pattern: /worker-(?:sider|sheng)/giu, what: 'the author\'s machine name' },
+    { pattern: /C:\\Users\\(?:dev|sheng)\b/gu, what: 'a developer\'s profile directory' },
+  ]
+  const offenders = []
+  for (const file of shippedTextFiles()) {
+    const text = readFileSync(file, 'utf8')
+    for (const { pattern, what } of FORBIDDEN) {
+      for (const m of text.matchAll(pattern)) {
+        const line = text.slice(text.lastIndexOf('\n', m.index) + 1, text.indexOf('\n', m.index)).trim()
+        offenders.push(`${file.slice(PKG_ROOT.length + 1)}: ${what} (${m[0]}) -- ${line.slice(0, 70)}`)
+      }
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `a published file discloses a machine-specific literal:\n${offenders.join('\n')}`)
+})
+
+test('the package carries the licence it declares', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  assert.equal(pkg.license, 'MIT', 'package.json must declare the licence')
+  const inPackage = join(PKG_ROOT, 'LICENSE')
+  assert.ok(existsSync(inPackage), 'npm only picks up a LICENSE inside the package directory')
+  // Two copies exist because the repository root needs one too, and npm cannot reach outside the
+  // package. A drift between them would put one licence on the repository and another in the
+  // tarball, so they are compared rather than assumed.
+  const rootLicence = join(PKG_ROOT, '..', '..', 'LICENSE')
+  if (existsSync(rootLicence)) {
+    assert.equal(readFileSync(inPackage, 'utf8'), readFileSync(rootLicence, 'utf8'),
+      'the package LICENSE and the repository LICENSE have drifted apart')
+  }
+})
+
+test('the package is publishable and carries a README for its npm page', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  assert.notEqual(pkg.private, true, '`private: true` silently blocks npm publish')
+  assert.ok(typeof pkg.homepage === 'string' && pkg.homepage.startsWith('http'), 'npm shows homepage')
+  assert.ok(pkg.bugs && typeof pkg.bugs.url === 'string', 'npm shows a bugs link')
+  // npm renders the README FROM THE PACKAGE DIRECTORY: the repository README is outside it, so
+  // without this file the package page says "no README" no matter how good the root one is.
+  const readme = join(PKG_ROOT, 'README.md')
+  assert.ok(existsSync(readme), 'the package needs its own README for its npm page')
+  assert.ok(readFileSync(readme, 'utf8').length > 400, 'a placeholder README is worse than none')
+})
+
+test('the worker self-check derives its install and credential paths from the environment', () => {  // Named explicitly rather than left to the scan above, so the intent survives a refactor of the
   // regex. These are the two checks that produced false blocking failures.
   const script = readFileSync(join(SLAVE, 'selfcheck.ps1'), 'utf8')
   assert.match(script, /Join-Path \$env:LOCALAPPDATA/u, 'S14 must use the current account install')
