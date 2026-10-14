@@ -109,14 +109,32 @@ npm install --prefix packages/dsh-plugin-remote-use/slave
 
 > 漏掉第二条时 `tools/deploy-slave.ps1` 会**拒绝执行并给出修复命令** —— 它不会拷一个跑不起来的中继过去。
 
-然后把包放进某个 profile 的 `node_modules`，**并在同一个 profile 的补丁层里加两类条目**。
+**通过 DSH 的插件管理器安装**（它一次完成装包、注册进 profile 的 `bundles`、启用）：
+
+```
+插件管理器 → 安装 → @hope_phenom/dsh-plugin-remote-use
+```
+
+<details>
+<summary>手动安装（插件管理器不好用时的退路）</summary>
 
 ```powershell
-# 装到某个 profile 里（DSH 从 profile 的 node_modules 解析插件）
-npm install --prefix "$env:USERPROFILE\.dsh\profiles\desktop" dsh-plugin-remote-use
-
-# 或者在开发时用 link: 指向本仓库
+# 装到某个 profile —— 这一步只把文件放进去
+npm install --prefix "$env:USERPROFILE\.dsh\profiles\desktop" @hope_phenom/dsh-plugin-remote-use
 ```
+
+⚠️ **光装不够**：还必须把包名加进该 profile 的 `dsh.profile.bundles` ✓，否则**不会被加载** ✗。
+profile 的 `package.json` 里那一节长这样（你已有的插件就是这么注册的 ✓）：
+
+```json
+"dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@hope_phenom/dsh-plugin-remote-use" ] } }
+```
+
+开发时也可以直接在 profile 的 `node_modules` 里放一个**指向本仓库的链接** ✓。
+
+</details>
+
+装完**重启 DSH**，然后在该 profile 的补丁层里加条目。
 
 <details>
 <summary><code>%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml</code> 里要加什么</summary>

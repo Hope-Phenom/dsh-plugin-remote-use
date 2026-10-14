@@ -14,11 +14,30 @@
 
 ## 安装
 
-```powershell
-npm install dsh-plugin-remote-use
+**通过 DSH 的插件管理器安装**（它能同时完成装包、注册到 profile 的 `bundles`、启用三件事）：
+
+```
+插件管理器 → 安装 → @hope_phenom/dsh-plugin-remote-use
 ```
 
-然后把包链接到某个 DSH profile，并在该 profile 的补丁层里加**两类**条目：
+装完**重启 DSH**。这就是全部 —— 插件管理器是普通用户装任何插件的那条路。
+
+<details>
+<summary>手动安装（插件管理器不好用时的退路）</summary>
+
+```powershell
+# 装到某个 profile（这一步只把文件放进去）
+npm install --prefix "$env:USERPROFILE\.dsh\profiles\<profile>" @hope_phenom/dsh-plugin-remote-use
+```
+
+**光装不够 —— 还必须把包名加进该 profile 的 `dsh.profile.bundles`**，否则它不会被加载。
+profile 的 `package.json` 长这样：
+
+```json
+"dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@hope_phenom/dsh-plugin-remote-use" ] } }
+```
+
+然后在该 profile 的补丁层里加**两类**条目：
 
 1. **插件配置** —— worker 列表（url / token / cwd）
 2. **每个 worker 一行工具行** —— `provider: remote-<worker id>`
@@ -26,8 +45,10 @@ npm install dsh-plugin-remote-use
 第二部分不能省：provider 是插件在运行时注册的，但**模型可见的工具行是静态装载器条目**，
 插件无法在运行时追加。
 
+</details>
+
 > **完整的安装步骤、可直接抄的 YAML、从机侧部署、安全模型与排查方法，见
-> [仓库 README](https://github.com/OWNER/dsh-plugin-remote-use#readme)。**
+> [仓库 README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme)。**
 > 这份文件只覆盖 npm 页面上必须说清楚的部分。
 
 ## 使用（速览）
@@ -71,10 +92,10 @@ npm install dsh-plugin-remote-use
 
 | | |
 |---|---|
-| [仓库 README](https://github.com/OWNER/dsh-plugin-remote-use#readme) | 完整安装、使用、运维 |
-| [设计文档](https://github.com/OWNER/dsh-plugin-remote-use/blob/master/docs/DESIGN.md) | 设计取舍与决策记录 |
-| [踩坑与教训](https://github.com/OWNER/dsh-plugin-remote-use/blob/master/docs/PITFALLS.md) | 开发中真实遇到的问题及**发现方式** |
-| [接口契约](https://github.com/OWNER/dsh-plugin-remote-use/blob/master/docs/INTERFACES.md) | 上游 API 与集成事实 |
+| [仓库 README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme) | 完整安装、使用、运维 |
+| [设计文档](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/DESIGN.md) | 设计取舍与决策记录 |
+| [踩坑与教训](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/PITFALLS.md) | 开发中真实遇到的问题及**发现方式** |
+| [接口契约](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/INTERFACES.md) | 上游 API 与集成事实 |
 
 ## 许可
 
