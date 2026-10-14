@@ -37,6 +37,8 @@
     "assets",
     "locale",
     "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
     "slave/*.mjs",
     "slave/*.ps1",
     "slave/node_modules"

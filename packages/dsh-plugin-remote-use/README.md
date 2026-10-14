@@ -1,102 +1,112 @@
-# dsh-plugin-remote-use
+# @hope_phenom/dsh-plugin-remote-use
 
-把 [DSH](https://www.deepseek.com/) 的任务委托给局域网里另一台已配对的**工作节点**执行，像调用子 Agent 一样驱动它。
+[中文说明 / Chinese: `README.zh.md`](README.zh.md)
 
-**解决什么问题**：GUI 自动化测试和"看屏幕才知道结果"的验证必须在一台真能操作鼠标键盘的机器上跑。
-在本机做就会**和操作者抢电脑**——抢焦点、抢光标、抢剪贴板。这个插件把那部分工作推到一台专门的节点上，
-任务的核心逻辑仍留在主机。
+Delegate [DSH](https://www.deepseek.com/) tasks to a paired **worker** on your LAN and drive it like a subagent.
+
+**What it solves.** GUI automation and any verification that only a screen can answer has to run on a
+machine that can really move a mouse and a keyboard. Doing that locally means **fighting the operator
+for their own computer** — stealing focus, the cursor, the clipboard. This plugin pushes that part of
+the work onto a dedicated node and keeps the reasoning on the master.
 
 ```text
-主机 DSH ── ACP over WebSocket ──▶ 从机中继 ──▶ 从机 DSH（在从机本地跑任务、截图、看 GUI）
-   │                                  ▲
-   └── 审批 / 审计 / 会话级开关 ────────┘
+master DSH ── ACP over WebSocket ──▶ worker relay ──▶ worker DSH (runs the task, screenshots, sees the GUI)
+    │                                    ▲
+    └── approvals / audit / per-session switch ──┘
 ```
 
-## 安装
+## Install
 
-**通过 DSH 的插件管理器安装**（它能同时完成装包、注册到 profile 的 `bundles`、启用三件事）：
+**Install it through DSH's plugin manager** — it does all three things at once: fetches the package,
+registers it in the profile's `bundles`, and enables it.
 
 ```
-插件管理器 → 安装 → @hope_phenom/dsh-plugin-remote-use
+Plugin manager → Install → @hope_phenom/dsh-plugin-remote-use
 ```
 
-装完**重启 DSH**。这就是全部 —— 插件管理器是普通用户装任何插件的那条路。
+Then **restart DSH**. That is the whole install: it is the same path any plugin takes.
 
 <details>
-<summary>手动安装（插件管理器不好用时的退路）</summary>
+<summary>Manual install (the fallback if the plugin manager will not cooperate)</summary>
 
 ```powershell
-# 装到某个 profile（这一步只把文件放进去）
+# Install into a profile -- this only puts the files there.
 npm install --prefix "$env:USERPROFILE\.dsh\profiles\<profile>" @hope_phenom/dsh-plugin-remote-use
 ```
 
-**光装不够 —— 还必须把包名加进该 profile 的 `dsh.profile.bundles`**，否则它不会被加载。
-profile 的 `package.json` 长这样：
+**Installing is not enough — the package name must also be added to that profile's
+`dsh.profile.bundles`,** or it will not be loaded. The profile's `package.json` looks like this:
 
 ```json
 "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@hope_phenom/dsh-plugin-remote-use" ] } }
 ```
 
-然后在该 profile 的补丁层里加**两类**条目：
+Then add **two kinds** of entry to that profile's patch layer:
 
-1. **插件配置** —— worker 列表（url / token / cwd）
-2. **每个 worker 一行工具行** —— `provider: remote-<worker id>`
+1. **The plugin's config** — the worker list (url / token / cwd)
+2. **One tool row per worker** — `provider: remote-<worker id>`
 
-第二部分不能省：provider 是插件在运行时注册的，但**模型可见的工具行是静态装载器条目**，
-插件无法在运行时追加。
+The second kind cannot be skipped. The provider is registered by the plugin at runtime, but the
+**model-facing tool row is a static loader entry**, and a plugin cannot append one at runtime.
 
 </details>
 
-> **完整的安装步骤、可直接抄的 YAML、从机侧部署、安全模型与排查方法，见
-> [仓库 README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme)。**
-> 这份文件只覆盖 npm 页面上必须说清楚的部分。
+> **Full instructions — copy-pasteable YAML, worker-side deployment, the security model and
+> troubleshooting — are in the
+> [repository README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme).**
+> This file covers only what an npm page has to make clear.
 
-## 使用（速览）
+## Use (the short version)
 
-1. **默认是关闭的。** 在需要用到工作节点的那个会话里输入：
+1. **It is off by default.** In the session that should be able to reach a worker, type:
 
    ```text
    /remote-use on
    ```
 
-   开关**按会话生效且不持久化**——重启后回到 off，新会话里远程工具不可见。
+   The switch is **per session and does not persist** — a restart puts it back to off, and in a new
+   session the remote tools are not visible.
 
-2. 让模型去做需要 GUI 的事。它会先调 `remote_selfcheck` 确认节点可用，再委托。
+2. Let the model do the work that needs a GUI. It will call `remote_selfcheck` first to confirm the
+   node is ready, and only then delegate.
 
-| 模型可见的工具 | 用途 |
+| Tool the model sees | What it is for |
 |---|---|
-| `remote_selfcheck` | 节点就绪报告。**委托前先调它**——未就绪的节点会被派单门禁拒绝 |
-| `remote_agents` | 查看任务进度 |
-| `remote_screenshot` | 抓节点屏幕并落盘到主机，然后用 `read_image` 看 |
-| `remote_interrupt` | 停止任务（协作式） |
+| `remote_selfcheck` | The node's readiness report. **Call it before delegating** — a node that is not ready is refused by the dispatch gate |
+| `remote_agents` | Task progress |
+| `remote_screenshot` | Capture the node's screen to the master, then look at it with `read_image` |
+| `remote_interrupt` | Stop a task (cooperative) |
 
-设置页（**设置 → 远程工作节点**）可以管理节点、处理**提权审批**、查看**审计留痕**、
-调整委派策略，以及把本机**布防为工作节点**（对称配对）。
+The settings page (**Settings → Remote work nodes**) manages nodes, handles **escalation approvals**,
+shows the **audit trail**, edits the delegation policy, and can **arm this machine as a worker**
+(symmetric pairing).
 
-## 安全模型（要点）
+## Security model (the essentials)
 
-- **默认关闭** —— 新会话不注入策略、远程工具在该会话内不可见
-- **沙箱必须真实生效** —— 沙箱无法被证明时**拒绝**启用 worker 模式，不是警告
-- **提权永不自动批准** —— `needsHuman` / `danger-full-access` 进人工审批队列，超时按拒绝
-- **凭据不回传浏览器** —— 页面只拿到掩码
-- 节点侧必须**真的登录进桌面**：锁屏时无法注入输入
+- **Off by default** — a new session injects no policy and cannot see the remote tools at all
+- **The sandbox must actually hold** — if confinement cannot be *proved*, worker mode is **refused**,
+  not warned about
+- **Escalation is never auto-approved** — `needsHuman` / `danger-full-access` go to a human queue, and
+  a timeout counts as a refusal
+- **Credentials never reach the browser** — the page only ever gets a mask
+- The node must be **genuinely logged in to a desktop**: input injection does not work on a locked screen
 
-## 运行要求
+## Requirements
 
 - Node ≥ 20
-- 主机与工作节点都装 DSH
-- 工作节点有一个**已解锁的交互式桌面会话**
-- 工作节点上运行 `slave/relay.mjs`（随包提供，含它需要的 `ws` 依赖）
+- DSH installed on the master and on the worker
+- The worker needs an **unlocked interactive desktop session**
+- The worker runs `slave/relay.mjs` (shipped in this package, together with the `ws` dependency it needs)
 
-## 文档
+## Documentation
 
 | | |
 |---|---|
-| [仓库 README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme) | 完整安装、使用、运维 |
-| [设计文档](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/DESIGN.md) | 设计取舍与决策记录 |
-| [踩坑与教训](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/PITFALLS.md) | 开发中真实遇到的问题及**发现方式** |
-| [接口契约](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/INTERFACES.md) | 上游 API 与集成事实 |
+| [Repository README](https://github.com/Hope-Phenom/dsh-plugin-remote-use#readme) | Full install, use and operations |
+| [Design notes](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/DESIGN.md) | Trade-offs and the decision record |
+| [Pitfalls](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/PITFALLS.md) | Problems actually hit during development, and **how each one was found** |
+| [Interface contract](https://github.com/Hope-Phenom/dsh-plugin-remote-use/blob/master/docs/INTERFACES.md) | Upstream APIs and integration facts |
 
-## 许可
+## Licence
 
 MIT
