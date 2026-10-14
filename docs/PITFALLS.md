@@ -40,6 +40,8 @@
   - [D7. 路径穿过 shell：反斜杠被吃掉](#d7-路径穿过-shell反斜杠被吃掉)
   - [D8. 把本地路径当作两机共享的路径](#d8-把本地路径当作两机共享的路径)
   - [D9. 在错误的会话里测量，然后据此下了结论](#d9-在错误的会话里测量然后据此下了结论)
+  - [D10. 用 shell 的字符串替换去改文件：同一天失败四次](#d10-用-shell-的字符串替换去改文件同一天失败四次)
+  - [D11. 测试里写死被测对象的名字：它会接受 bug、拒绝修复](#d11-测试里写死被测对象的名字它会接受-bug拒绝修复)
 - [E. 环境与平台的坑](#e-环境与平台的坑)
   - [E1. PowerShell 5.1 在一个卷上被按路径拦截，而 `-ExecutionPolicy Bypass` 无效](#e1-powershell-51-在一个卷上被按路径拦截而--executionpolicy-bypass-无效)
   - [E2. 沙箱内跑自检：合成输入的假阴性](#e2-沙箱内跑自检合成输入的假阴性)
@@ -48,12 +50,18 @@
   - [E5. `Tee-Object` 写 UTF-16LE](#e5-tee-object-写-utf-16le)
   - [E6. `files` 白名单里的目录，无法被 `.gitignore` / `.npmignore` 排除](#e6-files-白名单里的目录无法被-gitignore--npmignore-排除)
   - [E7. asar 内的路径不可 `Test-Path`](#e7-asar-内的路径不可-test-path)
+  - [E8. `Set-Content -Encoding UTF8` 写出的文件带 BOM，而 DSH 拒绝解析它](#e8-set-content--encoding-utf8-写出的文件带-bom而-dsh-拒绝解析它)
+  - [E9. `Start-Process -ArgumentList @(...)` 会切断带空格的路径](#e9-start-process--argumentlist--会切断带空格的路径)
 - [F. 上游与协议事实](#f-上游与协议事实)
   - [F1. `ctx.tools.restrict()` 强制 per-agent](#f1-ctxtoolsrestrict-强制-per-agent)
   - [F2. `defineTool` 是唯一的 schema 转换点](#f2-definetool-是唯一的-schema-转换点)
   - [F3. `ctx.effect` 立即执行，并返回它自己的 disposer](#f3-ctxeffect-立即执行并返回它自己的-disposer)
   - [F4. Cordis patch：新增行需要 `insert:`](#f4-cordis-patch新增行需要-insert)
   - [F5. `dsh-client-modules` 的元数据缓存需要重启](#f5-dsh-client-modules-的元数据缓存需要重启)
+  - [F6. DSH 的 pnpm 带三层供应链策略，每层都能让安装静默变形](#f6-dsh-的-pnpm-带三层供应链策略每层都能让安装静默变形)
+  - [F7. 陈旧的 lockfile 会让 `pnpm add` 静默装回旧版本](#f7-陈旧的-lockfile-会让-pnpm-add-静默装回旧版本)
+  - [F8. 改包名要同步的两类标识符，而且规则相反](#f8-改包名要同步的两类标识符而且规则相反)
+  - [F9. DSH 起不来时，第一件事是读它自己写的崩溃日志](#f9-dsh-起不来时第一件事是读它自己写的崩溃日志)
 - [G. 需求本身的坑](#g-需求本身的坑)
   - [G1. "主屏必须是虚拟屏" —— 一条忠实实现后让机器无法登录的要求](#g1-主屏必须是虚拟屏--一条忠实实现后让机器无法登录的要求)
 - [这些教训的共同形状](#这些教训的共同形状)
@@ -1470,6 +1478,82 @@ WinDisc | 1024x768 at (0,0) primary=True
 
 ---
 
+## D10. 用 shell 的字符串替换去改文件：**同一天失败四次**
+
+**现象**
+
+改配置或改代码时用「读文件 → `.Replace(旧, 新)` → 写回」，**替换静默没生效**：
+脚本报成功、退出码 0，文件却一字未动。于是后面的验证跑在一份**没被改过**的文件上。
+
+同一轮里，这个动作失败了四次，每次都是**同一类**原因：
+
+| 写法 | 为什么没匹配上 |
+|---|---|
+| `$c.Replace('"version": "0.1.0"', ...)` | 文件里是 CRLF，我的模式只写了 `\n` |
+| `$c.Replace("name: '@…'", ...)` | 同上；而且行首还有缩进 |
+| `$c -replace "id: '…',\r?\n  factory"` | 反向断言：真正的文件里 `id:` 和大段注释相邻 |
+| 嵌套引号拼一行 `ssh` 命令 | `''` / `\"` / 反引号三层叠加，**PowerShell 自己先解析失败** |
+
+最坏的一次是**把一条注释当成了规则**（`git filter-repo --replace-text` 的 `==>` 语义），
+那次不是"没生效"，而是**生效错了地方** —— 见 A 类。
+
+**根因**
+
+- 行尾、缩进、引号样式都是**文件的属性**，不是我能凭记忆写出来的字符串；
+- shell 的字符串**再经过一层解析**（引号、反斜杠、反引号），一层不对就整体变形；
+- 而这三种失败**都表现为成功** —— 没有异常、没有非零退出码。
+
+**修法**
+
+1. **改文件用编辑器语义的工具**（`edit` / `write`），不用 shell 的字符串替换；
+2. 必须在脚本里做替换时，**替换后立刻断言旧值已消失、新值已出现**，不要只看退出码：
+
+```powershell
+$t = $t.Replace($old, $new)
+if ($t -eq $before) { throw "replacement did not apply: pattern not found" }
+```
+
+3. **一行远程命令的复杂度有上限。** 超过一个引号层级就**写成脚本文件传过去跑**
+   （`.research/deploy-ps1.ps1` 就是为此存在的），不要在一行里拼。
+
+> 这一条的代价被放大了：因为替换静默失败，我**连续几轮都在对一份没改过的文件下结论**。
+
+---
+
+## D11. 测试里写死被测对象的名字：**它会接受 bug、拒绝修复**
+
+**现象**
+
+包从 `dsh-plugin-remote-use` 改名为 `@hope_phenom/dsh-plugin-remote-use` 之后，
+**唯一能抓到改名漏项的那个测试**（加载客户端 bundle 的 harness）里写着：
+
+```js
+assert.equal(definition.id, 'dsh-plugin-remote-use')   // ← 写死的是【旧名】
+```
+
+于是它**拒绝了正确的值、接受了错误的值** —— 一个测试如果断言的是错的，
+那它不但不能发现问题，还会**主动保护问题**。
+
+**根因**
+
+断言里出现了**被测对象的名字本身**。名字一旦变化，测试的**判据**就跟着漂移，
+而它仍然"全绿"。
+
+**修法**
+
+判据要**从被测对象自己那里读**，不要抄一份：
+
+```js
+const PKG = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+assert.equal(definition.id, PKG.name)   // ← 名字以 manifest 为唯一真值
+```
+
+**推论（比这一条更重要）**：`全绿` 说明不了"检查是有效的"。
+这条 harness 在 bug 存在期间一直是绿的 —— 要发现它，只能靠**变异检验**
+（把正确的值改回错的，看它是否立刻失败）。这次的每一条新守卫都做了变异检验。
+
+---
+
 # E. 环境与平台的坑
 
 ## E1. PowerShell 5.1 在一个卷上被按路径拦截，而 `-ExecutionPolicy Bypass` 无效
@@ -1809,6 +1893,83 @@ Test-Path $dsh     # → False
 
 ---
 
+## E8. `Set-Content -Encoding UTF8` 写出的文件**带 BOM**，而 DSH 拒绝解析它
+
+**现象**
+
+改完 profile 的清单之后，**DSH 完全无法启动**，桌面弹窗指向一份崩溃日志：
+
+```
+DesktopHostFatalError: Unexpected token '', "{ "n"... is not valid JSON
+  at JSON.parse (<anonymous>)
+  at readProfileManifest (dsh-app-boot/lib/index.js:835:22)
+  at loadProfileDirectory (dsh-app-boot/lib/index.js:921:18)
+```
+
+错误信息里那个 `?` 就是 **U+FEFF**。`readProfileManifest` 用**裸 `JSON.parse`** 读
+profile 的 `package.json`，它不接受 BOM —— 而文件**内容本身完全合法**。
+
+**根因**
+
+```powershell
+$j | ConvertTo-Json | Set-Content $p -Encoding UTF8    # ← Windows PowerShell 5.1：带 BOM
+```
+
+**这条坑本来就在 E3 里**，只是方向相反：E3 说的是"PS 5.1 把**无 BOM** 的 `.ps1` 当 ANSI **读**"，
+而同一套默认行为在**写**的时候会**主动加上** BOM。
+
+**修法**
+
+写 JSON/YAML 这类**会被程序严格解析**的文件时，显式用无 BOM 的编码，并**校验首字节**：
+
+```powershell
+$enc = New-Object System.Text.UTF8Encoding($false)          # $false = 不写 BOM
+[System.IO.File]::WriteAllText($p, $json, $enc)
+
+$b = [System.IO.File]::ReadAllBytes($p)
+if ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { throw 'a BOM was written' }
+```
+
+`.research/set-profile-bundle.ps1` / `fix-profile-json.ps1` 都内置了这一步校验。
+
+> 代价说明：这是一次**致命**错误 —— 不是"某个功能不工作"，而是**整个应用起不来**。
+> 而且它发生在"我为了修一个非致命问题去改配置"的过程中，把一个可用的机器变成了不可用的机器。
+
+---
+
+## E9. `Start-Process -ArgumentList @(...)` 会切断带空格的路径
+
+**现象**
+
+想用命令行复现 GUI 的启动失败，结果拿到一个**看起来像 DSH 坏了**的错误：
+
+```
+Error: Cannot find module 'C:\Users\worker\AppData\Local\Programs\DeepSeek'
+```
+
+**根因**
+
+```powershell
+Start-Process -FilePath $exe -ArgumentList @('--expose-internals', $cli, '--profile', 'desktop')
+#                                             ↑ 数组会被用空格【拼接】，且不加引号
+```
+
+路径里的 `DeepSeek Harness` 含空格，于是被切成了两个参数。
+
+**修法**
+
+传**一个已经引号化好的字符串**，而不是数组：
+
+```powershell
+$args = "--expose-internals `"$cli`" --profile $Profile"
+Start-Process -FilePath $exe -ArgumentList $args -PassThru
+```
+
+**顺带一条同源的**：`cmd /c` 里跑带空格的路径也一样 —— `cmd /c node C:\...\DeepSeek Harness\...`
+会被切断，要么整体加引号，要么**写成脚本文件**（见 D10 第 3 条）。
+
+---
+
 # F. 上游与协议事实
 
 这一类的条目不是"缺陷"，而是**必须按上游的形状写代码**的事实 —— 违反它们时症状往往离原因很远。
@@ -1990,6 +2151,168 @@ no-such-plugin-xyz             -> 404   （对照）
 **那个 404 什么也证明不了。** 正确的探针是**插件自己注册的设置路由**（`/api/dsh/<id>`），
 它给出 200 与完整载荷。**"用一个必然失败的对照片来验证路径有效性"**这一步
 能避免从 404 里读出结论。
+
+---
+
+## F6. DSH 的 pnpm 带**三层供应链策略**，每层都能让安装静默变形
+
+**现象**
+
+- 从**刚发布**的版本安装，报错的却是"锁文件校验失败"；
+- 卸载时报 `ERR_PNPM_TARBALL_URL_MISMATCH`，而不是任何跟卸载有关的话；
+- 想补一个缺失的依赖，整个操作被**回滚**，`package.json` 和 `node_modules` 都没变。
+
+**根因**：DSH 的 profile 用 pnpm，而 `pnpm-workspace.yaml` 里预置了策略：
+
+```yaml
+nodeLinker: hoisted
+autoInstallPeers: false          # ← 不会自动装 peer 依赖（npm 会）
+minimumReleaseAgeExclude:        # ← 其余包有"隔离期"：太新的版本不允许装
+  - '@hope_phenom/dsh-plugin-code-quality@0.1.0'
+```
+
+三层各自的表现：
+
+| 策略 | 触发条件 | 报错 |
+|---|---|---|
+| `autoInstallPeers: false` | 依赖的 **peer** 没被自己声明 | 运行时 `ERR_MODULE_NOT_FOUND`（**安装时无任何提示**） |
+| `minimumReleaseAge` | 版本发布**不到约 24 小时** | `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` |
+| tarball URL 校验 | lockfile 里的 URL 与当前 registry 元数据不符 | `ERR_PNPM_TARBALL_URL_MISMATCH` |
+
+**第三个尤其阴**：包刚发布时中文镜像还没同步，pnpm 从 npmjs 取到并把 **npmjs 的 URL** 写进 lockfile；
+镜像同步完成后，两边元数据对不上，**此后所有的安装和卸载都被拒绝** ——
+错误却写着"锁文件可能过期，或有人绕过了策略"。
+
+**修法**
+
+1. **peer 依赖自己声明**。这不是"可选优化"：`@agentclientprotocol/sdk` 把 `zod` 声明成 peer，
+   插件没声明它，开发机（npm，自动装 peer）毫无问题，**从机（pnpm）直接加载失败**。
+   守卫见 `test/shipped-scripts.test.js` 的 "every non-optional peer dependency … is declared"。
+2. **刚发布的版本要显式指定版本号安装**，并显式指定 registry ——
+   管理器会自己往 `minimumReleaseAgeExclude` 里加例外，手工操作则需要自己处理。
+3. **改 profile 用插件管理器**，不要手工 `pnpm add`：管理器会成组地写清单、lockfile、
+   profile 补丁与策略例外；手工操作会漏掉其中一部分（F8 的 profile 覆盖条目就是这么漏的）。
+
+---
+
+## F7. 陈旧的 lockfile 会让 `pnpm add` **静默装回旧版本**
+
+**现象**
+
+在 GUI 里点"安装"，弹窗**读到并显示的是 `0.1.3`**（它读 registry 的 `latest`），
+但装完之后版本仍然是 **`0.1.0`**。反复卸载、重装都一样。
+
+**根因**
+
+`pnpm-lock.yaml` 里还留着旧版本的解析结果，而 `pnpm add <包名>`（**不带版本号**）
+会**沿用已有的解析**：
+
+```
+dependencies:
++ @hope_phenom/dsh-plugin-remote-use ^0.1.0        ← 写进清单的是旧声明
+Progress: resolved 4, reused 3, downloaded 0       ← downloaded 0：根本没下载
+```
+
+注意最后那行：**`downloaded 0` 就是证据** —— 它从本地 store 复用了旧包。
+
+**修法**
+
+**显式带版本号**安装，这会强制重新解析并重写 lockfile 里那条记录：
+
+```powershell
+node <DSH>/resources/runtime/pnpm/bin/pnpm.cjs add `
+  '@hope_phenom/dsh-plugin-remote-use@0.1.3' `
+  --registry https://registry.npmjs.org
+```
+
+改完之后 lockfile 里变成 `'@hope_phenom/dsh-plugin-remote-use@0.1.3'`，
+**后续从 GUI 安装就正常了**（因为不再有陈旧记录可沿用）。
+
+> **诊断线索**：`downloaded 0, reused N` 说明这一次没有联网取包。
+> 插件管理器的每一次操作都在
+> `<profile>/.plugin-manager/logs/operation-*/pnpm.log` 里留了完整输出 ——
+> 这是排查安装问题的**第一手材料**，比任何界面提示都准。
+
+---
+
+## F8. 改包名要同步的**两类**标识符 —— 而且规则相反
+
+**现象**
+
+包从 `dsh-plugin-remote-use` 改名为 `@hope_phenom/dsh-plugin-remote-use` 之后，
+插件管理器**能列出它**、开关**能拨动**，但：
+
+1. 设置页里**没有**这个插件的配置节；
+2. 改好第一个问题之后，变成 **`web boot: 1 entry did not activate`** ——
+   **整个 Web 界面起不来**。
+
+两个症状的根因是**同一类**：改名时漏了标识符。但**这些标识符的规则并不统一**，
+这才是它难查的原因：
+
+| 标识符 | 位置 | 规则 | 漏掉的后果 |
+|---|---|---|---|
+| `name:` | `cordis.patch.yml` 的 `insert` 项 | **必须等于包名**（它是**模块说明符**） | 装载器 import 不到 → 服务端半边不加载 → 设置页无此节 |
+| `id:` | `lib/client.js` 的 `window.__ModuleLoader__.load({...})` | **必须等于包名** | 装载器按包名给行编号，对不上 → **同一 bundle 执行两次** → `duplicate factory registration` → **Web 界面无法启动** |
+| `id:` | `cordis.patch.yml` 的 `insert` 项 | **必须保持稳定**（行标识，profile 补丁按它覆盖） | 已有 profile 全部失配 |
+| `id:` | `ctx.slots.register({ name: 'settings.section', ... })` | **习惯用短名**（官方一级设置项就写 `account` / `agent-presets`） | 无（改动只会白白churn） |
+| `const NS` | 客户端 locale 命名空间 | **保持稳定** | 已注册的字符串丢失 |
+| 目录名 | `storages/<名字>/` | **保持稳定** | **已有配置和审计记录全部丢失** |
+| `export const name` | 宿主半边 | **习惯用去掉 scope 的名字**（官方 `@deepseek-ai/dsh-client-hmr` 导出 `client-hmr`），只作 fiber 标签 | 无（纯装饰） |
+
+**后果的传播距离值得单独记一笔**：客户端重复注册的错误，最终表现为
+`web boot: 1 entry did not activate` —— **看起来像安装问题，其实是命名不一致**，
+而且**整个界面**打不开，不是某个功能不可用。
+
+**修法**
+
+- 改名时**一次性搜尽**这些位置，而不是改一处、跑一次、猜一次；
+- 把能守住的写进测试（`test/settings-page.test.js` 里
+  "the client bundle registers under the package name…"），并为**每一条**守卫做变异检验；
+- **同时**要记清哪些**不该**跟包名走 —— 上面表里两张"保持稳定"的，
+  盲从"都要等于包名"会弄丢用户配置。
+
+---
+
+## F9. DSH 起不来时，**第一件事是读它自己写的崩溃日志**
+
+**现象**
+
+GUI 启动失败只给一个弹窗，stderr 里只有一行摘要
+（`web boot: 1 entry did not activate` / `see console for the import error`），
+而那个 "console" 是**渲染进程**的，从外部看不到。
+
+**真正有效的位置**
+
+```
+%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-<时间戳>-<source>-host.log
+```
+
+它包含三段，第三段是关键：
+
+```
+--- error ---                                   致命错误
+--- host diagnostic (as reported by the Host process) ---   带完整调用栈 ✓
+--- renderer console (error level, oldest first) ---        ★ 渲染进程的错误
+```
+
+**这次就是靠它破的案**：前面所有推测（锁文件、依赖、清单字段）都错了，
+而 renderer console 里一行就写清了：
+
+```
+Uncaught Error: client-modules: duplicate factory registration for "dsh-plugin-remote-use"
+  (bundle executed twice without invalidate?)
+```
+
+**修法（操作顺序）**
+
+1. 有弹窗就**先截图**，弹窗本身写着日志路径；
+2. 读 `crash-*-host.log` 的 **renderer console** 段；
+3. 需要看**生效的加载树**时，抓 DSH 自己的 web 服务页面 ——
+   启动数据**内联在 HTML** 里（`globalThis["__DSH_BOOT__"] = {rev, entries, batches}`），
+   带 token 请求 `http://127.0.0.1:19387/?token=…` 即可，不用猜。
+
+**反例（这次付出的代价）**：在拿到这些日志之前，我先按推测改了三轮配置 ——
+其中一轮（E8 的 BOM）**把一个"界面起不来"升级成了"应用完全起不来"**。
 
 ---
 
