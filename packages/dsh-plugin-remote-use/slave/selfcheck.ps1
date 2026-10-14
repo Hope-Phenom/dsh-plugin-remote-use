@@ -113,10 +113,31 @@ Add-Check 'S2' 'virtual display present (not WinDisc fallback)' 'blocking' $(if 
 # S3 resolution
 $res = if ($primary) { "$($primary.Bounds.Width)x$($primary.Bounds.Height)" } else { '?' }
 Add-Check 'S3' 'primary resolution' 'warning' $(if ($res -eq '1920x1080') { 'pass' } else { 'warn' }) '1920x1080' $res 'put the target resolution first in vdd_settings.xml'
-# S4 primary at origin
-$okOrigin = $false; $origin = '?'
-if ($primary) { $origin = "primary=$($primary.DeviceName) at $($primary.Bounds.X),$($primary.Bounds.Y)"; $okOrigin = ($primary.Bounds.X -eq 0 -and $primary.Bounds.Y -eq 0) }
-Add-Check 'S4' 'primary monitor at origin' 'blocking' $(if ($okOrigin) { 'pass' } else { 'fail' }) 'primary at (0,0)' $origin 'ChangeDisplaySettingsEx CDS_SET_PRIMARY|CDS_NORESET then commit'
+# S4 primary at origin AND the primary is the VIRTUAL display
+#
+# BOTH HALVES ARE REQUIRED, and for a while only one was implemented. DESIGN says S4 is
+# "the virtual screen is primary AND at (0,0)"; the code checked only the origin. That gap was
+# found on a real worker whose physical monitor presents its EDID even after being switched to
+# another machine (KVM behaviour, DESIGN 7.8): Windows still considered it attached, kept it
+# primary at (0,0), and the check passed -- while the desktop was a PORTRAIT 1080x1920 panel from
+# an Intel adapter and the intended 1920x1080 virtual display sat unused. The worker was dispatched
+# to with a layout nobody agreed to. S3 only warns about the resolution, so nothing else caught it.
+#
+# The reason it matters is the one DESIGN gives: a primary that is not the agreed display is a
+# coordinate space that is not the agreed one, and the symptom is "it clicked, slightly wrong" --
+# no error anywhere. Half a check is worse than none, because it reports the reassuring half.
+$okOrigin = $false; $origin = '?'; $primaryIsVirtual = $false; $primaryAdapter = ''
+if ($primary) {
+  $origin = "primary=$($primary.DeviceName) at $($primary.Bounds.X),$($primary.Bounds.Y)"
+  $okOrigin = ($primary.Bounds.X -eq 0 -and $primary.Bounds.Y -eq 0)
+  # `Adapters()` returns one line per adapter, each starting with its device name (`\\.\DISPLAY1`),
+  # which is exactly what `Screen.DeviceName` gives us -- so no extra P/Invoke is needed.
+  $primaryAdapter = @($adaps | Where-Object { $_ -like "$($primary.DeviceName) *" }) | Select-Object -First 1
+  if ($primaryAdapter) { $primaryIsVirtual = [bool]($primaryAdapter -match 'Virtual Display|MttVDD|VDD') }
+}
+$primaryDesc = $origin + ' virtual=' + $primaryIsVirtual
+if ($primaryAdapter) { $primaryDesc = $primaryDesc + ' [' + (($primaryAdapter -split ' \| ')[1]) + ']' }
+Add-Check 'S4' 'primary is the VIRTUAL display at origin' 'blocking' $(if ($okOrigin -and $primaryIsVirtual) { 'pass' } else { 'fail' }) 'VDD primary at 0,0' $primaryDesc 'make the virtual display primary and put it at (0,0)'
 # S5 DPI
 $scale = 1.00
 try { $g = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); if ($g) { $scale = [math]::Round($g.DpiX / 96.0, 2); $g.Dispose() } } catch {}

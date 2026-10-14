@@ -198,24 +198,55 @@ if (-not $VerifyOnly) {
 Write-Host ''
 Write-Host "--- verify at the destination $(if ($remoteMode) { "(on $Remote)" } else { '(locally)' }) ---"
 
+# `ssh` RESERVES EXIT 255 FOR ITS OWN FAILURES (unresolvable host, refused connection, auth). Any
+# other code is the REMOTE COMMAND's answer. Conflating the two is how a network blip turns into
+# "the deployment is incomplete": a transient name-resolution failure once reported every single
+# file as missing while all of them were present and the relay was running from that directory.
+#
+# So an unanswered question is tracked separately and reported as its own outcome, never as a
+# negative answer. This is the same mistake as `find-slave.ps1` reporting a hosts write it had not
+# made -- a check that states something it did not establish.
+$script:unreachable = 0
+function Invoke-Remote {
+  param([string]$Command, [int]$Attempts = 3)
+  $out = @()
+  for ($i = 1; $i -le $Attempts; $i++) {
+    $out = & ssh -o BatchMode=yes -o ConnectTimeout=20 $Remote $Command 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 255) { return @{ answered = $true; code = $code; out = $out } }
+    if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
+  }
+  return @{ answered = $false; code = 255; out = $out }
+}
+
 # In remote mode every existence check runs on the target too. Checking locally that scp "probably"
 # worked is the same class of shortcut as running the relay on the wrong machine.
+#
+# TRI-STATE, because a caller that can only see `true`/`false` cannot tell "the file is absent" from
+# "I could not ask" -- and those need opposite messages. Returns 'yes', 'no', or 'unknown'.
 $exists = {
   param($relPath)
   if ($remoteMode) {
     # `cmd /c if exist` keeps this to one remote invocation and a real exit code, and avoids
     # depending on which shell the target's ssh hands us (the reference worker uses bash).
-    & ssh -o BatchMode=yes -o ConnectTimeout=15 $Remote "cmd /c if exist `"$Destination\$relPath`" (exit 0) else (exit 1)" 2>&1 | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    $r = Invoke-Remote "cmd /c if exist `"$Destination\$relPath`" (exit 0) else (exit 1)"
+    if (-not $r.answered) { $script:unreachable = $script:unreachable + 1; return 'unknown' }
+    if ($r.code -eq 0) { return 'yes' }
+    return 'no'
   }
-  return (Test-Path -LiteralPath (Join-Path $Destination $relPath))
+  if (Test-Path -LiteralPath (Join-Path $Destination $relPath)) { return 'yes' }
+  return 'no'
 }
 
 foreach ($f in $files) {
-  & $check "$($f.name) exists at the destination" (& $exists $f.name)
+  $q = & $exists $f.name
+  if ($q -eq 'unknown') { Write-Host "  [SKIP] $($f.name) exists at the destination -- could not reach $Remote" -ForegroundColor Yellow }
+  else { & $check "$($f.name) exists at the destination" ($q -eq 'yes') }
 }
 foreach ($d in $depDirs) {
-  & $check "$d\ws is at the destination" (& $exists "$d\ws\package.json")
+  $q = & $exists "$d\ws\package.json"
+  if ($q -eq 'unknown') { Write-Host "  [SKIP] $d\ws is at the destination -- could not reach $Remote" -ForegroundColor Yellow }
+  else { & $check "$d\ws is at the destination" ($q -eq 'yes') }
 }
 
 # Node parses each module. `node --check` reports only the FIRST unexpected token, so this is a
@@ -225,12 +256,14 @@ if (-not $remoteMode -and -not $nodeHere) {
   & $check 'node is on PATH (needed to verify and to run the relay)' $false
 } else {
   foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'make-launch-spec.mjs') {
-    if (-not (& $exists $name)) { continue }
+    if ((& $exists $name) -ne 'yes') { continue }
     if ($remoteMode) {
-      & ssh -o BatchMode=yes -o ConnectTimeout=15 $Remote "node --check $Destination/$name" 2>&1 | Out-Null
-    } else {
-      & node --check (Join-Path $Destination $name) 2>&1 | Out-Null
+      $r = Invoke-Remote "node --check $Destination/$name"
+      if (-not $r.answered) { $script:unreachable = $script:unreachable + 1; continue }
+      & $check "$name parses (on the target)" ($r.code -eq 0)
+      continue
     }
+    & node --check (Join-Path $Destination $name) 2>&1 | Out-Null
     & $check "$name parses (on the target)" ($LASTEXITCODE -eq 0)
   }
 
@@ -242,12 +275,19 @@ if (-not $remoteMode -and -not $nodeHere) {
   # only the target can answer it.
   Write-Host ''
   Write-Host '--- run the deployed relay (this is the check the file list cannot make) ---'
+  $code = -1
   if ($remoteMode) {
-    $out = & ssh -o BatchMode=yes -o ConnectTimeout=30 $Remote "node $Destination/relay.mjs --port $ProbePort --token deploy-verify-token --print-pairing" 2>&1
+    $r = Invoke-Remote "node $Destination/relay.mjs --port $ProbePort --token deploy-verify-token --print-pairing"
+    if (-not $r.answered) {
+      $script:unreachable = $script:unreachable + 1
+      Write-Host '  [SKIP] could not reach the worker to run the relay' -ForegroundColor Yellow
+      $out = @()
+      $code = -1
+    } else { $out = $r.out; $code = $r.code }
   } else {
     $out = & node (Join-Path $Destination 'relay.mjs') --port $ProbePort --token 'deploy-verify-token' --print-pairing 2>&1
+    $code = $LASTEXITCODE
   }
-  $code = $LASTEXITCODE
   & $check 'the deployed relay starts and prints a pairing string' ($code -eq 0 -and ($out -join "`n") -match 'dshpair1\.') ($out | Select-Object -First 3 | Out-String).Trim()
 }
 
@@ -291,6 +331,14 @@ if ($remoteMode -and (Test-Path -LiteralPath $localForScripts)) {
 }
 
 Write-Host ''
+# AN UNANSWERED CHECK IS NOT A FAILED CHECK. If any check could not be put to the worker at all, the
+# honest result is "not verified" -- a distinct outcome with its own exit code -- and never the
+# reassuring "OK" nor the alarming "the deployment is incomplete".
+if ($script:unreachable -gt 0) {
+  Write-Host "RESULT: COULD NOT VERIFY -- $($script:unreachable) check(s) could not reach $Remote." -ForegroundColor Yellow
+  Write-Host 'The transfer itself may have succeeded; re-run with -VerifyOnly when the worker is reachable.'
+  exit 3
+}
 if ($failures -eq 0) {
   Write-Host 'RESULT: OK -- the worker-side files are in place and the deployed relay runs.' -ForegroundColor Green
   Write-Host 'Next: restart the worker relay task, then run prototype\host\plugin-live.mjs from the master.'

@@ -302,8 +302,47 @@ test('the deployment script copies everything the relay imports, and proves it r
   assert.match(script, /ERR_MODULE_NOT_FOUND|dshpair1/u, 'the run check must assert the relay produced a pairing string')
 })
 
-test('param() is the first statement in the scripts that take parameters', () => {
-  // PowerShell rejects `param()` after any executable statement, and PS 5.1 reports it as a
+// ---------------------------------------------------------------------------
+// S4 must check BOTH halves of its own criterion
+//
+// The design says S4 is "the virtual screen IS primary AND sits at (0,0)". The implementation
+// checked only the origin, and that gap was found on a real worker: its physical monitor kept
+// presenting its EDID after being switched to another machine (KVM behaviour), so Windows still
+// treated it as attached and kept it primary at (0,0). S4 passed, the worker was dispatched to,
+// and the desktop was a PORTRAIT panel on the Intel adapter while the intended virtual display sat
+// unused. S3 only warns about the resolution, so nothing else caught it.
+//
+// This guard is source-level because the script runs on a worker and cannot be reached from here --
+// the same reason the rest of this file exists.
+// ---------------------------------------------------------------------------
+
+test('the display check requires the primary to BE the virtual display, not merely at the origin', () => {
+  const text = readFileSync(join(SLAVE, 'selfcheck.ps1'), 'utf8')
+  // Slice from the S4 COMMENT, not from the `Add-Check` line: the origin test is computed above the
+  // call, and slicing at the call hid it -- which made this guard fail for the wrong reason.
+  const from = text.indexOf('# S4')
+  const s4 = text.slice(from, text.indexOf('# S5'))
+  assert.ok(from >= 0 && s4.length > 0, 'S4 is missing from the self-check')
+  // The half that was missing: the primary's adapter must be matched against the virtual ones.
+  assert.match(s4, /virtual/i, 'S4 must consider whether the primary is virtual')
+  // ...and the half that was there must still be there.
+  assert.match(s4, /Bounds\.X -eq 0/u, 'S4 must still require the origin')
+  assert.match(s4, /\$okOrigin -and \$primaryIsVirtual/u,
+    'S4 must pass only when BOTH conditions hold -- either half alone is the bug this guards')
+})
+
+test('an unanswered remote check is reported as unverified, never as a failed one', () => {
+  // `ssh` reserves exit 255 for its OWN failures. Treating that as the remote command's answer is
+  // how a transient name-resolution blip reported every file as missing while all of them were
+  // present and the relay was running out of that directory.
+  const text = readFileSync('../../tools/deploy-slave.ps1', 'utf8')
+  assert.match(text, /-ne 255/u, 'the deploy script must tell ssh failures apart from remote answers')
+  assert.match(text, /'unknown'/u, 'a check that could not be asked must be its own outcome')
+  assert.match(text, /\[SKIP\]/u, 'and must print as SKIP rather than FAIL')
+  assert.match(text, /exit 3/u, 'and must end with its own exit code, distinct from success and failure')
+})
+
+test('param() is the first statement in the scripts that take parameters', () => {  // PowerShell rejects `param()` after any executable statement, and PS 5.1 reports it as a
   // confusing "invalid assignment operator" at the lines that FOLLOW. The deploy gate catches it
   // too, but only when someone runs the gate.
   for (const name of ['selfcheck.ps1']) {
