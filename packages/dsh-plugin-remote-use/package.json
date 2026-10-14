@@ -3,6 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
+  "author": "Hope.Phenom <hope.phenom@foxmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:OWNER/dsh-plugin-remote-use.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "acp",
+    "agent-client-protocol",
+    "subagent",
+    "remote",
+    "lan",
+    "gui-automation"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "icon": "./assets/icon.svg",

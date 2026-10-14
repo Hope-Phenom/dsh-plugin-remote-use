@@ -44,7 +44,20 @@ GUI 自动化测试和"看屏幕才知道结果"的验证，必须在一台**真
 
 ### 2. 主机侧：装插件
 
-把包放进某个 profile 的 `node_modules`（开发时用 `link:` 指向本仓库），**然后在同一个 profile 的补丁层里加两类条目**。
+**从零克隆之后先装依赖**（宿主侧与从机侧是两套，别漏第二条）：
+
+```powershell
+# 宿主侧：插件自身的依赖（ws、ACP SDK）
+npm install --prefix packages/dsh-plugin-remote-use
+
+# 从机侧：relay 的依赖（ws）。它必须随文件一起被拷到从机，
+# 而 .gitignore 的 node_modules 规则在任意深度都匹配 —— 新克隆里没有它。
+npm install --prefix packages/dsh-plugin-remote-use/slave
+```
+
+> 漏掉第二条时 `tools/deploy-slave.ps1` 会**拒绝执行并给出修复命令** —— 它不会拷一个跑不起来的中继过去。
+
+然后把包放进某个 profile 的 `node_modules`（开发时用 `link:` 指向本仓库），**并在同一个 profile 的补丁层里加两类条目**。
 
 <details>
 <summary><code>%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml</code> 里要加什么</summary>

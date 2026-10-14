@@ -113,6 +113,17 @@ foreach ($d in $depDirs) {
 if ($failures -gt 0) {
   Write-Host ''
   Write-Host 'The source is incomplete; nothing was copied.' -ForegroundColor Red
+  # ACTIONABLE, because the most likely cause has a one-command fix.
+  #
+  # `.gitignore`'s `node_modules/` rule matches at any depth, so `slave/node_modules` is NOT in git:
+  # a fresh clone has the relay but not its dependency. `slave/package.json` exists precisely so the
+  # repair is one line rather than "work out what the relay needs and where it goes".
+  if (-not (Test-Path -LiteralPath (Join-Path $Source 'node_modules'))) {
+    Write-Host ''
+    Write-Host '  `slave/node_modules` is not in git (the node_modules rule matches at any depth).' -ForegroundColor Yellow
+    Write-Host '  Repair it from the package directory:' -ForegroundColor Yellow
+    Write-Host '      npm install --prefix packages/dsh-plugin-remote-use/slave' -ForegroundColor Yellow
+  }
   exit 1
 }
 

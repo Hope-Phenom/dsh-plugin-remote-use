@@ -1,0 +1,21 @@
+{
+  "name": "dsh-plugin-remote-use-slave",
+  "private": true,
+  "type": "module",
+  "description": "Build-time dependency manifest for the worker-side relay. NOT published, NOT needed at runtime.",
+  "//": [
+    "WHY THIS FILE EXISTS: `slave/relay.mjs` imports the bare package `ws`, and it runs on a worker",
+    "that has no npm -- so the dependency has to travel WITH the files (the deploy script scp's",
+    "`slave/node_modules` to the worker). But `.gitignore`'s `node_modules/` rule matches at any",
+    "depth, so `slave/node_modules` is not in git: a fresh clone had the relay but not its",
+    "dependency, and `tools/deploy-slave.ps1` refused with 'node_modules present in the source'.",
+    "This manifest makes the missing step one command: `npm install --prefix packages/dsh-plugin-remote-use/slave`.",
+    "",
+    "It is deliberately NOT in package.json's `files`, because it is a build-time concern: a",
+    "published package already carries `slave/node_modules` explicitly. A nested package.json that",
+    "shipped would also give `slave/` its own module scope, which is a resolution change nobody asked for."
+  ],
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}
