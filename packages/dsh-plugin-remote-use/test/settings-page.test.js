@@ -25,6 +25,15 @@ import { AuditLog } from '../lib/core/audit-log.js'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+/**
+ * The manifest, read once at module scope.
+ *
+ * Several checks below compare an identity the bundle asserts about itself against the package name,
+ * and the harness must not hardcode that name -- hardcoding it is exactly how this suite came to
+ * accept the broken registration id and reject the correct one after the package was renamed.
+ */
+const PKG = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+
 // ---------------------------------------------------------------------------
 // browser half: declaration and registration
 // ---------------------------------------------------------------------------
@@ -37,6 +46,52 @@ test('package.json declares the client half the way dsh-client-modules reads it'
   assert.equal(pkg.dsh?.client?.platform, 'web')
   // The route the page fetches and the file it lives in must both exist.
   assert.ok(pkg.exports['./client'].endsWith('client.js'))
+})
+
+// ---------------------------------------------------------------------------
+// Identity: the ids this plugin registers under must equal the PACKAGE name
+//
+// This is the third place the package rename had to be carried through, and the only one that was
+// invisible until a real worker ran it. dsh-client-modules keys its graph rows -- and therefore its
+// "this bundle is already loaded" bookkeeping -- by the package name, while the bundle registers
+// itself under the id it writes here. When those disagreed:
+//
+//   client-modules: duplicate factory registration for "dsh-plugin-remote-use"
+//     (bundle executed twice without invalidate?)
+//
+// The bundle ran twice, the second registration threw, and the failure surfaced a long way away as
+// "web boot: 1 entry did not activate" -- which reads like an install problem and is not one. The
+// whole Web UI refused to boot.
+//
+// Every working client plugin on the operator's machine follows the rule, e.g.
+//   @smalltailqwq/dsh-client-ui-skin-maid-atelier  ->  id: '@smalltailqwq/dsh-client-ui-skin-maid-atelier'
+//
+// DELIBERATELY NOT CHECKED: the locale namespace (`const NS`) and the on-disk storage directory
+// keep the pre-rename name. They are internal and changing them would discard existing settings for
+// no benefit -- the same reasoning that keeps the loader row id stable.
+// ---------------------------------------------------------------------------
+
+test('the client bundle registers under the package name, not the pre-rename one', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const src = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
+
+  const load = /window\.__ModuleLoader__\.load\(\{([\s\S]*?)\n\s*factory/u.exec(src)
+  assert.ok(load, 'could not find the __ModuleLoader__.load({...}) registration')
+  const id = /id:\s*'([^']+)'/u.exec(load[1])?.[1]
+  assert.equal(id, pkg.name,
+    'the registration id must equal the package name: the loader keys rows by package name, so a mismatch makes it execute this bundle twice and the Web UI fails to boot')
+
+  const names = [...src.matchAll(/\bid:\s*'([^']+)'/gu)].map((m) => m[1])
+  for (const n of names) {
+    assert.equal(n, pkg.name, `every id this bundle owns must be the package name; found ${JSON.stringify(n)}`)
+  }
+})
+
+test('the host half exports the package name', () => {
+  const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
+  const src = readFileSync(join(PKG_ROOT, 'lib', 'index.js'), 'utf8')
+  const exported = /export const name = '([^']+)'/u.exec(src)?.[1]
+  assert.equal(exported, pkg.name, 'the loader row identity and the plugin identity must agree')
 })
 
 // ---------------------------------------------------------------------------
@@ -477,7 +532,12 @@ function loadClient() {
   new Function('window', source)(sandbox)
 
   assert.ok(definition !== undefined, 'client.js must call window.__ModuleLoader__.load')
-  assert.equal(definition.id, 'dsh-plugin-remote-use')
+  // Compared against the package name rather than a literal. This line used to hardcode
+  // 'dsh-plugin-remote-use', which meant that after the package was renamed the harness REJECTED the
+  // correct id and accepted the broken one -- so the one test positioned to catch the duplicate
+  // registration was itself asserting the bug.
+  assert.equal(definition.id, PKG.name,
+    'the registration id must equal the package name (see the identity note above)')
 
   const react = makeReactStub()
   const moduleExports = definition.factory((name) => {
@@ -707,7 +767,10 @@ test('the client registers exactly one settings.section for this plugin', () => 
 
   const { decl, component } = registered[0]
   assert.equal(decl.name, 'settings.section')
-  assert.equal(decl.id, 'dsh-plugin-remote-use')
+  // The section id follows the package name, like the registration id. The LOCALE namespace below
+  // does not: `NS` and the on-disk storage directory deliberately keep the pre-rename name, because
+  // changing them would discard existing settings and registered strings for no benefit.
+  assert.equal(decl.id, PKG.name)
   assert.equal(decl.locale, 'dsh-plugin-remote-use')
   assert.equal(typeof component, 'function')
   // A number is required: the nav orders sections by it.

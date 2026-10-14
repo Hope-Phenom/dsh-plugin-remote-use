@@ -19,7 +19,13 @@
  * so the page only STATES the current role instead of offering a dead control.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-plugin-remote-use',
+  // MUST equal the package name. The loader keys its graph rows -- and therefore its "already
+  // loaded" bookkeeping -- by the PACKAGE name, while this id is what the bundle registers itself
+  // under. When they disagreed (this said the pre-rename `dsh-plugin-remote-use`), the loader did
+  // not recognise its own registration, executed the bundle a second time, and dsh-client-modules
+  // threw: `duplicate factory registration for "dsh-plugin-remote-use"`, which surfaced as
+  // "web boot: 1 entry did not activate" and left the whole Web UI unable to boot.
+  id: '@hope_phenom/dsh-plugin-remote-use',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -1484,7 +1490,9 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-remote-use: dictionaries')
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
-        id: 'dsh-plugin-remote-use',
+        // Same value as the registration id above; every id this plugin owns follows the package
+        // name, except the locale namespace (see NS) which is deliberately left alone.
+        id: '@hope_phenom/dsh-plugin-remote-use',
         // After the notification plugin's 40, so operator surfaces stay grouped together.
         order: 45,
         label: () => t('nav'),

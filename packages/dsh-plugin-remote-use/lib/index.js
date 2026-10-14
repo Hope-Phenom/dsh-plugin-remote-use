@@ -51,7 +51,10 @@ import { RemoteProvider } from './provider/remote-provider.js'
 import { limitDiagnostic, verifyAgainstUpstream } from './provider/out-of-process-helpers.js'
 import { makeRemoteTools } from './tools/remote-tools.js'
 
-export const name = 'dsh-plugin-remote-use'
+// MUST equal the package name -- the loader keys its rows by it, and a mismatch means the row's
+// identity and the plugin's own identity disagree. See the note on the registration id in
+// lib/client.js, which is the same rule for the browser half.
+export const name = '@hope_phenom/dsh-plugin-remote-use'
 
 /** Optional services: stay inert in profiles that lack them. */
 export const inject = ['subagents', 'tools', 'systemPrompt']
