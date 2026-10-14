@@ -4,33 +4,24 @@
 # patch, so keep it stable across versions.
 #
 # ---------------------------------------------------------------------------
-# One delegation tool row PER WORKER.
+# NO TOOL ROW IS NEEDED, and this package deliberately has none.
 #
-# A subagent provider is registered at runtime from this plugin's Config, but the
-# model-facing TOOL row is a static loader entry -- a plugin cannot append tool rows
-# at runtime (DESIGN §5.7, U2). So each worker that should be callable needs its own
-# row below, and the `provider` value must match the worker `id` used in this plugin's
-# Config (`remote-<id>`).
+# Earlier versions told the operator to add one `@deepseek-ai/dsh-tool-subagent` row per
+# worker, with `provider: remote-<id>`. That instruction was WRONG, and following it ended
+# with a configured worker, a restart, and still no tool for the model (PITFALLS F11).
 #
-# The config below is the ONLY shape that passes `assertSubagentProviderConfiguration`
-# for an out-of-process provider (DESIGN §5.7):
-#   * `backgroundMode: one-shot`  -- the seam cannot support continuable children (C2)
-#   * `maxDepth: provider-managed` -- we have no depthLimit capability (C1)
-#   * NO `agentOptions` / `persona` / `toolFilter` keys at all -- their presence makes
-#     the tool plugin throw while handling `subagent/provider-added`, which rolls back
-#     the whole provider registration (Cordis `emit` propagates listener exceptions).
-#   * `modelSelectionSettings: false` (the default) -- keeps provider/model params off
-#     the tool schema.
+# WHY: a Web session's model-facing tool catalog is enumerated by the AGENT PRESET
+# (`preset-standard.plugins`), not by the loader tree. Such a row does compose -- the
+# official `dsh --dump-config` shows it in the tree -- and still never reaches the model,
+# because the preset does not list it. Registering a provider and exposing a tool are two
+# different mechanisms, and only the second decides what the model can call.
 #
-# Example row for a worker whose `id` is `labpc`:
+# The plugin therefore registers `remote_subagent` itself through `ctx.tools.register()`,
+# alongside its four `remote_*` observation tools. Adding a worker in the Settings page is
+# the whole job: no profile edit, and no restart.
 #
-#   - id: tool-subagent-remote-labpc
-#     name: '@deepseek-ai/dsh-tool-subagent'
-#     config:
-#       provider: remote-labpc
-#       toolName: subagent_remote
-#       backgroundMode: one-shot
-#       maxDepth: provider-managed
+# `workers: []` here is only a default. The Settings page writes the real list to
+# ~/.dsh/storages/dsh-plugin-remote-use/settings.json, which OVERRIDES this row.
 # ---------------------------------------------------------------------------
 
 # `id` is the ROW identity -- this plugin's stable name in the Settings page, and what a profile

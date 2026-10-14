@@ -48,13 +48,12 @@ window.__ModuleLoader__.load({
       loading: '正在读取工作节点状态…',
       // Points at the step that is actually missing, which is NOT where a worker is configured.
       //
-      // Workers live here, in this page, and are written to the settings file. What a page cannot do
-      // is give the MODEL something to call: a plugin cannot append tool rows at runtime, so each
-      // worker also needs its own loader row in the profile patch (DESIGN section 5.7, U2). The
-      // previous wording sent the operator to the patch to configure the WORKER -- which this page
-      // already does -- and never mentioned the tool row. Following it ended with a configured
-      // worker, a restart, and still no `subagent_remote`, which reads as a broken plugin.
-      noWorkers: '尚未配置工作节点。在这里添加即可；但模型要能调用它，还需要在 profile 补丁中为该节点加一行工具行（每个节点一行），然后重启。',
+      // This string used to send the operator to the profile patch for a per-worker tool row, and
+      // that was WRONG as of 0.2.0: the plugin registers its own delegation tool through `ctx.tools`,
+      // so adding a worker here is the whole job (PITFALLS F11 -- a Web session's tool catalog comes
+      // from the agent preset, so a patch row would not have reached the model anyway). Nothing
+      // else in the UI was telling operators to edit a patch; this one line was.
+      noWorkers: '尚未配置工作节点。在上方添加，或粘贴配对串即可 —— 工具会随之出现，不需要改 profile 补丁，也不需要重启。',
       reportPending: '就绪报告未在限时内取得 —— 工作节点可能不可达。连接状态见下。',
       verdictReady: '就绪',
       // 有警告但**阻断项全过** —— 产品的派单门禁只看 status==='fail'，所以这个节点是可用的。
@@ -147,6 +146,8 @@ window.__ModuleLoader__.load({
       roleNotOffered: '不提供',
       rolePort: '端口',
       rolePortHint: '主机拨这个端口。7331 与参考从机一致。',
+      roleTaskDir: '任务目录',
+      roleTaskDirHint: '本机上一个绝对路径，远程任务在这里运行，也是沙箱允许它写入的范围。它会写进配对串，主机就不必再猜。留空的话，主机必须自己填一个。',
       roleCheck: '先检查',
       roleArm: '布防为工作节点',
       roleCheckOk: '沙箱能约束本机，地址可用，可以布防。',
@@ -175,6 +176,8 @@ window.__ModuleLoader__.load({
       pairDone: '配对完成，工作节点已配置并连接。',
       fieldPairing: '配对串',
       fieldPairingHint: '由工作节点生成（relay 的 --print-pairing，或 relay 旁边的 pairing.txt）。它包含工作节点令牌，请当作密码对待：用掉后本框即清空，且绝不会回传到浏览器。',
+      fieldPairingCwd: '任务目录（配对串没带时才需要填）',
+      fieldPairingCwdHint: '从机上的绝对路径。较新的从机会把它放进配对串，这里留空即可。留空且配对串也没带，配对会被拒绝 —— 没有任务目录的工作节点无法接单。',
       fieldPairingPlaceholder: 'dshpair1.…',
       btnEdit: '编辑',
       btnDelete: '删除',
@@ -234,7 +237,7 @@ window.__ModuleLoader__.load({
       roleNote: 'This machine dispatches to workers. It can also be armed as a worker itself (symmetric pairing) -- see below.',
       groupWorkers: 'Workers',
       loading: 'Reading worker state\u2026',
-      noWorkers: 'No workers yet. Add one here; for the model to be able to call it, the profile patch also needs one tool row per worker, then a restart.',
+      noWorkers: 'No workers yet. Add one above, or paste a pairing string \u2014 the model\u2019s tools come with it, with no profile-patch edit and no restart.',
       reportPending: 'The readiness report did not arrive in time \u2014 the worker is probably unreachable. Link state below.',
       verdictReady: 'ready',
       verdictWarn: 'usable (warnings)',
@@ -326,6 +329,8 @@ window.__ModuleLoader__.load({
       roleNotOffered: 'not offered',
       rolePort: 'Port',
       rolePortHint: 'The master dials this port. 7331 matches the reference worker.',
+      roleTaskDir: 'Task directory',
+      roleTaskDirHint: 'An absolute path on THIS machine where remote tasks run, and the scope their sandbox may write to. It goes into the pairing string so the master does not have to guess. Left blank, the master must supply one itself.',
       roleCheck: 'Check first',
       roleArm: 'Arm as a worker',
       roleCheckOk: 'The sandbox contains this machine and the address is usable. Safe to arm.',
@@ -354,6 +359,8 @@ window.__ModuleLoader__.load({
       pairDone: 'Paired. The worker is configured and connected.',
       fieldPairing: 'Pairing string',
       fieldPairingHint: 'Produced by the worker (relay --print-pairing, or pairing.txt beside the relay). It contains the worker token, so treat it like a password: it is cleared from this box once used, and never sent back to the browser.',
+      fieldPairingCwd: 'Task directory (only needed if the string does not carry one)',
+      fieldPairingCwdHint: 'An absolute path on the worker. A current worker puts it in the pairing string, so this can stay blank; if neither supplies one the pairing is refused, because a worker without a task directory cannot accept a task.',
       fieldPairingPlaceholder: 'dshpair1.\u2026',
       btnEdit: 'Edit',
       btnDelete: 'Delete',
@@ -619,6 +626,10 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'ru-msg mute' }, t('reportPending'))
           : null,
         row.error !== undefined && row.error !== '' ? h('div', { className: 'ru-msg err' }, String(row.error)) : null,
+        // Configuration, not connectivity: a worker whose task directory is unusable will be
+        // refused at dispatch no matter how healthy the link is. Shown without a click, because
+        // the whole failure mode was that it never announced itself until a delegation failed.
+        row.configProblem !== undefined && row.configProblem !== '' ? h('div', { className: 'ru-msg err' }, String(row.configProblem)) : null,
         actions,
         checks.length === 0 ? null : h('div', {},
           h('button', {
@@ -806,6 +817,7 @@ window.__ModuleLoader__.load({
       const { t, role, busy, onPreflight, onArm, onDisarm } = props
       const [bindAddress, setBindAddress] = React.useState('')
       const [port, setPort] = React.useState(7331)
+      const [taskDir, setTaskDir] = React.useState(String(role?.taskCwd ?? ''))
       const [check, setCheck] = React.useState(null)
       const [issued, setIssued] = React.useState(null)
 
@@ -817,11 +829,11 @@ window.__ModuleLoader__.load({
       const blocked = checked && check.ok !== true
 
       const doCheck = async () => {
-        const result = await onPreflight({ bindAddress: chosen, port: Number(port) })
+        const result = await onPreflight({ bindAddress: chosen, port: Number(port), taskCwd: taskDir })
         setCheck(result)
       }
       const doArm = async () => {
-        const result = await onArm({ bindAddress: chosen, port: Number(port) })
+        const result = await onArm({ bindAddress: chosen, port: Number(port), taskCwd: taskDir })
         if (result?.ok === true) setIssued({ token: result.token, pairing: result.pairing })
         else setCheck({ ok: false, blockers: result?.blockers ?? [String(result?.error ?? '')] })
       }
@@ -883,6 +895,19 @@ window.__ModuleLoader__.load({
               onChange: (event) => { setPort(event.target.value); setCheck(null) },
             }),
             h('span', { className: 'ru-field-hint' }, t('rolePortHint'))),
+
+          // The directory the master will hand tasks. Asked for HERE, on the machine where the path
+          // exists, and carried in the pairing string -- the master cannot know a path on this box,
+          // and a worker paired without one cannot accept a task at all (PITFALLS F16).
+          h('label', { className: 'ru-field' },
+            h('span', { className: 'ru-field-label' }, t('roleTaskDir')),
+            h('input', {
+              className: 'ru-input ru-mono',
+              value: taskDir,
+              placeholder: 'C:\\dsh-remote\\work',
+              onChange: (event) => { setTaskDir(event.target.value); setCheck(null) },
+            }),
+            h('span', { className: 'ru-field-hint' }, t('roleTaskDirHint'))),
 
           h('div', { className: 'ru-actions' },
             h('button', {
@@ -979,6 +1004,7 @@ window.__ModuleLoader__.load({
       /** The paste-a-pairing-string panel. Closed by default: it is the shortcut, not the path. */
       const [pairingOpen, setPairingOpen] = React.useState(false)
       const [pairingText, setPairingText] = React.useState('')
+      const [pairingCwd, setPairingCwd] = React.useState('')
 
       const call = React.useCallback(async (action, payload) => {
         const response = await fetch(ROUTE, {
@@ -1101,10 +1127,16 @@ window.__ModuleLoader__.load({
         setBusy('pair')
         setStatus({ kind: 'idle', text: '' })
         try {
-          await call('worker.pair', { pairing: pairingText })
+          // `cwd` is only consulted when the string does not already carry one; a worker that
+          // advertises its task directory makes this field unnecessary. Sent only when filled, so
+          // a blank box never overrides what the worker said about itself.
+          const body = { pairing: pairingText }
+          if (pairingCwd.trim() !== '') body.cwd = pairingCwd.trim()
+          await call('worker.pair', body)
           // Clear the field on success: the string is a live credential and there is no reason
           // to leave it sitting in a form.
           setPairingText('')
+          setPairingCwd('')
           setPairingOpen(false)
           setStatus({ kind: 'ok', text: t('pairDone') })
           await refresh()
@@ -1113,7 +1145,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('')
         }
-      }, [call, refresh, pairingText, t])
+      }, [call, refresh, pairingText, pairingCwd, t])
 
       /**
        * Like `call`, but returns the body instead of throwing on a non-ok reply.
@@ -1349,6 +1381,18 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setPairingText(event.target.value),
               }),
               h('span', { className: 'ru-field-hint' }, t('fieldPairingHint'))),
+            // Inert in the normal case: a current worker puts its task directory in the string.
+            // It exists so that a string WITHOUT one is not a dead end -- pairing is refused when
+            // neither supplies a directory, and this is where the operator supplies it.
+            h('label', { className: 'ru-field' },
+              h('span', { className: 'ru-field-label' }, t('fieldPairingCwd')),
+              h('input', {
+                className: 'ru-input ru-mono',
+                placeholder: 'C:\\dsh-remote\\work',
+                value: pairingCwd,
+                onChange: (event) => setPairingCwd(event.target.value),
+              }),
+              h('span', { className: 'ru-field-hint' }, t('fieldPairingCwdHint'))),
             h('div', { className: 'ru-actions' },
               h('button', {
                 type: 'button', className: 'ru-btn primary',
@@ -1358,7 +1402,7 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button', className: 'ru-btn',
                 disabled: anyBusy,
-                onClick: () => { setPairingOpen(false); setPairingText('') },
+                onClick: () => { setPairingOpen(false); setPairingText(''); setPairingCwd('') },
               }, t('btnCancel')))) : null),
 
         status.text === '' ? null : h('div', { className: `ru-msg ${status.kind === 'err' ? 'err' : status.kind === 'ok' ? 'ok' : 'mute'}` }, status.text),

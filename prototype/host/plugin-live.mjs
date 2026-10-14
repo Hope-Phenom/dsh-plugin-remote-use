@@ -248,8 +248,15 @@ if (route !== undefined) {
 // 2. A real delegation through the mounted provider
 // ---------------------------------------------------------------------------
 console.log('\n=== 2. delegation through the mounted provider ===')
-const registry = mounted.tools.length // just to prove tools exist below
-check('the four remote tools are registered', mounted.tools.length === 4, `got ${mounted.tools.length}`)
+// DERIVED from the plugin, not hardcoded. This said "=== 4" and kept passing until 0.2.0 added
+// the fifth tool (`remote_subagent`), at which point the harness reported a failure that had
+// nothing to do with the worker under test. Same shape as PITFALLS D11, one layer further out.
+const EXPECTED_TOOLS = Array.isArray(mod.REMOTE_TOOL_NAMES) ? [...mod.REMOTE_TOOL_NAMES] : []
+check('exactly the tools the plugin names are registered',
+  EXPECTED_TOOLS.length > 0
+  && mounted.tools.length === EXPECTED_TOOLS.length
+  && EXPECTED_TOOLS.every((n) => mounted.tools.some((t) => t.name === n)),
+  `expected=${EXPECTED_TOOLS.join(',')} registered=${mounted.tools.map((t) => t.name).join(',')}`)
 
 const t0 = Date.now()
 const run = await provider.start({
@@ -265,7 +272,60 @@ console.log(`  output     = ${JSON.stringify(result.output?.[0]?.text ?? '').sli
 if (result.diagnostic !== undefined) console.log(`  diagnostic = ${result.diagnostic}`)
 check('the delegated task completed', result.stopReason === 'completed', String(result.stopReason))
 check('assistant output came back', (result.output?.[0]?.text ?? '').length > 0)
-void registry
+
+// ---------------------------------------------------------------------------
+// 2a. A BACKGROUND delegation's answer, collected through the mounted TOOLS
+//
+// F15: the answer existed only inside the provider's `result` promise, and background mode is
+// defined by nobody awaiting that promise -- so the task ran, the state was visible, and the
+// ANSWER was unreachable. An offline test cannot catch this if it awaits `result` itself, which
+// is exactly what every test did; this drives the real tools against the real worker instead.
+// ---------------------------------------------------------------------------
+console.log('\n=== 2a. background delegation, answer read back through remote_agents ===')
+
+const subagentTool = mounted.tools.find((t) => t.name === 'remote_subagent')
+const agentsTool = mounted.tools.find((t) => t.name === 'remote_agents')
+check('remote_subagent is registered (the delegation entry point)', subagentTool !== undefined)
+check('remote_agents is registered', agentsTool !== undefined)
+
+if (subagentTool !== undefined && agentsTool !== undefined) {
+  // A token the worker cannot guess: finding it in the status output proves the text travelled
+  // back from the worker, rather than being something this script already had in hand.
+  const marker = `BGMARK-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(36)}`
+  const delegated = String(await subagentTool.execute({
+    prompt: `Reply with exactly this token and nothing else: ${marker}`,
+    description: 'plugin-live background probe',
+    run_in_background: true,
+  }, {}))
+  console.log('  ' + delegated.split('\n').join('\n  '))
+  const taskId = /taskId: (\S+)/u.exec(delegated)?.[1]
+  check('the background call returned a task id', taskId !== undefined)
+
+  if (taskId !== undefined) {
+    const SETTLED = /state\s+: (completed|error|aborted|refusal|max-tokens|cancelled)/u
+    let statusText = ''
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline) {
+      statusText = String(await agentsTool.execute({ action: 'status', taskId }, {}))
+      if (SETTLED.test(statusText)) break
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+    console.log('  ' + statusText.split('\n').slice(0, 10).join('\n  '))
+    check('status reports the task settled', SETTLED.test(statusText))
+    // SCOPE THE SEARCH TO THE OUTPUT SECTION. The first version of this check searched the whole
+    // status text for the marker -- and the status text ECHOES THE PROMPT, which contains the
+    // marker. So it passed whether or not any answer came back: the check could not tell "the
+    // answer arrived" from "the question was repeated". (The same shape as PITFALLS A5.)
+    const outputSection = /^--- output[^\n]*---\n([\s\S]*)$/mu.exec(statusText)?.[1] ?? ''
+    check('the status output has an answer section', outputSection !== '', `heading=${/^--- output[^\n]*---/mu.exec(statusText)?.[0] ?? 'none'}`)
+    check('THE ANSWER IS READABLE through remote_agents status', outputSection.includes(marker),
+      `answer section was ${JSON.stringify(outputSection.slice(0, 120))}`)
+    // Read a second time: this must be RETENTION, not a one-shot echo at settle time.
+    const reread = String(await agentsTool.execute({ action: 'status', taskId }, {}))
+    const rereadSection = /^--- output[^\n]*---\n([\s\S]*)$/mu.exec(reread)?.[1] ?? ''
+    check('and the answer is retained, not consumed by the first read', rereadSection.includes(marker))
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 2b. The screenshot tool, through the mounted tool set
@@ -337,7 +397,11 @@ check('a global execution guard is registered', mounted.guards.length > 0, `got 
 
 const agentA = createLiveAgent('live-a')
 const agentB = createLiveAgent('live-b')
-check('a new session has the remote tools denied', agentA.__denied.size === 4, `denied ${agentA.__denied.size}`)
+// `EXPECTED_TOOLS.length`, not a literal. These three checks said "=== 4" and went stale the moment
+// 0.2.0 added the fifth tool, so the harness reported three failures that were about its own
+// hardcoded count. PITFALLS D11, in the one file the package's test suite does not cover.
+check('a new session has the remote tools denied', agentA.__denied.size === EXPECTED_TOOLS.length,
+  `denied ${agentA.__denied.size} of ${EXPECTED_TOOLS.length}`)
 check('the policy section renders empty while off', policyTextFor(agentA) === '', JSON.stringify(policyTextFor(agentA)))
 check('the guard refuses a remote tool while off',
   /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')),
@@ -353,12 +417,16 @@ check('the policy is injected once enabled',
   /Remote LAN workers/.test(String(policyTextFor(agentA) ?? '')), 'expected the policy text')
 
 // The switch is PER SESSION: turning one on must not turn the other on.
-check('the other session stays off', agentB.__denied.size === 4 && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentB }) ?? '')))
+check('the other session stays off', agentB.__denied.size === EXPECTED_TOOLS.length
+  && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentB }) ?? '')),
+  `denied ${agentB.__denied.size} of ${EXPECTED_TOOLS.length}`)
 
 const offResult = command.handler({ commandId: 'live-2', agent: agentA, rawInput: 'off', attachments: [] })
 check('/remote-use off succeeds', offResult.kind === 'success')
 check('the restriction comes back',
-  agentA.__denied.size === 4 && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')))
+  agentA.__denied.size === EXPECTED_TOOLS.length
+  && /off for this session/.test(String(guardReason({ name: 'remote_agents', agent: agentA }) ?? '')),
+  `denied ${agentA.__denied.size} of ${EXPECTED_TOOLS.length}`)
 
 // ---------------------------------------------------------------------------
 // 2c. Human approval, end to end, against the real worker

@@ -18,6 +18,20 @@
 const TERMINAL = new Set(['completed', 'error', 'aborted', 'refusal', 'max-tokens', 'cancelled'])
 
 /**
+ * How much of a settled task's answer to keep, in characters.
+ *
+ * WHY THIS EXISTS AT ALL: without it a background delegation was a dead end — the task ran,
+ * the state was visible, and the ANSWER was unreachable, because the registry kept progress
+ * metrics and nothing else (PITFALLS F15). A result you cannot read is not a result.
+ *
+ * WHY IT IS CAPPED: the registry lives for the whole process and holds up to `maxTasks` entries,
+ * so retention has to be bounded or a chatty worker grows it without limit. The cap is generous
+ * (64k chars is a long report) and truncation is REPORTED rather than silent, so a reader can
+ * tell "this is all of it" from "this is the first 64k".
+ */
+export const OUTPUT_LIMIT = 64_000
+
+/**
  * @typedef {object} RemoteTask
  * @property {string} taskId
  * @property {string} peerId
@@ -33,6 +47,8 @@ const TERMINAL = new Set(['completed', 'error', 'aborted', 'refusal', 'max-token
  * @property {string[]} recentTools         last few tool names, for at-a-glance status
  * @property {boolean} waitingForApproval
  * @property {{used:number,size:number}} [usage]
+ * @property {string} [output]              the worker's answer, capped at OUTPUT_LIMIT
+ * @property {number} [outputChars]         the answer's full length before capping
  */
 
 /** @returns {string} a short, sortable, unique-enough task id */
@@ -116,8 +132,14 @@ export class TaskRegistry {
   /**
    * Settle a task. The first settlement wins — a late ACP event must not reopen
    * a finished task.
+   *
+   * `final.output` is the worker's answer text. It is the ONLY thing that makes a background
+   * delegation useful after the fact, so it is retained here rather than only being handed
+   * back through the provider's result promise (which a background caller has already
+   * stopped awaiting).
+   *
    * @param {string} taskId
-   * @param {{ state: string, stopReason?: string, diagnostic?: string }} final
+   * @param {{ state: string, stopReason?: string, diagnostic?: string, output?: string }} final
    */
   settle(taskId, final) {
     const t = this.tasks.get(taskId)
@@ -126,6 +148,10 @@ export class TaskRegistry {
     t.state = TERMINAL.has(final.state) ? final.state : 'error'
     t.stopReason = final.stopReason ?? t.state
     if (final.diagnostic !== undefined) t.diagnostic = final.diagnostic
+    if (typeof final.output === 'string' && final.output !== '') {
+      t.output = final.output.length > OUTPUT_LIMIT ? final.output.slice(0, OUTPUT_LIMIT) : final.output
+      t.outputChars = final.output.length
+    }
     t.endedAt = this.now()
     t.waitingForApproval = false
     return t
@@ -134,6 +160,39 @@ export class TaskRegistry {
   /** @returns {RemoteTask[]} newest first */
   list() {
     return [...this.tasks.values()].sort((a, b) => b.startedAt - a.startedAt)
+  }
+
+  /**
+   * Tasks as the settings page needs them: state and progress, WITHOUT the answer text.
+   *
+   * The page polls its route on a timer and renders a five-column table. Sending every retained
+   * answer with every poll would put megabytes on the wire for data nothing draws, so the bulky
+   * field is dropped here rather than at the route (which would have to know the field's name).
+   * The model still reads answers through `remote_agents`, straight off the registry.
+   *
+   * @param {number} [limit]  how many tasks to return, newest first
+   * @returns {object[]}
+   */
+  listForUi(limit = 50) {
+    return this.list().slice(0, limit).map((t) => ({
+      taskId: t.taskId,
+      peerId: t.peerId,
+      label: t.label,
+      promptDigest: t.promptDigest,
+      cwd: t.cwd,
+      state: t.state,
+      startedAt: t.startedAt,
+      endedAt: t.endedAt,
+      stopReason: t.stopReason,
+      diagnostic: t.diagnostic,
+      toolCallCount: t.toolCallCount,
+      recentTools: t.recentTools,
+      waitingForApproval: t.waitingForApproval,
+      usage: t.usage,
+      // Not the answer itself, but its size: the page can say "this run produced something"
+      // without shipping it.
+      outputChars: t.outputChars,
+    }))
   }
 
   /** @param {string} [peerId] */

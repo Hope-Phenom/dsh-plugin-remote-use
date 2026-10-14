@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { RemoteProvider, blocksToText, assertUsableCwd, GATE_REFUSED } from '../lib/provider/remote-provider.js'
-import { TaskRegistry } from '../lib/core/task-registry.js'
+import { TaskRegistry, OUTPUT_LIMIT } from '../lib/core/task-registry.js'
 import { NO_START_CAPABILITIES, limitDiagnostic } from '../lib/provider/out-of-process-helpers.js'
 import {
   makeRemoteTools, renderSelfcheck, renderTaskDetail, waitForTask, objectSchema,
@@ -216,6 +216,92 @@ test('tool calls and usage observed during the run land in the registry', async 
   assert.equal(task.toolCallCount, 1)
   assert.deepEqual(task.recentTools, ['write'])
   assert.deepEqual(task.usage, { used: 42, size: 100 })
+})
+
+test('the settled answer is retained in the registry, not only returned through the result promise', async () => {
+  const { provider, registry } = makeProvider({ bridgeOverrides: { hold: false } })
+  const run = await provider.start(REQ)
+  await run.result
+  const task = registry.get(run.id)
+  assert.equal(task.output, 'DONE')
+  assert.equal(task.outputChars, 4)
+})
+
+// ---------------------------------------------------------------------------
+// REGRESSION F15: a background delegation's answer must be readable
+//
+// The delegation path is asymmetric on purpose -- background mode returns a task id and keeps
+// working -- and that is what made this broken: nobody is left awaiting the provider's result
+// promise, so if the answer is not retained, it does not exist anywhere. The task ran, the state
+// was visible, and the ANSWER was unreachable, which made background delegation a dead end.
+// Nothing offline caught it, because every test either awaited `result` itself or only ever
+// looked at state. These go through the real provider, the real registry and the real tools.
+// ---------------------------------------------------------------------------
+
+test('REGRESSION F15: a background delegation\'s answer comes back through remote_agents', async () => {
+  const MARKER = 'MARKER-42ff'
+  const { provider, registry } = makeProvider({
+    bridgeOverrides: { hold: false, outcome: { stopReason: 'completed', output: `worker says ${MARKER}`, toolCalls: [] } },
+  })
+  const peers = new Map([['labpc', { peerId: 'labpc', name: 'lab-pc', provider }]])
+  const tools = makeRemoteTools({ registry, peers })
+  const subagent = tools.find((t) => t.name === 'remote_subagent')
+  const agents = tools.find((t) => t.name === 'remote_agents')
+
+  const delegated = String(await subagent.execute({ prompt: 'probe', run_in_background: true }))
+  const taskId = /taskId: (\S+)/u.exec(delegated)?.[1]
+  assert.ok(taskId !== undefined, `the background reply must name the task: ${delegated}`)
+
+  // `wait` and `status` are the two ways back to the answer, and both must carry it.
+  const waited = String(await agents.execute({ action: 'wait', taskId, timeoutMs: 2000 }))
+  assert.match(waited, new RegExp(MARKER))
+  const status = String(await agents.execute({ action: 'status', taskId }))
+  assert.match(status, new RegExp(MARKER))
+  // Retained, not merely echoed: the registry is the channel, so a second read still has it.
+  assert.match(String(await agents.execute({ action: 'status', taskId })), new RegExp(MARKER))
+})
+
+test('renderTaskDetail is explicit about a settled task that produced no text', async () => {
+  const registry = new TaskRegistry({})
+  const t = registry.create({ peerId: 'p', prompt: 'x', cwd: 'c' })
+  registry.settle(t.taskId, { state: 'completed', stopReason: 'completed' })
+  assert.match(renderTaskDetail(registry.get(t.taskId)), /produced no text/)
+
+  const u = registry.create({ peerId: 'p', prompt: 'x', cwd: 'c' })
+  registry.settle(u.taskId, { state: 'error', stopReason: 'error' })
+  assert.match(renderTaskDetail(registry.get(u.taskId)), /output\s+: \(none\)/)
+})
+
+test('a running task reports no output section at all', () => {
+  const registry = new TaskRegistry({})
+  const t = registry.create({ peerId: 'p', prompt: 'x', cwd: 'c' })
+  const detail = renderTaskDetail(t)
+  assert.doesNotMatch(detail, /--- output ---/)
+  assert.doesNotMatch(detail, /produced no text/)
+})
+
+test('a long answer is capped for retention and the cap is reported, not silent', () => {
+  const registry = new TaskRegistry({})
+  const t = registry.create({ peerId: 'p', prompt: 'x', cwd: 'c' })
+  const total = OUTPUT_LIMIT + 5_000
+  registry.settle(t.taskId, { state: 'completed', stopReason: 'completed', output: 'x'.repeat(total) })
+  const task = registry.get(t.taskId)
+  assert.equal(task.output.length, OUTPUT_LIMIT, 'retention must be bounded')
+  assert.equal(task.outputChars, total, 'the full length must still be known')
+  assert.match(renderTaskDetail(task), new RegExp(`first ${OUTPUT_LIMIT} of ${total} chars`))
+})
+
+test('listForUi carries the progress fields but not the answer text', () => {
+  const registry = new TaskRegistry({})
+  const t = registry.create({ peerId: 'p', prompt: 'x', cwd: 'c' })
+  registry.settle(t.taskId, { state: 'completed', stopReason: 'completed', output: 'secret answer' })
+  const [row] = registry.listForUi(50)
+  assert.equal(row.output, undefined, 'the page must not receive megabytes of answer text')
+  assert.equal(row.outputChars, 'secret answer'.length)
+  // The fields the page renders must survive the projection.
+  for (const key of ['taskId', 'peerId', 'state', 'startedAt', 'toolCallCount', 'recentTools', 'waitingForApproval']) {
+    assert.ok(key in row, `listForUi must keep ${key}`)
+  }
 })
 
 // ---------------------------------------------------------------------------

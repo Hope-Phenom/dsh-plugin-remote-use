@@ -9,6 +9,7 @@ import { strict as assert } from 'node:assert'
 import test from 'node:test'
 
 import { DEFAULT_ARM_PORT, WorkerArming, generateToken, maskToken, tokenMatches } from '../lib/core/worker-arming.js'
+import { decodePairing } from '../slave/pairing.mjs'
 
 const INTERFACES = {
   'vEthernet (Default Switch)': [{ address: '172.20.0.1', family: 'IPv4', internal: false }],
@@ -251,6 +252,68 @@ test('disarm keeps the credential for a restart unless asked to forget it', () =
   arming.disarm({ forget: true })
   assert.equal(arming.status().tokenSet, false)
   assert.equal(calls.persisted.at(-1).token, '')
+})
+
+// ---------------------------------------------------------------------------
+// F16: the task directory is the WORKER'S to state, because only it can know one
+//
+// The master cannot guess an absolute path on another machine. Pairing without one used to
+// produce a worker that could not accept a task at all, and the master only found out on its
+// first delegation. The directory therefore travels inside the pairing string.
+// ---------------------------------------------------------------------------
+
+test('the pairing string carries the task directory, so the master need not guess it', () => {
+  const { arming } = makeArming()
+  const result = arming.arm({ bindAddress: '192.168.1.100', taskCwd: 'C:\\dsh-remote\\work' })
+  assert.equal(result.ok, true, result.error)
+  const decoded = decodePairing(result.pairing)
+  assert.equal(decoded.ok, true, decoded.error)
+  assert.equal(decoded.worker.cwd, 'C:\\dsh-remote\\work')
+  assert.equal(decoded.worker.url, `ws://192.168.1.100:${DEFAULT_ARM_PORT}`)
+  assert.equal(arming.status().taskCwd, 'C:\\dsh-remote\\work')
+})
+
+test('a RELATIVE task directory is refused at arming, not advertised as if it worked', () => {
+  const { arming, calls } = makeArming()
+  const result = arming.arm({ bindAddress: '192.168.1.100', taskCwd: 'work\\sub' })
+  assert.equal(result.ok, false)
+  assert.match(result.error, /absolute path/)
+  assert.equal(arming.status().armed, false, 'nothing may be opened on a bad configuration')
+  assert.deepEqual(calls.start, [])
+})
+
+test('a BLANK task directory is allowed, but the string then carries none', () => {
+  // Deliberately not a blocker: arming is about accepting remote execution, and a worker whose
+  // directory the operator has not decided yet is still a worker the master can be told about.
+  // What must never happen is a string that LOOKS complete and is not.
+  const { arming } = makeArming()
+  const result = arming.arm({ bindAddress: '192.168.1.100', taskCwd: '   ' })
+  assert.equal(result.ok, true, result.error)
+  const decoded = decodePairing(result.pairing)
+  assert.equal(decoded.ok, true)
+  assert.equal(decoded.worker.cwd, '', 'an empty field is omitted rather than sent empty')
+})
+
+test('the task directory survives a restart, so a restore does not lose the master-facing path', () => {
+  const { arming, calls } = makeArming()
+  arming.arm({ bindAddress: '192.168.1.100', taskCwd: 'C:\\work' })
+  assert.equal(calls.persisted.at(-1).taskCwd, 'C:\\work', 'it must be written, not only held in memory')
+
+  const restarted = makeArming({ stored: calls.persisted.at(-1) })
+  assert.equal(restarted.arming.status().taskCwd, 'C:\\work')
+  // Decoded, not substring-matched: the string is base64url, so a literal path never appears in it.
+  const reissued = decodePairing(restarted.arming.pairingString())
+  assert.equal(reissued.ok, true, reissued.error)
+  assert.equal(reissued.worker.cwd, 'C:\\work', 'a restored worker re-issues the same directory')
+})
+
+test('preflight reports a relative task directory as a blocker before anything is armed', () => {
+  const { arming } = makeArming()
+  const pre = arming.preflight({ bindAddress: '192.168.1.100', taskCwd: 'relative' })
+  assert.equal(pre.ok, false)
+  assert.equal(pre.blockers.some((b) => /absolute path/.test(b)), true)
+  // The page renders blockers as the reason the arm button is disabled, so an empty one is fine.
+  assert.equal(arming.preflight({ bindAddress: '192.168.1.100', taskCwd: '' }).ok, true)
 })
 
 test('the status lists every interface, including the ones that must not be chosen', () => {

@@ -20,7 +20,7 @@
 
 ### 1.1 目标
 
-1. **主机侧零感知差异**：主机上的模型看到的是一个 `subagent_remote` 工具，用法、参数、后台 job、进度语义都与内置的 `subagent` 一致。
+1. **主机侧零感知差异**：主机上的模型看到的是一个 `remote_subagent` 工具，用法、参数、后台 job、进度语义都与内置的 `subagent` 一致。
 2. **从机侧保持完整 DSH**：从机本身就是一台可独立工作的 DSH 机器。配对后它**额外**获得"接受委托"的能力，而不是被降级为遥控终端。
 3. **统一规划点**：人类只在主机上做规划和决策。从机上的会话全部是委派产生的一次性工作会话，不面向人类规划。
 4. **GUI 独占资源安全**：一台从机同一时刻只跑一个任务（V1 全串行），避免两个 GUI 任务互相踩。
@@ -148,7 +148,7 @@ interface SubagentResult {
 
 ```
 ┌─ 主机 (Lead) ─────────────────────────────────────────────────────┐
-│  模型 ──► tools: subagent_remote / remote_agents / remote_interrupt │
+│  模型 ──► tools: remote_subagent / remote_agents / remote_interrupt │
 │                        │                                            │
 │  ┌─────────────────────▼──────────────────────────────────────┐    │
 │  │ dsh-plugin-remote-use / host                                │    │
@@ -158,7 +158,7 @@ interface SubagentResult {
 │  │      │                                                      │    │
 │  │  AcpClientBridge ──── 每条从机一条长连接（WS）+ N 个 session │    │
 │  │      │                                                      │    │
-│  │  TaskRegistry ─────── 远程 run 的内存 registry（可见性源）    │    │
+│  │  TaskRegistry ─────── 远程 run 的内存 registry（含答案）      │    │
 │  │      │                                                      │    │
 │  │  ReviewEngine ─────── 纯规则引擎：审批决策 + 任务内记忆        │    │
 │  │      │                                                      │    │
@@ -199,6 +199,10 @@ interface SubagentResult {
 1. **职责内聚**：决策、记忆、审计、可见性全在主机侧，一个地方改策略。
 2. **不需要从机 Auto review**：省掉从机 token 翻倍（每次调用一次模型请求）的代价。
 3. **不产生误导文案**：受限沙箱的拒绝是**刻意的、正常的**，正是审批请求的触发源，不是异常。
+
+> **`TaskRegistry` 里"可见性"的确切含义**（F15 修正）：它必须保存**进度**（状态、工具调用数、用量、
+> 是否在等审批）**和答案本身**。原先只保存前者，于是后台委派的答案**无处可取** ——
+> 前台路径把这个缺口一直遮着，因为前台调用方自己还攥着 `result` promise。
 
 > ⚠️ 与早期讨论的偏差：早期设想是"从机开自动审批，拒绝时转发主机"。核实后发现 ACP 会话用不到 Auto review，因此该机制**改为在主机侧实现**，效果等价且成本更低。
 
@@ -364,7 +368,10 @@ import { NO_START_CAPABILITIES, resolveChildCwd, settleRunResult, subprocessRunH
 
 **进程外 run 的判别位**：`ctx.subagents` **没有**「按 id 查 run」的方法。判断一个 run 是本地还是进程外，用 `subagent/start` / `subagent/end` 生命周期事件里的 **`local`** 字段——这是官方给的判别位，比自造规则可靠。
 
-**一个 provider 对应一台从机**，名为 `remote-<peerId>`。工具行由用户/插件在 profile patch 里为一台从机加一行，或由插件动态注册（⚠️ 见 §11 未决项）。
+**一个 provider 对应一台从机**，名为 `remote-<peerId>`。工具行**不需要**任何人手写：委派入口是插件自己用
+`ctx.tools.register()` 注册的 `remote_subagent`（PITFALLS F11 —— 放在 profile patch 里的
+`dsh-tool-subagent` 行**到不了模型**，因为 Web 会话的工具目录由 agent preset 枚举）。
+provider 注册与工具暴露是**两件事**，这一点曾被混为一谈。
 
 ### 5.2 `AcpClientBridge`
 
@@ -397,7 +404,16 @@ import { NO_START_CAPABILITIES, resolveChildCwd, settleRunResult, subprocessRunH
 
 远程 run 的**唯一事实来源**（内存为主 + 落盘快照）。
 
-记录每个任务：`taskId`、`peerId`、`acpSessionId`、`label`、`prompt 摘要`、`状态`、`起止时间`、`最近 N 条工具调用摘要`、`当前是否在等审批`、`累计工具调用数`。
+记录每个任务：`taskId`、`peerId`、`label`、`prompt 摘要`、`状态`、`起止时间`、`最近 N 条工具调用摘要`、`当前是否在等审批`、`累计工具调用数`、`用量`，以及**落定后的答案文本**（`output`，上限 `OUTPUT_LIMIT = 64_000` 字符；`outputChars` 记原始长度）。
+
+**答案为什么必须留在这里**（F15）：答案原本只从 `provider.start()` 返回的 `result` promise 交出去，
+而**后台模式下没有任何人在等那个 promise** —— 调用方拿到 taskId 就走了。于是"任务跑完了"和"结果还在"
+是两件事：promise 落定后文本就没了，后台委派变成一条**断头路**。留存上限是必须的（registry 活在整个进程里），
+而**截断必须在渲染时写出来**，否则读者分不清"这就是全部"和"这是前 64k"。
+
+⚠️ **设置页的 GET 路由用 `listForUi()`，不用 `list()`**：页面不渲染答案正文，把几十条完整回答随每次轮询
+发给浏览器是纯粹的浪费（它只拿到 `outputChars`）。这是"留存答案"带来的**连带改动**，不加就会静默地把
+设置页变成一个几 MB 的响应。
 
 **这是 C3 缺口的补丁**：远程 run 不进主机 `subagentCatalog`，所以插件自己维护一份，供 `remote_agents` 工具和运行时上下文使用。
 
@@ -437,12 +453,13 @@ ctx.sessionProjections.register({
 
 | 工具 | 对应官方工具 | 说明 |
 |---|---|---|
-| `subagent_remote` | `subagent` | 由 `dsh-tool-subagent` 的一行配置提供，见下方配置清单 |
-| `remote_agents` | `list_agents` / `wait_agent` | action: `list` / `status` / `wait`。读 `TaskRegistry` |
+| `remote_subagent` | `subagent` | **插件自己注册**的委派入口（`ctx.tools.register`，0.2.0 起）。**不需要任何 profile 配置** —— 见下方"更正二"与 PITFALLS F11 |
+| `remote_agents` | `list_agents` / `wait_agent` | action: `list` / `status` / `wait`。读 `TaskRegistry`；`status` / `wait` 会**把落定任务的答案正文渲染出来**（F15） |
 | `remote_interrupt` | `interrupt_agent` | 走 ACP `session/cancel` |
 | `remote_selfcheck` | —（新增） | 查询从机就绪状态，见 §5.10.7 |
+| `remote_screenshot` | —（新增） | 截从机桌面，**回传主机侧文件路径**（图走 HTTP，不走 ACP 消息泵），见 F14 |
 
-**`subagent_remote` 的配置**（字段已核验；**行的写法在下面被更正过**）：
+**曾经设想的 `subagent_remote` 配置**（字段已核验；**行的写法与必要性都在下面被推翻**）：
 
 ```yaml
 - insert:                               # ← 新增行必须包在 insert: 里，见下方更正
@@ -457,6 +474,11 @@ ctx.sessionProjections.register({
         # agentOptions / persona / toolFilter
         modelSelectionSettings: false   # 默认值；保持 false 即模型无法请求 provider/model
 ```
+
+> ⛔ **更正二（0.2.0）：整段都不再需要。** 上面这个形状**写对了也到不了模型** —— Web 会话的模型工具目录
+> 由 **agent preset** 枚举，不是整棵 loader 树（PITFALLS F11）。留下的价值只剩两条历史教训：
+> patch 的 `insert:` 语义（更正一），以及下面对 capability 校验的核验记录。
+> **插件用 `ctx.tools.register()` 注册自己的 `remote_subagent`**，安装侧因此不需要任何 profile 编辑。
 
 ⚠️ **更正一：上面的 `- id:` 单独写是错的，必须是 `- insert:`。** 这一条当初写成了不带 `insert:` 的
 `- id: tool-subagent-remote-labpc`，而 patch 语义是「**带 `id` 的条目覆盖已有行，不创建新行**」。
@@ -1440,8 +1462,8 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 
 | 未验证 | 说明 |
 |---|---|
-| **设置页在真实浏览器里的渲染** | Web 服务器要求认证（`/` 返回 401），无法从外部加载页面。离线能做的都做了：bundle 被**真实执行**并渲染出树（`new Function('window', source)`）、hook 顺序守卫通过、`package.json` 声明与文件一致、locale 与图标符合 DSH 契约。**但"真浏览器里长什么样"只能由人看** |
-| **DSH 插件装载器集成** | 真机测试用的是真实模块 + 独立脚本，**没有经过 `plugin_manager install_bundle`**。工具行（`subagent_remote`）与 provider 注册的装载路径未验；本机的安装方式是 `link:`，与发布包安装不同 |
+| **设置页在真实浏览器里的渲染** | Web 服务器要求认证（`/` 返回 401），无法从外部加载页面。离线能做的都做了：bundle 被**真实执行**并渲染出树（`new Function('window', source)`）、hook 顺序守卫通过、`package.json` 声明与文件一致、locale 与图标符合 DSH 契约。**已由人实际使用过**（在页面上改过 worker 配置并生效），但"每个空状态长什么样"仍只由离线守卫覆盖 |
+| **DSH 插件装载器集成** | ✅ **已验**：主机与从机都从 registry 安装发布包（非 `link:`），插件在两侧都加载、设置页出现、五个 `remote_*` 工具在真机上全部调通（`remote_subagent` 前台任务带回完整报告）。**委派入口是插件自己注册的** `remote_subagent`，不经过任何 loader 工具行（F11） |
 | 工作区同步（P4） | 未实现 —— 经判断不需要：GUI 验证跑在从机本地，主机源码不必同步过去（见 §15.13 的取舍） |
 | ~~人工审批 UI~~ | **已实现并真机验证**（§15.12）：`needsHuman` 改为排队等人批准，超时按拒绝；**真从机上实测批准了 `danger-full-access` 提权且任务完成、审计留痕 `rows=1`** |
 | **并发 session** | 心跳重连已实测（含从机中途死亡：任务 4 ms 内结束、链路状态如实）。**两个会话同时做远程工作未验证** |
@@ -1451,11 +1473,12 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | **P0 可行性验证** | 手工跑通：从机 `dsh --profile acp`（stdio）↔ 一个最小 WS 中继 ↔ 主机侧一个最小 ACP client 脚本；发一个 prompt，看到 `session/update` 流，能 `session/cancel` | 一次任务能跑完并拿到输出；能取消 |
-| **P1 最小闭环** | 中继 + `RemoteProvider` + `subagent_remote` 工具 + 任务级串行队列 | 主机模型能派单、拿到结果；从机崩溃时主机得到 `stopReason: error` |
+| **P1 最小闭环** | 中继 + `RemoteProvider` + `remote_subagent` 工具（0.2.0 起由插件自行注册）+ 任务级串行队列 | 主机模型能派单、拿到结果；从机崩溃时主机得到 `stopReason: error` |
 | **P2 授权** | 审批桥接 + ReviewEngine（规则 + 任务内记忆）+ 90 秒超时 + 待审批通知 | 从机提权操作能被主机批准/拒绝；超时按拒绝；映射缺失默认拒绝 |
 | **P3 可见性** | `TaskRegistry` + `remote_agents` + `remote_interrupt` + 运行时上下文注入 | 模型能查询/等待/打断远程任务；不会"忘记"已派出的任务 |
 | **P4 工作区同步** | manifest + blob + 事务性切换 + 路径映射 | 从机能拿到与主机一致的工作区；同步中途失败不留半成品 |
-| **P5 审计与 UI** | AuditLog + Settings 页 + 从机「工作节点」页 + 急停 | 能回答"谁批准了什么"；能从从机本地急停 | ⚠️ Settings 页已做（§15）；AuditLog 未做 || **P6 加固** | 协议版本协商、重连与在途任务对齐、磁盘 GC、配额 | 断网重连不产生重复任务；从机重启后状态一致 |
+| **P5 审计与 UI** | AuditLog + Settings 页 + 从机「工作节点」页 + 急停 | 能回答"谁批准了什么"；能从从机本地急停。✅ 均已成（§9、§15） |
+| **P6 加固** | 协议版本协商、重连与在途任务对齐、磁盘 GC、配额 | 断网重连不产生重复任务；从机重启后状态一致 |
 
 **P0 必须先做**，因为它验证的是整条路线的技术前提（ACP over WS 可跑通）。若 P0 失败，退回自研 `session.event` 中继（只替换 `Transport` 实现，上层不动）。
 
@@ -1468,7 +1491,7 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | # | 问题 | 影响 |
 |---|---|---|
 | U1 | ✅ **已解决**：远程工具行省略 `agentOptions`/`persona`/`toolFilter` + `maxDepth: 'provider-managed'` + `modelSelectionSettings: false`，即不会触发 capability 校验。**主机可同时保留本地子 Agent 的完整能力**（那是另一行配置） | — |
-| U2 | ✅ **已解决**：插件可用 `ctx.tools.register(defineTool({...}))` 注册自定义工具（§5.7）；但 **`subagent_remote` 这一行是否要用户手改 profile patch** 仍未定 | 安装体验 |
+| U2 | ✅ **已解决**（0.2.0）：插件用 `ctx.tools.register()` 注册自己的委派工具 `remote_subagent`，**用户完全不需要碰 profile patch**。原先"每台从机写一行 `dsh-tool-subagent`"的结论**已推翻** —— 那样的行即使写对也到不了模型（PITFALLS F11） | — |
 | U3 | ⚠️ 从机侧任务队列是否持久化（从机重启后是否恢复排队任务） | 崩溃恢复语义 |
 | U4 | ⚠️ 主机重连后如何与从机上在途任务对齐（ACP 缺 `session/load`，只有 `session/resume`） | 断网恢复 |
 | U5 | ⚠️ 成败判定规则（§4.4）需实测校准 | 状态显示准确性 |
@@ -2430,6 +2453,20 @@ provider 那条路是对的（它自己解包 `.optionId`），所以端到端�
   带**旧** token 的串，而它的失败长得像网络问题
 - 无 `--token` 时**拒绝生成**并以 2 退出：否则会生成一个把主机配到"谁都能连"的从机的串
 
+#### 它还必须携带**任务目录**（F16）
+
+串在很长时间里只带 `url` + `token`（以及可选的 `name`）：`cwd` 字段**一直支持**却**从没被填过**。
+后果是配对建立了一个**没有任务目录**的 worker —— 连接正常、自检全绿，而**第一次派单**才炸
+`[REMOTE_BAD_CWD]`。
+
+**为什么必须由从机说**：`cwd` 是**从机上的绝对路径**，同时就是从机沙箱允许写入的范围（§6.4）。
+主机不可能猜出另一台机器上的路径 —— 猜错了不是报错，而是任务**写到没人选择过的目录**。
+所以这个值只能由**路径所在的那一侧**给出，而配对串是它唯一的传递通道。
+
+空值**仍然合法**（操作者还没决定），但那时串里**没有这一项**，主机侧必须在自己的界面里补一个，
+并**拒绝**把没有它的 worker 落盘 —— 这种配置**永远不可能派单成功**，接受它只是把必然的失败
+从"粘贴的那一刻"挪到"下一次委派"。
+
 #### 广播地址凭什么挑
 
 `--host 0.0.0.0` 是"到处监听"，不是能拨的地址。原本取"第一个非内部 IPv4"，
@@ -2530,11 +2567,15 @@ provider 那条路是对的（它自己解包 `.optionId`），所以端到端�
 
 | 位置 | 为什么不行 |
 |---|---|
-| 派单工具 `subagent_remote` 的描述 | `dsh-tool-subagent` 的 Config **没有 `description`**，描述由代码按 provider 能力生成，进程外 provider 得到的是通用文案 |
+| `dsh-tool-subagent` 那条 loader 行的描述 | 它的 Config **没有 `description`**，描述由代码按 provider 能力生成，进程外 provider 得到的是通用文案；而且这一行**到不了模型**（F11） |
 | provider 自身 | 契约只有 `name` / `capabilities` / `inheritsParentContext` / `start`，**没有描述位** |
 | DSH 的 `SUBAGENT_DELEGATION` 上下文 | 它是**对子代理说的**（"You are a delegated subagent…"），不是对父代理说的 |
 
 ⇒ **策略只能由本插件自己注入**，而"是否注入"由会话决定。
+
+> **0.2.0 补充**：插件自己注册的 `remote_subagent` **有** `description`（`create` 时手写），
+> 所以"何时该委派"这一半现在有了着落 —— 上表针对的是**接缝那条路**，不是这个工具。
+> 它仍然**不替模型决定**是否委派，只把"什么时候该用远程节点"写清楚（GUI / 独占桌面 / 别在主机上抢鼠标）。
 
 ### 17.2 交互
 
@@ -3509,12 +3550,25 @@ noWorkers: '尚未配置工作节点。请在 profile 补丁中配置后重启�
 > 尚未配置工作节点。在这里添加即可；但模型要能调用它，还需要在 profile 补丁中为该节点加一行工具行
 > （每个节点一行），然后重启。
 
+> ⛔ **这一轮的结论在 0.2.0 被推翻（PITFALLS F11）。**"模型可见的工具行只能靠 profile 补丁"是**错的**：
+> Web 会话的工具目录由 **agent preset**（`preset-standard.plugins`）枚举，补丁里那条 `dsh-tool-subagent`
+> 行**即使写对也到不了模型**。所以第 22 轮指给操作者的那一步（加一行工具行）**本身就是白费的** ——
+> 照做之后依然没有 `subagent_remote`，只是这次连"该去补丁里找"这条线索都没了。
+>
+> 改法是插件自己用 `ctx.tools.register()` 注册 `remote_subagent`，于是这句话**第三次**被改：
+>
+> > 尚未配置工作节点。在上方添加，或粘贴配对串即可 —— 工具会随之出现，不需要改 profile 补丁，也不需要重启。
+>
+> **三轮的教训是同一件事**：这条提示语每次都在指"下一步该做什么"，而它**只有在那一步真的有效时才是对的**。
+> 第 22 轮把措辞改对了（从"配置 worker"改成"加工具行"），但**那个动作当时就不成立** ——
+> 措辞正确掩盖了动作错误。核对的目标不是"这句话写得对不对"，而是"**照它做能得到结果吗**"。
+
 ##### 同轮两次核对的结论（都不是缺陷）
 
 | 核对 | 我的检查脚本说 | 真相 |
 |---|---|---|
 | `package.json` 的声明 vs 实际文件 | `exports["./locale/*.json"]` 缺失 | **我的脚本没展开 glob** —— `locale/en.json` 与 `zh.json` 都在，且符合 DSH `meta.title`/`meta.description` 契约 |
-| `cordis.patch.yml` | — | 干净、注释详尽（含 per-worker 工具行的示例与三条 C1/C2 约束） |
+| `cordis.patch.yml` | — | 干净、注释详尽。**但那条注释当时教的是已被推翻的 per-worker 工具行**（含 `toolName: subagent_remote` 示例）—— 0.2.0 已整段改写为"**不需要工具行**"并说明原因（F11） |
 
 > 第 21 轮我写"我的判据在说谎，而它说得很像真的"。这一轮又出现一次，只是这次错在**检查脚本**而不是守卫。
 > 两次都是同一个动作救回来的：**去看真东西**。

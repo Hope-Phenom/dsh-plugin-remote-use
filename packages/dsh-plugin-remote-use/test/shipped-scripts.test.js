@@ -24,6 +24,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { REMOTE_TOOL_NAMES } from '../lib/index.js'
+
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SLAVE = join(PKG_ROOT, 'slave')
 
@@ -147,6 +149,23 @@ test('the package is publishable and carries a README for its npm page', () => {
   const readme = join(PKG_ROOT, 'README.md')
   assert.ok(existsSync(readme), 'the package needs its own README for its npm page')
   assert.ok(readFileSync(readme, 'utf8').length > 400, 'a placeholder README is worse than none')
+})
+
+test('both package READMEs document every tool the plugin ships', () => {
+  // WHY THIS EXISTS: the npm-facing READMEs listed the four OBSERVATION tools and not
+  // `remote_subagent` -- the delegation entry point, i.e. the one tool the page exists to
+  // advertise. Every test passed, because nothing compared the README against the tool set, and
+  // the omission was invisible to anyone who already knew how the plugin works. It is the same
+  // shape as PITFALLS D11: a document that hardcodes a list nothing checks.
+  //
+  // Compared against `REMOTE_TOOL_NAMES`, so adding a tool fails this until the docs name it.
+  const names = [...REMOTE_TOOL_NAMES]
+  assert.ok(names.length > 0, 'REMOTE_TOOL_NAMES must not be empty, or this guard proves nothing')
+  for (const file of ['README.md', 'README.zh.md']) {
+    const text = readFileSync(join(PKG_ROOT, file), 'utf8')
+    const missing = names.filter((name) => !text.includes(name))
+    assert.deepEqual(missing, [], `${file} does not mention: ${missing.join(', ')}`)
+  }
 })
 
 test('the worker self-check derives its install and credential paths from the environment', () => {  // Named explicitly rather than left to the scan above, so the intent survives a refactor of the
@@ -357,9 +376,9 @@ test('the display check blocks on the origin, and merely reports whether the pri
 /**
  * The bundled patch with its comments removed.
  *
- * The comments deliberately quote the broken form (and the example tool row quotes `id: labpc`), so
- * scanning the raw text finds those instead of the real entries. The first version of these guards
- * did exactly that and failed for the wrong reason.
+ * The comments deliberately quote the broken form (the comment about the disproved per-worker tool
+ * row names `dsh-tool-subagent`), so scanning the raw text finds those instead of the real entries.
+ * The first version of these guards did exactly that and failed for the wrong reason.
  */
 function patchBody() {
   return readFileSync(join(PKG_ROOT, 'cordis.patch.yml'), 'utf8')

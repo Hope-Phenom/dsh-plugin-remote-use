@@ -29,6 +29,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { assertBindable, candidateAddresses } from '../../slave/net-address.mjs'
 import { encodePairing } from '../../slave/pairing.mjs'
+import { isAbsoluteTaskPath } from './task-cwd.js'
 import { probeSandbox } from './sandbox-probe.js'
 
 /** Port used when the operator does not name one. Matches the reference worker's relay. */
@@ -98,6 +99,10 @@ export class WorkerArming {
     this.bindAddress = ''
     this.port = DEFAULT_ARM_PORT
     this.token = ''
+    // The directory this machine's tasks run in. It goes into the pairing string because the
+    // WORKER is the only side that can know a path on the worker -- the master learns it by paste
+    // or not at all. Kept as issued: the master owns the stored copy from then on.
+    this.taskCwd = ''
     this.armedAt = 0
     this.lastError = ''
     this.lastProbe = { ok: false, reason: 'not checked yet' }
@@ -110,6 +115,7 @@ export class WorkerArming {
     }
     if (typeof stored?.bindAddress === 'string') this.bindAddress = stored.bindAddress
     if (Number.isFinite(stored?.port)) this.port = Number(stored.port)
+    if (typeof stored?.taskCwd === 'string') this.taskCwd = stored.taskCwd
     if (stored?.armed === true && this.token !== '' && this.bindAddress !== '') {
       // THE GATE IS RE-RUN ON RESTORE, not skipped because it passed once.
       //
@@ -150,6 +156,7 @@ export class WorkerArming {
       armed: this.armed,
       bindAddress: this.bindAddress,
       port: this.port,
+      taskCwd: this.taskCwd,
       tokenSet: this.token !== '',
       tokenHint: maskToken(this.token),
       armedAt: this.armedAt,
@@ -168,7 +175,7 @@ export class WorkerArming {
    * Runs the sandbox probe EVERY time: the answer depends on the launch context, so a cached
    * one is an answer about a different context.
    *
-   * @param {{ bindAddress?: string, port?: number }} [request]
+   * @param {{ bindAddress?: string, port?: number, taskCwd?: string }} [request]
    * @returns {{ ok: boolean, blockers: string[], probe: object }}
    */
   preflight(request = {}) {
@@ -182,13 +189,21 @@ export class WorkerArming {
     if (!bindable.ok) blockers.push(bindable.error)
     const port = Number(request.port ?? this.port ?? DEFAULT_ARM_PORT)
     if (!Number.isInteger(port) || port < 1 || port > 65535) blockers.push(`port must be 1..65535, got ${port}`)
+    // A BLANK task directory is allowed -- the master can still be told one separately -- but a
+    // relative one is the same class of error as an unbindable address, and worse: it would go
+    // into the pairing string as if it were usable, and the master would have no reason to doubt
+    // it. Caught here rather than at the first delegation on the far machine.
+    const taskCwd = String(request.taskCwd ?? this.taskCwd).trim()
+    if (taskCwd !== '' && !isAbsoluteTaskPath(taskCwd)) {
+      blockers.push(`the task directory must be an absolute path on this machine, got "${taskCwd}"`)
+    }
     return { ok: blockers.length === 0, blockers, probe: this.lastProbe }
   }
 
   /**
    * Accept remote execution. Returns the plaintext token EXACTLY ONCE.
    *
-   * @param {{ bindAddress: string, port?: number }} request
+   * @param {{ bindAddress: string, port?: number, taskCwd?: string }} request
    * @returns {{ ok: boolean, token?: string, error?: string, blockers?: string[] }}
    */
   arm(request) {
@@ -202,6 +217,7 @@ export class WorkerArming {
 
     const bindAddress = String(request.bindAddress).trim()
     const port = Number(request.port ?? DEFAULT_ARM_PORT)
+    const taskCwd = String(request.taskCwd ?? '').trim()
 
     // A NEW credential every time it is armed, because decision 3 is "generated WHEN ENABLED".
     //
@@ -227,6 +243,7 @@ export class WorkerArming {
     this.armed = true
     this.bindAddress = bindAddress
     this.port = port
+    this.taskCwd = taskCwd
     this.token = token
     this.armedAt = this.now()
     this.lastError = ''
@@ -271,10 +288,20 @@ export class WorkerArming {
    * in recoverable form, so treating it as re-readable would undo decision 3 -- the point of
    * "shown once" is that the secret is not sitting in a page that can be screenshotted or left
    * open. Re-issuing is a deliberate act: `disarm({ forget: true })` then `arm()`.
+   *
+   * It carries the TASK DIRECTORY too. That is not decoration: the master cannot guess a path on
+   * this machine, and a worker paired without one cannot accept a task at all. Leaving it out is
+   * how pairing produced a worker that failed on its first delegation instead of at the paste
+   * (PITFALLS F16). `encodePairing` omits the field when it is empty, so a worker that has no
+   * opinion still produces a valid string -- the master must then be told one.
    */
   pairingString() {
     if (!this.armed || this.token === '') return ''
-    return encodePairing({ url: `ws://${this.bindAddress}:${this.port}`, token: this.token })
+    return encodePairing({
+      url: `ws://${this.bindAddress}:${this.port}`,
+      token: this.token,
+      cwd: this.taskCwd,
+    })
   }
 
   /** Whether a presented credential is the one in force. */
@@ -289,6 +316,7 @@ export class WorkerArming {
         armed: this.armed,
         bindAddress: this.bindAddress,
         port: this.port,
+        taskCwd: this.taskCwd,
         token: this.token,
         armedAt: this.armedAt,
       })

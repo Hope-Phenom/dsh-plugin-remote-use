@@ -93,8 +93,11 @@ export function makeRemoteTools(deps) {
       'Inspect work delegated to paired LAN workers. A remote task has no local child session, '
       + 'so it never appears in `list_agents` — use this instead.\n'
       + 'action="list": every paired worker and its in-flight tasks.\n'
-      + 'action="status": one task by taskId (state, elapsed, tool calls, whether it is waiting for approval).\n'
-      + 'action="wait": block until a task settles, then report its outcome.\n'
+      + 'action="status": one task by taskId — state, elapsed, tool calls, whether it is waiting for '
+      + 'approval, and, once the task has settled, the full answer text it produced.\n'
+      + 'action="wait": block until a task settles, then report its outcome (same detail as status).\n'
+      + 'This is how a background delegation\'s answer is collected: `remote_subagent` returns only a '
+      + 'task id, and the text arrives here after the task settles.\n'
       + 'Remote tasks cannot be continued: there is no `remote_send_message`. Delegate a fresh task instead.',
     parameters: objectSchema({
       action: { type: 'string', required: true, description: 'list | status | wait' },
@@ -280,8 +283,12 @@ export function makeRemoteTools(deps) {
       + 'The worker cannot see this workspace, so anything written there does not come back.\n'
       + 'The worker must pass its readiness check first; a worker that fails is refused rather than '
       + 'half-run, so call `remote_selfcheck` if a delegation is refused.\n'
-      + 'Set `run_in_background: true` to get a task id back immediately and keep working; then watch '
-      + 'it with `remote_agents` and stop it with `remote_interrupt`.\n'
+      + 'Set `run_in_background: true` to keep working instead of waiting for the answer; read it '
+      + 'afterwards with `remote_agents action="status"`, and stop the task with `remote_interrupt`.\n'
+      + 'One worker runs one task at a time, because the desktop is exclusive. A worker that is already '
+      + 'busy does NOT accept this call straight away: even in background mode the call first waits for '
+      + 'its turn in that worker\'s queue, so it can take as long as the task ahead of it. Check '
+      + '`remote_agents action="list"` before delegating to a busy worker.\n'
       + 'A remote task CANNOT be continued: there is no `remote_send_message`. Delegate a fresh task '
       + 'instead of trying to reply to one.',
     parameters: objectSchema({
@@ -290,7 +297,8 @@ export function makeRemoteTools(deps) {
       peerId: { type: 'string', description: 'Worker to use. Omit when only one is paired.' },
       run_in_background: {
         type: 'boolean',
-        description: 'Return a task id immediately instead of waiting. Defaults to false (foreground).',
+        description: 'Do not wait for the answer. The call still performs the readiness check and waits '
+          + 'for the worker\'s queue slot before returning a task id. Defaults to false (foreground).',
       },
     }),
     output: {
@@ -329,7 +337,8 @@ export function makeRemoteTools(deps) {
           `Delegated to ${wanted.name} in the background.`,
           `taskId: ${run.id}`,
           '',
-          `Watch it with remote_agents action="status" taskId="${run.id}", or action="wait" to block.`,
+          `Read the answer once it settles: remote_agents action="status" taskId="${run.id}"`,
+          `Or block for it: remote_agents action="wait" taskId="${run.id}"`,
           `Stop it with remote_interrupt taskId="${run.id}".`,
           'This task cannot be continued once it settles; delegate a fresh one.',
         ].join('\n')
@@ -390,7 +399,34 @@ export function renderTaskDetail(task) {
   if (task.diagnostic !== undefined) lines.push(`diagnostic  : ${task.diagnostic}`)
   if (task.usage !== undefined) lines.push(`tokens used : ${task.usage.used}`)
   if (task.promptDigest !== '') lines.push(`prompt      : ${task.promptDigest}${task.promptDigest.length >= 160 ? '…' : ''}`)
+  lines.push(...renderOutputSection(task))
   return lines.join('\n')
+}
+
+/**
+ * The answer a settled task produced, as a labelled section.
+ *
+ * WHY THIS IS THE POINT OF THE TOOL: a background delegation used to report only progress
+ * metrics, so its answer was unreachable and the delegation was a dead end (PITFALLS F15).
+ * The section is explicit about which of the three situations it is in — an answer, a
+ * truncated answer, or no answer at all — because a bare blank after the header reads as a
+ * rendering bug rather than as "the worker said nothing".
+ *
+ * @param {import('./task-registry.js').RemoteTask} task
+ * @returns {string[]}
+ */
+function renderOutputSection(task) {
+  if (!isSettled(task.state)) return []
+  if (typeof task.output !== 'string' || task.output === '') {
+    // A running task has no answer yet; a settled one with nothing to say must say so.
+    return ['', task.state === 'completed' ? 'output      : (the worker produced no text)' : 'output      : (none)']
+  }
+  const total = task.outputChars ?? task.output.length
+  const truncated = total > task.output.length
+  const heading = truncated
+    ? `--- output (first ${task.output.length} of ${total} chars) ---`
+    : '--- output ---'
+  return ['', heading, task.output]
 }
 
 /**

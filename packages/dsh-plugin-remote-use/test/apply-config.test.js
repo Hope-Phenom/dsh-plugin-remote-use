@@ -418,7 +418,11 @@ test('renaming a worker keeps its stored token', async () => {
   await withEnv(async () => {
     const { ctx, routes } = makeContext()
     mount(ctx, { workers: [worker('w1')] })
-    const { body } = await post(routes[0], 'worker.save', { worker: { id: 'w1', url: worker('w1').url, name: 'Renamed' } })
+    const { body } = await post(routes[0], 'worker.save', {
+      // `worker.save` REPLACES the row, so a page that omits the task directory would wipe it --
+      // which the route now refuses (see the cwd tests below). The real form always sends it.
+      worker: { id: 'w1', url: worker('w1').url, name: 'Renamed', cwd: worker('w1').cwd },
+    })
     assert.equal(body.ok, true)
     assert.equal(body.settings.workers[0].name, 'Renamed')
     // The token survived even though the page had no way to send it.
@@ -552,7 +556,9 @@ test('a corrupt pairing string is refused, and nothing is configured', async () 
 test('the pairing action never carries the token into the log', async () => {
   await withEnv(async () => {
     const h = mountWithGate()
-    const pairing = encodePairing({ url: 'ws://192.168.1.101:7331', token: 'tok-secret-value', name: 'w' })
+    const pairing = encodePairing({
+      url: 'ws://192.168.1.101:7331', token: 'tok-secret-value', name: 'w', cwd: 'C:\\work',
+    })
     await post(h.routes[0], 'worker.pair', { pairing })
     const logged = h.logs.map(([, message]) => String(message)).join('\n')
     assert.equal(logged.includes('tok-secret-value'), false, 'the token must not be logged')
@@ -566,6 +572,77 @@ test('removing an unknown worker is a 404, not a silent success', async () => {
     mount(ctx, { workers: [worker('w1')] })
     const { status } = await post(routes[0], 'worker.remove', { peerId: 'ghost' })
     assert.equal(status, 404)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F16: a worker with no usable TASK DIRECTORY must be refused where it is configured
+//
+// The directory is a path on the worker, so the master cannot invent one. Pairing used to accept
+// a string that carried none, save the worker, and let the mistake surface as
+// `[REMOTE_BAD_CWD]` on the first delegation -- on a different screen, days later. These pin the
+// three places that now stop it: the paste, the form, and the page's own view of a worker.
+// ---------------------------------------------------------------------------
+
+test('a pairing string with no task directory is refused, and says how to supply one', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const pairing = encodePairing({ url: 'ws://192.168.1.5:7331', token: 'tok-x', name: 'pc' })
+    const { status, body } = await post(h.routes[0], 'worker.pair', { pairing })
+    assert.equal(status, 400)
+    assert.equal(body.ok, false)
+    assert.match(body.error, /task directory/)
+    assert.match(body.error, /absolute path/)
+    // Refused means NOTHING was written -- not a half-configured worker to clean up by hand.
+    const after = await get(h.routes[0])
+    assert.deepEqual(after.body.settings.workers.map((w) => w.id), ['w1'])
+    assert.equal(String(body.error).includes('tok-x'), false, 'the refusal must not echo the token')
+  })
+})
+
+test('a pairing string with no task directory is accepted when the operator supplies one', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const pairing = encodePairing({ url: 'ws://192.168.1.6:7331', token: 'tok-y', name: 'pc' })
+    const { status, body } = await post(h.routes[0], 'worker.pair', { pairing, cwd: 'C:\\typed\\dir' })
+    assert.equal(status, 200, JSON.stringify(body))
+    const added = body.settings.workers.find((w) => w.url === 'ws://192.168.1.6:7331')
+    assert.equal(added.cwd, 'C:\\typed\\dir')
+  })
+})
+
+test('a relative task directory from a pairing string is refused', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const pairing = encodePairing({ url: 'ws://192.168.1.7:7331', token: 'tok-z', cwd: 'relative\\dir' })
+    const { status, body } = await post(h.routes[0], 'worker.pair', { pairing })
+    assert.equal(status, 400)
+    assert.match(body.error, /absolute/)
+  })
+})
+
+test('saving a worker with no task directory is refused rather than silently taking it offline', async () => {
+  await withEnv(async () => {
+    const { ctx, routes } = makeContext()
+    mount(ctx, { workers: [worker('w1')] })
+    // This is the shape a partial API caller sends: no `cwd` at all. `upsertWorker` REPLACES the
+    // row, so accepting it would blank a working directory without anyone asking.
+    const { status, body } = await post(routes[0], 'worker.save', { worker: { id: 'w1', url: worker('w1').url, name: 'x' } })
+    assert.equal(status, 400)
+    assert.match(body.error, /cwd is empty/)
+    const after = await get(routes[0])
+    assert.equal(after.body.settings.workers[0].cwd, 'C:\\work', 'the stored directory must survive')
+  })
+})
+
+test('GET reports a worker whose configuration cannot dispatch, next to its health', async () => {
+  await withEnv(async () => {
+    const { ctx, routes } = makeContext()
+    // Shaped like a worker paired before the fix: connected, healthy-looking, and unable to accept
+    // a single task. The page has to be able to say so without waiting for a delegation to fail.
+    mount(ctx, { workers: [worker('w1', { cwd: '' })] })
+    const { body } = await get(routes[0])
+    assert.match(String(body.workers[0].configProblem), /cwd is empty/)
   })
 })
 

@@ -27,6 +27,7 @@ import { PeerConnection, httpBaseOf } from './bridge/peer-connection.js'
 import { TaskRegistry } from './core/task-registry.js'
 import { ToolCallCache } from './core/toolcall-cache.js'
 import { TaskMemory } from './core/task-memory.js'
+import { assertUsableCwd } from './core/task-cwd.js'
 import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.js'
 import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
 import { dirname, join } from 'node:path'
@@ -40,6 +41,7 @@ import { resolveAcpLaunchSpec } from './core/self-acp-spec.js'
 import { decodePairing, deriveWorkerId, describePairing } from '../slave/pairing.mjs'
 import {
   mergeSettings,
+  normalizeWorker,
   publicWorker,
   readSettings,
   removeWorker as removeWorkerFromList,
@@ -1023,6 +1025,32 @@ function readJsonBody(req, limit = SETTINGS_MAX_BODY) {
 }
 
 /**
+ * The message to refuse a worker edit with, or '' when its task directory is usable.
+ *
+ * WHY THIS IS A REFUSAL AND NOT A WARNING: `RemoteProvider.start` rejects such a worker before it
+ * creates a session (`REMOTE_BAD_CWD`), so the configuration can never accept a task. Accepting it
+ * would defer a certain failure to the first delegation, which is exactly how a paired worker came
+ * to look fine on the settings page while every dispatch failed (PITFALLS F16).
+ *
+ * The pairing case gets its own wording because the fix is different in kind: nothing is wrong
+ * with what the operator typed -- the string they pasted simply does not carry a directory, and
+ * only they can know a path on the far machine.
+ *
+ * @param {unknown} cwd the directory that WOULD be saved
+ * @param {{ pairing: boolean }} ctx
+ * @returns {string}
+ */
+function rejectUnusableCwd(cwd, ctx) {
+  if (ctx.pairing && String(cwd ?? '').trim() === '') {
+    return 'the pairing string carries no task directory, so supply one: the absolute path ON THE '
+      + 'WORKER where its tasks should run, for example C:\\dsh-remote\\work. It is both where the '
+      + 'task runs and the scope it may write to, so the plugin will not invent one. Nothing has '
+      + 'been saved.'
+  }
+  return assertUsableCwd(cwd)
+}
+
+/**
  * The Settings page's data route.
  *
  * GET  reports worker reachability, the readiness report, and the in-flight task list.
@@ -1117,6 +1145,11 @@ export function makeSettingsRoute(deps) {
             report,
             error,
             activeTasks: registry.activeCountForPeer(peer.peerId),
+            // Whether this worker's CONFIGURATION can work at all, separate from whether the
+            // machine is reachable or ready. Without it the page showed a row that looked
+            // configured while the only symptom was a `[REMOTE_BAD_CWD]` refusal on the first
+            // delegation -- days later, and on a different screen (PITFALLS F16).
+            configProblem: assertUsableCwd(peer.defaultCwd),
             // Surface the LINK state separately from the readiness report. Without it a
             // "not connected" failure looks like a worker fault, which is how the missing
             // connect() stayed invisible until a real profile load.
@@ -1126,7 +1159,9 @@ export function makeSettingsRoute(deps) {
         return {
           ok: true,
           workers,
-          tasks: registry.list().slice(0, 50),
+          // `listForUi`, not `list`: the registry retains each settled task's answer text, and the
+          // page neither renders it nor should receive it on every poll (PITFALLS F15).
+          tasks: registry.listForUi(50),
           toolCallCache: { size: cache.size, misses: cache.misses },
           // The vocabulary the page needs to render its own controls, without any secret.
           settings: publicSettings(),
@@ -1236,6 +1271,11 @@ export function makeSettingsRoute(deps) {
             // annoying and pointless.
             const edited = upsertWorker(currentSettings().workers, body?.worker)
             if (edited.error !== '') return send(400, { ok: false, error: edited.error })
+            // Same rule as pairing, and for the same reason: `upsertWorker` REPLACES the row, so a
+            // form submitted with the field cleared would silently take a working worker offline.
+            // `normalizeWorker` is what produced `edited`, so this is the value that would be saved.
+            const cwdProblem = rejectUnusableCwd(normalizeWorker(body?.worker)?.cwd, { pairing: false })
+            if (cwdProblem !== '') return send(400, { ok: false, error: cwdProblem })
             const applied = persistSettings({ ...currentSettings(), workers: edited.workers })
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
             return send(200, { ok: true, applied, settings: publicSettings() })
@@ -1266,6 +1306,14 @@ export function makeSettingsRoute(deps) {
             }
             // The pasted string knows url/token/name; the operator may still want a local cwd.
             if (typeof body?.cwd === 'string' && body.cwd !== '') incoming.cwd = body.cwd
+
+            // Refuse rather than save-and-warn. `RemoteProvider.start` rejects a worker with no
+            // usable task directory outright (`REMOTE_BAD_CWD`), so this configuration can never
+            // dispatch; saving it would only move a certain failure away from the paste and into
+            // the next delegation, which is how this was found (PITFALLS F16). Nothing is
+            // persisted, so the operator fixes it in the same card and pastes nothing again.
+            const cwdProblem = rejectUnusableCwd(incoming.cwd, { pairing: true })
+            if (cwdProblem !== '') return send(400, { ok: false, error: cwdProblem })
 
             const edited = upsertWorker(currentSettings().workers, incoming)
             if (edited.error !== '') return send(400, { ok: false, error: edited.error })
@@ -1306,7 +1354,7 @@ export function makeSettingsRoute(deps) {
             // current confinement state and how to close it BEFORE anything is opened. This runs
             // the same gate `arm` does and starts nothing, so opening the panel costs a probe
             // rather than a decision.
-            const result = preflightWorker({ bindAddress: body?.bindAddress, port: body?.port })
+            const result = preflightWorker({ bindAddress: body?.bindAddress, port: body?.port, taskCwd: body?.taskCwd })
             const status = armingStatus()
             return send(200, {
               ok: result.ok === true,
@@ -1323,7 +1371,7 @@ export function makeSettingsRoute(deps) {
             //
             // The token comes back HERE and only here. It is returned once so the operator can
             // paste it into a pairing; every later read of the page sees the mask instead.
-            const result = armWorker({ bindAddress: body?.bindAddress, port: body?.port })
+            const result = armWorker({ bindAddress: body?.bindAddress, port: body?.port, taskCwd: body?.taskCwd })
             if (result.ok !== true) {
               return send(409, { ok: false, error: result.error, blockers: result.blockers ?? [] })
             }

@@ -74,14 +74,32 @@ even when written correctly, because a Web session's model-facing tool catalog i
 
 | Tool the model sees | What it is for |
 |---|---|
+| `remote_subagent` | **Delegate a task to a paired worker**, and drive it like a subagent. `run_in_background: true` keeps the current conversation free |
 | `remote_selfcheck` | The node's readiness report. **Call it before delegating** — a node that is not ready is refused by the dispatch gate |
-| `remote_agents` | Task progress |
+| `remote_agents` | Task progress; `action: status` / `wait` for one task, and **it returns that task's answer text once the task has settled** |
 | `remote_screenshot` | Capture the node's screen to the master, then look at it with `read_image` |
 | `remote_interrupt` | Stop a task (cooperative) |
+
+Collecting a background delegation's answer — the only route back:
+
+```text
+remote_subagent { prompt: "…", run_in_background: true }   ->  taskId: rtask_xxx
+remote_agents   { action: "status", taskId: "rtask_xxx" }  ->  state + the full answer
+```
+
+⚠️ `run_in_background: true` is **not "return immediately"**: a node runs one task at a time (the GUI is
+an exclusive resource), so when the node is busy the call **first waits for its turn** (measured: 32
+seconds on a busy worker).
 
 The settings page (**Settings → Remote work nodes**) manages nodes, handles **escalation approvals**,
 shows the **audit trail**, edits the delegation policy, and can **arm this machine as a worker**
 (symmetric pairing).
+
+> **The task directory (`cwd`) is an absolute path on the worker**: that is where the task runs and
+> **the scope its sandbox may write to**. Fill it in once on the worker's arming panel and it goes
+> **into the pairing string** (**0.2.1 and later**), so the master picks it up from the paste.
+> The master **refuses to save** a worker without a usable task directory — such a worker can never
+> accept a task.
 
 ## Security model (the essentials)
 

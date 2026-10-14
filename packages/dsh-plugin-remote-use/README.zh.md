@@ -67,13 +67,28 @@ profile 的 `package.json` 长这样：
 
 | 模型可见的工具 | 用途 |
 |---|---|
+| `remote_subagent` | **把任务派到工作节点上执行**，像调用子 Agent 一样。`run_in_background: true` 则不占住当前对话 |
 | `remote_selfcheck` | 节点就绪报告。**委托前先调它**——未就绪的节点会被派单门禁拒绝 |
-| `remote_agents` | 查看任务进度 |
+| `remote_agents` | 查看任务进度；`action: status` / `wait` 盯某一个任务，**任务落定后把它的答案正文一并取回** |
 | `remote_screenshot` | 抓节点屏幕并落盘到主机，然后用 `read_image` 看 |
 | `remote_interrupt` | 停止任务（协作式） |
 
+后台派单的结果这样取回（这是后台模式唯一的路）：
+
+```text
+remote_subagent { prompt: "…", run_in_background: true }   →  taskId: rtask_xxx
+remote_agents   { action: "status", taskId: "rtask_xxx" }  →  状态 + 完整答案
+```
+
+⚠️ `run_in_background: true` **不是"立刻返回"**：一台节点同时只跑一个任务（GUI 是独占资源），
+节点忙时这个调用会**先排队等轮到自己**（实测等过 32 秒）。
+
 设置页（**设置 → 远程工作节点**）可以管理节点、处理**提权审批**、查看**审计留痕**、
 调整委派策略，以及把本机**布防为工作节点**（对称配对）。
+
+> **任务目录（`cwd`）是从机上的绝对路径**，任务在那里运行，**也是沙箱允许写入的范围**。
+> 在从机的布防面板里填一次，它会**写进配对串**（**0.2.1 起**），主机粘贴后自动带上。
+> 主机侧**拒绝保存**没有可用任务目录的节点——那种配置永远无法派单成功。
 
 ## 安全模型（要点）
 

@@ -20,6 +20,12 @@
  */
 
 import { NO_START_CAPABILITIES } from './out-of-process-helpers.js'
+import { assertUsableCwd } from '../core/task-cwd.js'
+
+// The rule lives in `core/task-cwd.js` because the WORKER's arming path needs the same answer
+// (it advertises the directory in its pairing string). Re-exported here because this module is
+// where it is ENFORCED on the dispatch path, and that is where callers look for it.
+export { assertUsableCwd }
 
 /** Delegation is refused with this code when the worker's self-check is not green. */
 export const GATE_REFUSED = 'REMOTE_WORKER_NOT_READY'
@@ -174,6 +180,11 @@ export class RemoteProvider {
       state,
       stopReason: outcome.stopReason,
       diagnostic: outcome.diagnostic,
+      // The answer is retained in the registry, not just returned through `result`. A background
+      // caller has already stopped awaiting `result` by the time this line runs, so this is the
+      // only place the text can reach it (PITFALLS F15). `stopReason: 'error'` still carries
+      // whatever the worker managed to say before it failed.
+      output: outcome.output,
     })
 
     return {
@@ -247,25 +258,4 @@ export function blocksToText(blocks) {
       : ''))
     .filter((s) => s !== '')
     .join('\n')
-}
-
-/**
- * Report why a worker cwd is unusable, or '' when it is fine.
- *
- * The cwd is the worker-side absolute path a task runs in AND the sandbox scope for
- * its writes, so a relative path or an empty value silently binds the task to the
- * relay process's launch directory instead (DESIGN §6.4).
- * @param {string} cwd
- * @returns {string} a human-readable problem, or '' when usable
- */
-export function assertUsableCwd(cwd) {
-  if (typeof cwd !== 'string' || cwd.trim() === '') {
-    return 'worker cwd is empty -- set `cwd` to an absolute path that exists on the worker'
-  }
-  const isWindowsAbs = /^[a-zA-Z]:[\\/]/.test(cwd)
-  const isPosixAbs = cwd.startsWith('/')
-  if (!isWindowsAbs && !isPosixAbs) {
-    return `worker cwd must be an absolute path, got "${cwd}" (a relative path would bind tasks to the relay's launch directory)`
-  }
-  return ''
 }

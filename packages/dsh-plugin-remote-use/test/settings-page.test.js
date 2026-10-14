@@ -22,6 +22,7 @@ import test from 'node:test'
 import { makeSettingsRoute } from '../lib/index.js'
 import { ApprovalQueue } from '../lib/core/approval-queue.js'
 import { AuditLog } from '../lib/core/audit-log.js'
+import { TaskRegistry } from '../lib/core/task-registry.js'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -1230,12 +1231,22 @@ function makePeer(overrides = {}) {
   }
 }
 
+/**
+ * A REAL `TaskRegistry`, seeded with synthetic rows.
+ *
+ * Deliberately not a hand-written stub. The route calls four different methods on this object,
+ * and a stub implements only the ones its author remembered -- which is how the suite stayed
+ * green while `registry.listForUi` did not exist and every settings-page request threw (F15).
+ * Seeding the real object means a method the route starts using is there the moment it exists.
+ */
 function makeRegistry(active = []) {
-  return {
-    list: () => active,
-    active: () => active,
-    activeCountForPeer: (peerId) => active.filter((t) => t.peerId === peerId).length,
+  const registry = new TaskRegistry({})
+  for (const row of active) {
+    // `create()` mints an id and a start time; the synthetic row then overrides identity and
+    // state, because these tests are about what the route does with a task, not how one begins.
+    Object.assign(registry.create({ peerId: String(row?.peerId ?? ''), prompt: '', cwd: '' }), row)
   }
+  return registry
 }
 
 async function callRoute(route, method, body, deps) {
