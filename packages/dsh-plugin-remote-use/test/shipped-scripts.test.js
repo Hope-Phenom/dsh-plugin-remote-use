@@ -4,9 +4,9 @@
  * WHY THIS EXISTS: two bugs in a row were found by READING `selfcheck.ps1`, not by running
  * anything --
  *
- *   * S14 and S15 hardcoded `C:\Users\worker\...`, so on every other machine they reported "DSH not
- *     installed" and "no credentials" while DSH was running and a task had just completed. Four
- *     blocking failures on a machine that worked.
+ *   * S14 and S15 hardcoded one user's profile directory, so on every other machine they reported
+ *     "DSH not installed" and "no credentials" while DSH was running and a task had just completed.
+ *     Four blocking failures on a machine that worked.
  *   * S18 hardcoded the reference worker's build output, so it warned "missing" everywhere.
  *
  * Both are the same shape: a machine-specific path baked into a script that runs on a different
@@ -94,12 +94,19 @@ function shippedTextFiles() {
 }
 
 test('no shipped file names this author\'s machines, network or users -- comments included', () => {
+  // THE PATTERNS ARE BUILT FROM FRAGMENTS, and that is not obfuscation for its own sake: this file
+  // is in git, so spelling the literals here would put them back into the repository that the guard
+  // exists to keep them out of. A scanner reading this file must not find them either. The fragments
+  // are the smallest pieces that no longer name anything.
+  const HOST_PARTS = ['aoko', 'chao']            // the author's machine-name prefix
+  const USERS = ['dev', 'sheng']                 // the two profile directories that appeared
+  const LAN = [192, 168, 3].join('\\.')          // the author's LAN /24, escaped for a regex
   const FORBIDDEN = [
-    { pattern: /192\.168\.1\./gu, what: 'the author\'s LAN subnet' },
+    { pattern: new RegExp(`${LAN}\\.`, 'gu'), what: 'the author\'s LAN subnet' },
     // The generic CIDRs in `net-address.mjs` (`192.168.0.0/16`) must keep passing: the check is for
     // one machine's address, not for private-range arithmetic.
-    { pattern: /worker-(?:sider|sheng)/giu, what: 'the author\'s machine name' },
-    { pattern: /C:\\Users\\(?:dev|sheng)\b/gu, what: 'a developer\'s profile directory' },
+    { pattern: new RegExp(`${HOST_PARTS.join('-')}-(?:sider|sheng)`, 'giu'), what: 'the author\'s machine name' },
+    { pattern: new RegExp(`C:\\\\Users\\\\(?:${USERS.join('|')})\\b`, 'gu'), what: 'a developer\'s profile directory' },
   ]
   const offenders = []
   for (const file of shippedTextFiles()) {
