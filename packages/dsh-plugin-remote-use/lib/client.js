@@ -1490,9 +1490,11 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-remote-use: dictionaries')
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
-        // Same value as the registration id above; every id this plugin owns follows the package
-        // name, except the locale namespace (see NS) which is deliberately left alone.
-        id: '@hope_phenom/dsh-plugin-remote-use',
+        // A slot/ledger id, and deliberately SHORT. Only the registration id at the top of this file
+        // must equal the package name; section ids are conventionally short in DSH's own first-party
+        // sections (`agent-presets`, `account`) and in working third-party plugins (`dsh-skins`).
+        // Changing this one buys nothing and would churn the Settings nav identity.
+        id: 'dsh-plugin-remote-use',
         // After the notification plugin's 40, so operator surfaces stay grouped together.
         order: 45,
         label: () => t('nav'),

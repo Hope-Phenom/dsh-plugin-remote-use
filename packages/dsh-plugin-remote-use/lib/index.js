@@ -51,10 +51,14 @@ import { RemoteProvider } from './provider/remote-provider.js'
 import { limitDiagnostic, verifyAgainstUpstream } from './provider/out-of-process-helpers.js'
 import { makeRemoteTools } from './tools/remote-tools.js'
 
-// MUST equal the package name -- the loader keys its rows by it, and a mismatch means the row's
-// identity and the plugin's own identity disagree. See the note on the registration id in
-// lib/client.js, which is the same rule for the browser half.
-export const name = '@hope_phenom/dsh-plugin-remote-use'
+// NOT the package name, deliberately. This value is only the label DSH gives the plugin's fiber
+// (`ctx.registry.plugin(...)`), and the convention across DSH's own first-party bundles is the
+// SCOPE-STRIPPED name: @deepseek-ai/dsh-client-hmr exports `name = "client-hmr"`. Two of this
+// operator's plugins that run correctly in a live profile do the same
+// (`@hope_phenom/dsh-plugin-code-quality` exports `dsh-plugin-code-quality`). The loader does NOT
+// key anything on it -- unlike the client registration id in lib/client.js, which MUST equal the
+// package name and is the one that actually broke the Web UI.
+export const name = 'dsh-plugin-remote-use'
 
 /** Optional services: stay inert in profiles that lack them. */
 export const inject = ['subagents', 'tools', 'systemPrompt']
