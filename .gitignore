@@ -75,6 +75,11 @@ desktop.ini
 .install-snapshot/
 
 # 截图证据（体积大且含桌面内容，按需单独保管）
+#
+# NOTE：这条只匹配 `.research/` 根目录那一层。`slave-shots/` 与 `vdd-shots/` 里那 4 张是
+# `docs/research/08-gui-mechanism-actual.md` 的证据图（文档按字节数引用了它们），**已逐张核对
+# 过不含隐私**（都只是那个测试应用自己的窗口，没有桌面/任务栏/用户名），所以它们是有意入库的。
+# 新截图请放根目录（会被忽略），或确认过内容再放进这两个子目录。
 .research/*.png
 .research/slave-config/
 

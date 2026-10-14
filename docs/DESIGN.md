@@ -216,6 +216,30 @@ interface SubagentResult {
 
 🔴 **必须运行在用户交互会话**，不能做成 Windows 服务、也不能靠 SSH 启动——实测 SSH 落在 Session 0，该会话没有交互桌面。详见 §7.5（实地勘察得出的部署约束）。
 
+### 3.3 速览与落点（原根 README 的"架构速览"，2026-10 搬入）
+
+```text
+┌─ 主机 ────────────────────────────────────────────────────────┐
+│ 插件 apply()                                                  │
+│  ├─ 每个 worker 一个 RemoteProvider（subagents.registerProvider）│
+│  ├─ 每个 worker 一个 PeerConnection = AcpBridge + 心跳 + 截图   │
+│  │    └─ ACP over WebSocket ──▶ 从机 relay ──▶ 从机 DSH(acp)   │
+│  ├─ 审批队列（人工决定）+ 审计日志（append-only JSONL）          │
+│  └─ 设置路由 /api/dsh/dsh-plugin-remote-use                    │
+└───────────────────────────────────────────────────────────────┘
+```
+
+| 关注点 | 落点 |
+|---|---|
+| 模型怎么看到工具 | 插件自己用 `ctx.tools.register()` 注册（`remote_subagent` + 四个 `remote_*`）。**loader 工具行到不了模型** —— 工具目录由 agent preset 枚举（PITFALLS F11） |
+| provider 名 | `remote-<worker id>`；委派工具按 worker 找到对应的 provider，**不再需要工具行里的 `provider` 字段** |
+| 委托是同步还是异步 | `start()` 返回 run 句柄，`run.result` 等待完成 |
+| 一个节点同时几个任务 | `serialQueue`（默认 1）——GUI 是独占资源；worker 忙时 `start()` 会**先排队**，所以"后台模式"也不是立刻返回（F15 连带修正） |
+| 后台任务的答案从哪来 | 由 `TaskRegistry` 留存（上限 64 000 字符），`remote_agents` 的 `status` / `wait` 渲染出来（§5.3） |
+| 截图怎么回来 | 走 relay 的 HTTP 侧（不走 ACP 消息泵，避免 base64 膨胀） |
+| 提权怎么问人 | 从机 DSH 发 `session/request_permission` → 主机桥接 → 审批队列 |
+| 设置路由谁能写 | 只有同源请求；跨站 POST 一律 403，且在任何动作被分发之前（PITFALLS F17） |
+
 ---
 
 ## 4. 协议

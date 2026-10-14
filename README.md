@@ -447,71 +447,43 @@ python tools\dsh-env-backup.py restore --from D:\dsh-backups\before-upgrade
 
 ## 测试
 
-三个 harness，**都必须通过**：
+三套 harness：**单元**（`node --test`）、**冒烟**（假 `ctx` 挂载真 `apply()`）、**真机**（对着真 worker 跑完整协议）。
+发布前都必须通过。命令、判据、以及"每条守卫为什么写成那样"，见 **[`docs/TESTING.md`](docs/TESTING.md)**。
 
-```powershell
-# 单元（不需要任何外部资源）
-cd packages\dsh-plugin-remote-use ; node --test
-
-# 冒烟：用假 ctx 挂载真 apply()，检查装配（用临时 DSH_HOME，不碰你的配置）
-cd prototype\host ; node plugin-smoke.mjs
-
-# 真机：对着一个真的 worker 跑完整协议
-node prototype\host\plugin-live.mjs --url <ws-url> --token <token> --cwd <worker-path>
-```
-
-**没有第二台机器时**也可以跑真机测试——先用回环布防一个工作节点：
-
-```powershell
-node tools\arm-loopback-worker.mjs                    # 宣告一行 JSON，含 url 与 token
-# 然后 plugin-live 指向它
-```
-
-> `arm-loopback-worker.mjs` 由 agent 的 shell 启动时会**继承 DSH 沙箱**，从机自检的 S8（合成输入）会假失败。要避开就用 `tools\run-unconfined.ps1` 把它放到计划任务里跑。
-
-### 真机测试会实际验证什么
-
-链路连通 · 17 项自检 · 委派任务完成 · **真实截图且校验 PNG 签名** · 每会话开关（新会话工具被拒、`on` 后放行、**另一会话仍关**、`off` 后恢复） · **人工审批闭环**（提权进队列 → 决定送达 → 任务完成 → **审计留痕**） · 本机角色状态（**永不含 token**）
+> 真机 harness 不传 `--entry` 时测的是**安装件**，并且会打印它究竟从哪个文件加载。
+> 那行必须留着：它曾经一边打印读起来像安装件的路径，一边加载**源码检出**（[踩坑 D12](docs/PITFALLS.md)）。
 
 ---
 
 ## 架构速览
 
-```text
-┌─ 主机 ────────────────────────────────────────────────────────┐
-│ 插件 apply()                                                  │
-│  ├─ 每个 worker 一个 RemoteProvider（subagents.registerProvider）│
-│  ├─ 每个 worker 一个 PeerConnection = AcpBridge + 心跳 + 截图   │
-│  │    └─ ACP over WebSocket ──▶ 从机 relay ──▶ 从机 DSH(acp)   │
-│  ├─ 审批队列（人工决定）+ 审计日志（append-only JSONL）          │
-│  └─ 设置路由 /api/dsh/dsh-plugin-remote-use                    │
-└───────────────────────────────────────────────────────────────┘
-```
+主机侧一个 `apply()`：**每个 worker** 一个 `RemoteProvider`（注册进 `ctx.subagents`）+ 一个 `PeerConnection`
+（`AcpBridge` + 心跳 + 截图），后者经 **ACP over WebSocket** 连到从机 relay，relay 再拉起从机的
+`dsh --profile acp` 子进程。审批队列与审计日志在主机侧。
 
-| 关注点 | 落点 |
-|---|---|
-| 模型怎么看到工具 | 插件自己用 `ctx.tools.register()` 注册（`remote_subagent` + 四个 `remote_*`）。**loader 工具行到不了模型** —— 工具目录由 agent preset 枚举（F11） |
-| provider 名 | `remote-<worker id>`；委派工具按 worker 找到对应的 provider，**不再需要工具行里的 `provider` 字段** |
-| 委托是同步还是异步 | `start()` 返回 run 句柄，`run.result` 等待完成 |
-| 一个节点同时几个任务 | `serialQueue`（默认 1）——GUI 是独占资源 |
-| 截图怎么回来 | 走 relay 的 HTTP 侧（不走 ACP 消息泵，避免 base64 膨胀） |
-| 提权怎么问人 | 从机 DSH 发 `session/request_permission` → 主机桥接 → 审批队列 |
+完整的组件图、各关注点落在哪个模块、以及从机形态，见 **[`docs/DESIGN.md` §3 架构总览](docs/DESIGN.md)**。
 
 ---
 
-## 文档
+## 文档地图
 
-| 文档 | 内容 |
-|---|---|
-| [`docs/DESIGN.md`](docs/DESIGN.md) | 设计文档与全部决策记录（含每一轮的验证与发现） |
-| [`docs/INTERFACES.md`](docs/INTERFACES.md) | 上游契约与集成事实 |
-| [`docs/PITFALLS.md`](docs/PITFALLS.md) | **踩坑与教训总集**——开发过程中真实遇到的问题及发现方式 |
-| [`tools/README.md`](tools/README.md) | 运维工具说明（备份/还原、从机查找、沙箱检查） |
-| [`.research/`](.research/) | 源码级调研报告（子 Agent 接缝、插件与传输、ACP 可行性、审批模型、API 验证、工作区同步） |
+根 README 只讲**这是什么、怎么用**；**知识都在 `docs/`**。索引页：[`docs/README.md`](docs/README.md)。
+
+| 文档 | 内容 | 什么时候看 |
+|---|---|---|
+| [`docs/DESIGN.md`](docs/DESIGN.md) | 设计与全部决策记录（按轮次，含被推翻的结论） | 想知道**为什么这么设计** |
+| [`docs/PITFALLS.md`](docs/PITFALLS.md) | **踩坑与教训总集**（A–G 七类，约 57 条，每条附当时的原始输出与**发现方式**） | **先看这个通常最省时间** |
+| [`docs/INTERFACES.md`](docs/INTERFACES.md) | 上游契约与集成事实（provider 接缝、ACP、`ctx.tools.register`、Cordis 补丁语义） | 要改代码或写别的插件 |
+| [`docs/TESTING.md`](docs/TESTING.md) | 三套 harness 的命令、判据与每条守卫的理由 | 跑测试、加守卫 |
+| [`docs/research/`](docs/research/) | 当初的源码级调研原文与两轮验证发现（**归档**，有些结论已被推翻） | 考古、查"当时为什么这么想" |
+| [`tools/README.md`](tools/README.md) | 运维工具说明（备份/还原、从机查找、沙箱检查） | 用那些脚本 |
 
 ## 已知限制
 
-- **未验证**：从**发布包**安装的路径（本项目用 `link:` 安装）、两个会话**同时**向同一从机大量派单时的资源表现
+- **已验证**：从**发布包**（registry）安装的路径 —— 主机与从机各装 0.2.2 跑过完整真机回归；
+  装好的件与仓库源码**逐文件哈希一致**
+- **未验证**：两个会话**同时**向同一从机大量派单时的资源表现（串行队列本身已验证：实测第二个任务
+  等前一个结束才开始）
 - 从机 `run-relay.ps1` 默认保留 **20 张**截图（约 190 MB 上限）；用 `--keep-shots` 调整（负数表示不清理）
 - 配对串里带的是从机**当时的 IP**——用主机名写配置才能在 IP 变化后幸存
 - 设置导航栏的图标由 DSH **硬编码**，插件无法替换（插件提供的图标显示在**插件管理页**）
