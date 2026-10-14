@@ -37,6 +37,11 @@ function publicEntry(entry) {
     toolCallId: entry.toolCallId,
     toolName: entry.toolName,
     requiredTier: entry.requiredTier,
+    // What the WORKER asked for, when it asked explicitly. `requiredTier` is the plugin's own
+    // inference of the minimum that would do, and the two disagree in exactly the case that
+    // matters: a request for the unrestricted tier showed as "needs workspace-write" on the very
+    // row a human was deciding (PITFALLS F22).
+    requestedTier: entry.requestedTier,
     reason: entry.reason,
     source: entry.source,
     createdAt: entry.createdAt,
@@ -113,6 +118,7 @@ export class ApprovalQueue {
       toolCallId: String(input?.toolCallId ?? ''),
       toolName: String(input?.toolName ?? ''),
       requiredTier: String(input?.requiredTier ?? ''),
+      requestedTier: String(input?.requestedTier ?? ''),
       reason: String(input?.reason ?? ''),
       source: String(input?.source ?? ''),
       rawInput: summarizeRawInput(input?.rawInput),
@@ -181,6 +187,7 @@ export class ApprovalQueue {
       toolCallId: entry.toolCallId,
       toolName: entry.toolName,
       requiredTier: entry.requiredTier,
+      requestedTier: entry.requestedTier,
       source: entry.source,
       reason: entry.reason,
       optionId,

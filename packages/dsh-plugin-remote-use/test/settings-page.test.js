@@ -128,7 +128,7 @@ test('the manifest declares an icon that satisfies iconOf()', () => {
 /** Render the section over an arbitrary snapshot and hand back the tree. */
 function renderSnapshot(snapshot) {
   const { registered, react } = loadClient()
-  const Section = registered[0].component
+  const Section = sectionOf(registered).component
   react.__state.index = 0
   react.__state.seeds = []
   react.__state.seeds[0] = snapshot
@@ -560,7 +560,7 @@ test('the icon is well-formed XML, because the browser decodes it as an <img>', 
  * registered. `apply` is where registration happens, so a caller that skipped it would see
  * an empty list and draw the wrong conclusion about the plugin.
  */
-function loadClient() {
+function loadClient(patch = {}) {
   const source = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
   let definition
   const sandbox = { __ModuleLoader__: { load: (def) => { definition = def } } }
@@ -594,12 +594,85 @@ function loadClient() {
       inject: (_slot, fn) => fn(),
       register: (decl, component) => { registered.push({ decl, component }) },
     },
+    // `patch` exists for the OPTIONAL services: the right pane's tab type is only registered when
+    // the shell provides `sidebarRightTabs`, and a test has to be able to stand that shell up.
+    ...patch,
   }
   assert.equal(registered.length, 0, 'nothing may be registered before apply runs')
   moduleExports.apply(ctx)
 
   return { definition, moduleExports, registered, dictionaries, ctx, react }
 }
+
+/**
+ * The settings section, found by NAME rather than by position.
+ *
+ * Registration order is not a contract, and it stopped being one the moment the plugin registered
+ * the in-conversation approval surfaces: `registered[0]` had been the settings section, and five
+ * render helpers silently pointed at the composer dock instead.
+ */
+function sectionsIn(registered) {
+  return registered.filter((entry) => entry.decl?.name === 'settings.section')
+}
+
+function sectionOf(registered) {
+  const [section] = sectionsIn(registered)
+  assert.ok(section !== undefined, 'the settings section must be registered')
+  return section
+}
+
+test('apply() must not leave a polling timer behind', () => {
+  // Regression, measured: starting the feed's interval in `apply()` kept a handle alive that
+  // nothing owned -- `node --test` never exited, and a shell with no approval surface mounted
+  // would have polled the route forever for nobody. The feed starts on its first subscriber.
+  const real = globalThis.setInterval
+  const started = []
+  globalThis.setInterval = (...args) => { started.push(args); return real(...args) }
+  try {
+    loadClient()
+  } finally {
+    globalThis.setInterval = real
+  }
+  assert.equal(started.length, 0, 'no timer may be created before anything subscribes')
+})
+
+test('the approval surfaces use shared slots, and never a single-occupancy one', () => {
+  const tabTypes = []
+  // Stand up the optional right-pane services, so the tab path is covered rather than skipped.
+  const { registered } = loadClient({
+    sidebarRightTabs: { register: (definition) => { tabTypes.push(definition); return () => {} } },
+    sidebarRight: { openResource: () => {} },
+  })
+  const names = registered.map((entry) => entry.decl?.name)
+  // Where the work happens: above the composer, in the session header, and in the right pane.
+  assert.ok(names.includes('conversation.composer.dock'), 'the dock is the primary surface')
+  assert.ok(names.includes('conversation.session.header.actions'))
+  assert.ok(names.includes('sidebar.right.pane.tab'))
+  assert.ok(names.includes('sidebar.right.pane.tab.title'))
+  // `conversation.input.permission` and `sidebar.toggle.badge` are `kind: "single"` and already
+  // owned by DSH's own plugins (the permission selector and the desktop-update badge). Claiming
+  // either would DISPLACE first-party UI, so their absence here is a tested property.
+  assert.equal(names.includes('conversation.input.permission'), false)
+  assert.equal(names.includes('sidebar.toggle.badge'), false)
+  // And the settings section is still registered exactly once.
+  assert.equal(sectionsIn(registered).length, 1)
+  // The tab type answers for OUR addresses only: a broad `canOpen` would let this plugin hijack a
+  // pane another plugin asked for.
+  assert.equal(tabTypes.length, 1)
+  assert.deepEqual(tabTypes[0].patterns, ['dsh-resource://remote-use-approvals/**'])
+  assert.equal(tabTypes[0].canOpen('dsh-resource://remote-use-approvals/current'), true)
+  assert.equal(tabTypes[0].canOpen('dsh-resource://changes-review/1'), false)
+})
+
+test('the composer dock renders nothing while no request waits', () => {
+  const { registered } = loadClient()
+  const dock = registered.find((entry) => entry.decl?.name === 'conversation.composer.dock')
+  assert.ok(dock !== undefined)
+  const t = (key) => key
+  // The closure hands the component the REAL feed, which has seen no snapshot yet, so the honest
+  // render is "nothing" -- an empty strip above the composer would be noise in every session.
+  assert.equal(expand(dock.component({ t })), null)
+})
 
 // ---------------------------------------------------------------------------
 // the availability badge: WARNINGS ARE NOT "UNAVAILABLE"
@@ -799,9 +872,9 @@ test('the client registers exactly one settings.section for this plugin', () => 
   const { moduleExports, registered, dictionaries } = loadClient()
   assert.deepEqual(moduleExports.inject, ['slots', 'locale'])
   assert.equal(typeof moduleExports.apply, 'function')
-  assert.equal(registered.length, 1, 'exactly one section, or the Settings nav duplicates')
+  assert.equal(sectionsIn(registered).length, 1, 'exactly one section, or the Settings nav duplicates')
 
-  const { decl, component } = registered[0]
+  const { decl, component } = sectionsIn(registered)[0]
   assert.equal(decl.name, 'settings.section')
   // SHORT by convention, and NOT the package name -- unlike the registration id at the top of the
   // bundle. DSH's own first-party sections register under ids like `agent-presets` and `account`.
@@ -965,7 +1038,7 @@ function makeTranslator() {
 
 function renderWith(workers, tasks = []) {
   const { registered, react } = loadClient()
-  const Section = registered[0].component
+  const Section = sectionOf(registered).component
   // Seed the component's first useState (its snapshot) so the populated tree is rendered.
   react.__state.index = 0
   react.__state.seeds = [{
@@ -987,7 +1060,7 @@ function renderWith(workers, tasks = []) {
  */
 function renderEditing(snapshot, editing) {
   const { registered, react } = loadClient()
-  const Section = registered[0].component
+  const Section = sectionOf(registered).component
   react.__state.index = 0
   react.__state.seeds = []
   react.__state.seeds[0] = snapshot
@@ -1067,7 +1140,7 @@ test('before the first response the page says loading, not "no workers configure
   // the empty state during that window told the operator "nothing is configured" about data
   // it had not received -- a confident claim of absence.
   const { registered, react } = loadClient()
-  const Section = registered[0].component
+  const Section = sectionOf(registered).component
   const t = (key) => ({ title: 'TITLE', description: 'DESC', roleNote: 'ROLE-NOTE', loading: 'LOADING', noWorkers: 'NO-WORKERS' }[key] ?? key)
   react.__state.index = 0
   react.__state.seeds = [] // no snapshot yet
@@ -1154,7 +1227,7 @@ test('editing an existing worker offers a blank token that means "keep the store
 /** Render with both arrays present, and hand back the react stub for click inspection. */
 function renderPairing(snapshotWorkers, configWorkers) {
   const { registered, react } = loadClient()
-  const Section = registered[0].component
+  const Section = sectionOf(registered).component
   react.__state.index = 0
   react.__state.seeds = []
   react.__state.seeds[0] = {

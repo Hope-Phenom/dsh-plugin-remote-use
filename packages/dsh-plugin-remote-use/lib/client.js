@@ -126,6 +126,20 @@ window.__ModuleLoader__.load({
       approvalsMissed: '有 {n} 件请求因无人应答被拒',
       approvalsMissedNote: '这些请求等过、但没人来得及处理，于是按拒绝处理了。列在这里是为了让"错过"事后也看得见 —— 它们不会自己消失。',
       colSettled: '处理时间',
+      // 工作现场里的三处审批面（会话头按钮 / 输入框上方 / 右侧面板）
+      approvalsPanel: '审批',
+      approvalsDockWaiting: '有 {n} 件远程任务在等你批准',
+      approvalsDockHint: '每个请求最多等 {s} 秒，超时按拒绝处理',
+      approvalsHeaderPending: '审批 {n}',
+      approvalsHeaderMissed: '审批 · {n} 件错过',
+      approvalsOpenPanel: '打开审批面板',
+      approvalsPanelPending: '等待批准（{n}）',
+      approvalsPanelEmpty: '当前没有等待批准的请求。',
+      approvalsPanelMissed: '无人应答而被拒（{n}）',
+      approvalsPanelNoMissed: '没有错过的请求。',
+      approvalsPanelAlso: '记录同时写在 {p}',
+      btnAllowShort: '允许',
+      btnDenyShort: '拒绝',
       colTool: '工具',
       colTier: '所需档位',
       colWaited: '已等待',
@@ -314,6 +328,20 @@ window.__ModuleLoader__.load({
       approvalsMissed: '{n} request(s) were refused because nobody answered',
       approvalsMissedNote: 'These waited and nobody got to them, so they were refused. They are listed here so a miss stays visible after the fact \u2014 they do not disappear on their own.',
       colSettled: 'Settled',
+      // The three approval surfaces that live where the work happens.
+      approvalsPanel: 'Approvals',
+      approvalsDockWaiting: '{n} remote task(s) are waiting for your approval',
+      approvalsDockHint: 'each waits up to {s}s, then it is refused',
+      approvalsHeaderPending: 'Approvals {n}',
+      approvalsHeaderMissed: 'Approvals \u00b7 {n} missed',
+      approvalsOpenPanel: 'Open the approvals panel',
+      approvalsPanelPending: 'Waiting for you ({n})',
+      approvalsPanelEmpty: 'Nothing is waiting for approval.',
+      approvalsPanelMissed: 'Refused because nobody answered ({n})',
+      approvalsPanelNoMissed: 'Nothing was missed.',
+      approvalsPanelAlso: 'The record is also written to {p}',
+      btnAllowShort: 'Allow',
+      btnDenyShort: 'Deny',
       colTool: 'Tool',
       colTier: 'Required',
       colWaited: 'Waited',
@@ -432,6 +460,17 @@ window.__ModuleLoader__.load({
       '.ru-approval-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
       '.ru-approval-why{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
       '.ru-approval-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '.ru-missed{display:flex;flex-direction:column;gap:6px;padding:9px 11px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm)}',
+      // --- the three surfaces that live where the work happens ---
+      // A waiting request is BLOCKING a worker, so it is outlined in the business colour and the
+      // buttons are filled: it must not read as another informational strip above the composer.
+      '.ru-dock{display:flex;flex-direction:column;gap:8px;margin:6px 0 0;padding:9px 11px;border:1px solid var(--dsw-alias-state-business-primary);border-radius:var(--dsw-radius-sm);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 6%,transparent)}',
+      '.ru-dock-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
+      '.ru-dock-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
+      '.ru-hdrbtn{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;cursor:pointer}',
+      '.ru-hdrbtn.warn{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
+      '.ru-panel{display:flex;flex-direction:column;gap:10px;padding:12px 14px;height:100%;overflow:auto}',
+      '.ru-panel-title{margin:0;font-size:13px;font-weight:600}',
       '.ru-args{margin:0;padding:6px 8px;max-height:96px;overflow:auto;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-interactive-bg-hover);font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--dsw-alias-label-secondary)}',
       '\.ru-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.ru-role-banner{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 11px;margin:8px 0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font-size:12px}',
@@ -1318,7 +1357,7 @@ window.__ModuleLoader__.load({
             h('tbody', null, missed.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
               h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
               h('td', { className: 'ru-mono' }, String(row.toolName ?? '\u2014')),
-              h('td', null, String(row.requiredTier ?? '\u2014')),
+              h('td', null, shownTier(row)),
               h('td', null,
                 `${Math.round(Number(row.waitedMs ?? 0) / 1000)}s `,
                 h('span', { className: 'ru-dim' }, describeBy(row.by))),
@@ -1547,7 +1586,7 @@ window.__ModuleLoader__.load({
                     h('tbody', null, recentAudit.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
                       h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
                       h('td', { className: 'ru-mono' }, String(row.toolName ?? '\u2014')),
-                      h('td', null, String(row.requiredTier ?? '\u2014')),
+                      h('td', null, shownTier(row)),
                       h('td', null,
                         h('span', {
                           className: row.optionId === 'allow-once' ? 'ru-badge ok' : 'ru-badge',
@@ -1595,11 +1634,260 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ---- approval surfaces: session header, composer dock, right-pane tab --------------
+    //
+    // WHY NOT THE SETTINGS PAGE ALONE: it is closed by default, and opening it takes the operator
+    // away from their work. Measured 2026-10-14: six approval requests expired unanswered and the
+    // only sign of them was behind a gear icon nobody had a reason to open.
+    //
+    // WHY ONE FEED AND NOT THREE POLLERS: all three surfaces read the same snapshot, so three
+    // timers would triple the traffic for one fact. `createApprovalFeed` polls once and pushes to
+    // whoever subscribed; a surface stays dormant until it has a subscriber.
+    //
+    // SLOT CHOICE IS CONSTRAINED, NOT COSMETIC: `conversation.input.permission` and
+    // `sidebar.toggle.badge` are both `kind: "single"` and already owned by DSH's own plugins (the
+    // permission selector, the desktop-update badge), so registering there would DISPLACE
+    // first-party UI. Every slot used below is `list` or `keyed`, where coexistence is the design.
+
+    /** The shared poller behind every approval surface. @param {{ get: Function }} io */
+    function createApprovalFeed(io, intervalMs = 2500) {
+      let state = { ready: false, available: false, pending: [], missed: [], missedCount: 0, timeoutMs: 0, error: '' }
+      const listeners = new Set()
+      let timer
+      const publish = () => { for (const listener of [...listeners]) listener(state) }
+      const refresh = async () => {
+        try {
+          const data = await io.get()
+          const approvals = data?.approvals ?? {}
+          state = {
+            ready: true,
+            available: approvals.available === true,
+            pending: Array.isArray(approvals.pending) ? approvals.pending : [],
+            missed: Array.isArray(approvals.missed) ? approvals.missed : [],
+            missedCount: Number(approvals.missedCount ?? 0),
+            timeoutMs: Number(approvals.timeoutMs ?? 0),
+            error: '',
+          }
+        } catch (error) {
+          state = { ...state, ready: true, error: error instanceof Error ? error.message : String(error) }
+        }
+        publish()
+      }
+      const stop = () => { if (timer !== undefined) { clearInterval(timer); timer = undefined } }
+      return {
+        current: () => state,
+        subscribe(listener) {
+          listeners.add(listener)
+          // LAZY, and this is not an optimisation. Starting the timer in `apply()` left a live
+          // interval behind that nothing owned: the unit tests never exited, and an app with no
+          // surface mounted would poll a route forever for nobody. The first subscriber is exactly
+          // when the data starts to matter.
+          if (listeners.size === 1 && typeof setInterval === 'function') {
+            timer = setInterval(() => void refresh(), intervalMs)
+            void refresh()
+          }
+          return () => {
+            listeners.delete(listener)
+            if (listeners.size === 0) stop()
+          }
+        },
+        refresh,
+        dispose() { listeners.clear(); stop() },
+      }
+    }
+
+    /** Read the feed as component state. */
+    function useApprovals(feed) {
+      const [state, setState] = React.useState(feed.current())
+      React.useEffect(() => feed.subscribe(setState), [feed])
+      return state
+    }
+
+    /** Allow/deny one request. Shared, so no two surfaces can disagree about the outcome. */
+    function useDecide(feed, post) {
+      const [busyId, setBusyId] = React.useState('')
+      const [error, setError] = React.useState('')
+      const decide = React.useCallback(async (id, decision) => {
+        setBusyId(id)
+        setError('')
+        try {
+          // `via` is what makes the audit read "a person clicked". It is EVIDENCE, not a boundary
+          // -- any caller can claim it -- but the alternative was measured dead in this app's own
+          // transport: the click arrived without a usable Origin and was recorded as `api` (F22).
+          await post('approvals.decide', { id, decision, via: 'page' })
+        } catch (failure) {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        } finally {
+          setBusyId('')
+          await feed.refresh()
+        }
+      }, [feed, post])
+      return { busyId, error, decide }
+    }
+
+    /** The tier being ASKED for: the request first, the inferred minimum only as a fallback. */
+    function shownTier(row) {
+      const requested = String(row?.requestedTier ?? '')
+      return requested !== '' ? requested : String(row?.requiredTier ?? '?')
+    }
+
+    /** The request rows, rendered the same way in the dock and in the panel. */
+    function approvalRows(props) {
+      const { t, pending, busyId, onDecide, compact } = props
+      return pending.map((row) => {
+        const id = String(row.id ?? '')
+        const head = h('div', { className: 'ru-approval-head' },
+          h('strong', { className: 'ru-mono' }, String(row.toolName ?? '?')),
+          h('span', { className: 'ru-badge warn' }, shownTier(row)),
+          h('span', { className: 'ru-dim' }, `${String(row.peerId ?? '')} \u00b7 ${String(row.taskId ?? '')}`))
+        const why = compact === true ? null : h('div', { className: 'ru-approval-why' }, String(row.reason ?? ''))
+        const args = compact === true || row.rawInput === '' ? null : h('pre', { className: 'ru-args' }, String(row.rawInput))
+        const actions = h('div', { className: 'ru-approval-actions' },
+          h('button', {
+            type: 'button', className: 'ru-btn primary', disabled: busyId !== '',
+            onClick: () => void onDecide(id, 'allow'),
+          }, t('btnAllowShort')),
+          h('button', {
+            type: 'button', className: 'ru-btn', disabled: busyId !== '',
+            onClick: () => void onDecide(id, 'deny'),
+          }, t('btnDenyShort')))
+        return h('div', { className: 'ru-approval', key: id }, head, why, args, actions)
+      })
+    }
+
+    /** Right above the composer: the operator is already looking here. */
+    function ApprovalsDock(props) {
+      const { t, feed, post } = props
+      const state = useApprovals(feed)
+      const { busyId, error, decide } = useDecide(feed, post)
+      if (state.pending.length === 0) return null
+      const head = h('div', { className: 'ru-dock-head' },
+        h('strong', null, fmt(t('approvalsDockWaiting'), { n: state.pending.length })),
+        h('span', { className: 'ru-dim' }, fmt(t('approvalsDockHint'), { s: Math.round(state.timeoutMs / 1000) })))
+      const rows = approvalRows({ t, pending: state.pending, busyId, onDecide: decide, compact: true })
+      return h('div', { className: 'ru-dock' },
+        head,
+        ...rows,
+        error === '' ? null : h('p', { className: 'ru-note warn' }, error))
+    }
+
+    /** Session header: visible while working, and the way into the full panel. */
+    function ApprovalsHeaderButton(props) {
+      const { t, feed, openPanel } = props
+      const state = useApprovals(feed)
+      if (state.pending.length === 0 && state.missedCount === 0) return null
+      const label = state.pending.length > 0
+        ? fmt(t('approvalsHeaderPending'), { n: state.pending.length })
+        : fmt(t('approvalsHeaderMissed'), { n: state.missedCount })
+      return h('button', {
+        type: 'button',
+        className: `ru-hdrbtn${state.pending.length > 0 ? ' warn' : ''}`,
+        title: t('approvalsOpenPanel'),
+        onClick: () => openPanel(),
+      }, label)
+    }
+
+    /** The right pane: what waits now, and what was missed before. */
+    function ApprovalsTab(props) {
+      const { t, feed, post, auditPath } = props
+      const state = useApprovals(feed)
+      const { busyId, error, decide } = useDecide(feed, post)
+      const pendingBlock = state.pending.length === 0
+        ? h('p', { className: 'ru-note' }, t('approvalsPanelEmpty'))
+        : h('div', { className: 'ru-approvals' }, ...approvalRows({ t, pending: state.pending, busyId, onDecide: decide }))
+      const missedRows = state.missed.map((row, index) => h('div', { className: 'ru-approval-why', key: `${String(row.at)}-${index}` },
+        `${new Date(row.at).toLocaleString()} \u00b7 ${String(row.toolName ?? '?')} \u00b7 ${shownTier(row)} \u00b7 `,
+        h('span', { className: 'ru-dim' }, String(row.by ?? ''))))
+      const missedBlock = state.missed.length === 0
+        ? h('p', { className: 'ru-note dim' }, t('approvalsPanelNoMissed'))
+        : h('div', { className: 'ru-missed' }, ...missedRows)
+      const auditNote = auditPath === undefined || auditPath === ''
+        ? null
+        : h('p', { className: 'ru-note dim' }, fmt(t('approvalsPanelAlso'), { p: String(auditPath) }))
+      return h('div', { className: 'ru-panel' },
+        h('h3', { className: 'ru-panel-title' }, fmt(t('approvalsPanelPending'), { n: state.pending.length })),
+        pendingBlock,
+        error === '' ? null : h('p', { className: 'ru-note warn' }, error),
+        h('h3', { className: 'ru-panel-title' }, fmt(t('approvalsPanelMissed'), { n: state.missedCount })),
+        missedBlock,
+        auditNote)
+    }
+
+    /** The right-pane tab identity: an address pattern, a title, and how to recognise one. */
+    const APPROVALS_TAB_ID = 'remote-use-approvals'
+    const APPROVALS_RESOURCE = 'dsh-resource://remote-use-approvals'
+
     const inject = ['slots', 'locale']
 
     function apply(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-remote-use: dictionaries')
+
+      // ---- the three approval surfaces, where the work happens --------------------------
+      //
+      // One GET and one POST, shared by the feed and every button, so all three surfaces talk to
+      // the route the same way -- and so `via: 'page'` is asserted in exactly one place.
+      const getSnapshot = async () => {
+        const response = await fetch(ROUTE, { cache: 'no-store' })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.json()
+      }
+      const postRoute = async (action, payload) => {
+        const response = await fetch(ROUTE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload === undefined ? { action } : { action, ...payload }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || data?.ok === false) throw new Error(String(data?.error ?? `HTTP ${response.status}`))
+        return data
+      }
+      const feed = createApprovalFeed({ get: getSnapshot })
+      ctx.effect(() => () => feed.dispose(), 'dsh-plugin-remote-use: approval feed')
+
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock',
+        locale: NS,
+      }, (props) => h(ApprovalsDock, { ...props, feed, post: postRoute })))
+
+      ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+        name: 'conversation.session.header.actions',
+        locale: NS,
+      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: openApprovalsPane })))
+
+      // The panel is optional on purpose. `sidebarRightTabs`/`sidebarRight` are first-party
+      // services; on a shell that lacks them the dock and the header button still work, so a
+      // missing pane must not take the rest of the plugin down with it. Neither is listed in
+      // `inject`: requiring them would stop `apply` from running at all on such a shell.
+      function openApprovalsPane() {
+        try {
+          ctx.sidebarRight?.openResource?.(`${APPROVALS_RESOURCE}/current`)
+        } catch (error) {
+          console.warn('[remote-use] could not open the approvals pane:', error)
+        }
+      }
+      if (ctx.sidebarRightTabs !== undefined) {
+        ctx.effect(() => ctx.sidebarRightTabs.register({
+          id: APPROVALS_TAB_ID,
+          kind: 'remote-use-approvals',
+          patterns: [`${APPROVALS_RESOURCE}/**`],
+          priority: 'builtin',
+          // Recognises our own addresses, so another plugin's tab can never be hijacked by ours.
+          canOpen: (address) => String(address).startsWith(APPROVALS_RESOURCE),
+          title: () => t('approvalsPanel'),
+        }), 'dsh-plugin-remote-use: approvals tab type')
+        ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab',
+          key: APPROVALS_TAB_ID,
+          locale: NS,
+        }, (props) => h(ApprovalsTab, { ...props, feed, post: postRoute })))
+        ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab.title',
+          key: APPROVALS_TAB_ID,
+          locale: NS,
+        }, () => h('span', null, t('approvalsPanel'))))
+      }
+
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
         // A slot/ledger id, and deliberately SHORT. Only the registration id at the top of this file

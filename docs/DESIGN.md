@@ -1265,9 +1265,23 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 **窗口默认 180 秒**（`approvalTimeoutMs`）。这个数字不是审美问题：它就是"人能不能看见"的唯一约束。
 超时依然是拒绝 —— 加长窗口不放松任何东西，它只是让"看见"这件事来得及。
 
-**来源必须可辨**：`approvals.decide` 现在记录 `by ∈ {page, api, timeout, disposed}`。
-页面点击（浏览器 POST 必带 `Origin`）才是 `page`，其余一律 `api` —— 默认值取**保守**的那个，
-因为把脚本记成"人批的"会让"人在环里"这个结论无法被验证（PITFALLS F19）。
+**来源必须可辨**：`approvals.decide` 记录 `by ∈ {page, api, timeout, disposed}`。
+页面在请求体里**自声明** `via: 'page'`（`Origin` 判据在本应用的链路上不成立——真实点击实测记为
+`api`），其余一律 `api`。默认值取**保守**的那个，因为把脚本记成"人批的"会让"人在环里"这个结论
+无法被验证（PITFALLS F19 / F22）。
+
+**三处「在工作现场」的界面（0.2.4）**：设置页默认关着，而"等我批准"恰恰要求人不必去开它。所以审批
+同时出现在三个**常驻**位置，各自只用不与第一方冲突的槽位：
+
+| 槽位 | 内容 | 为什么是这个位置 |
+|---|---|---|
+| `conversation.composer.dock`（`list`） | 输入框上方的待批准条 + 允许/拒绝 | 操作者本来就在看这里；`conversation.input.permission` 是 `single` 且已被 DSH 自己的权限选择器占用，**不能抢** |
+| `conversation.session.header.actions`（`list`） | 会话头部的「审批 N」按钮，点开右侧面板 | 工作时常驻可见；`sidebar.toggle.badge` 同为 `single` 且已被更新角标占用 |
+| `sidebar.right.pane.tab` + `.title`（`keyed`） | 右侧面板「审批」标签页：待批准 + 无人应答被拒的记录 | 与"文件/预览"并列、用现成快捷键开合，正合"审批记录要单独拆出来" |
+
+三者共用**一个**轮询源（`createApprovalFeed`）：首个订阅者才启动、最后一个退订即停。没人在看时
+不该有轮询 —— 这条性质曾经只写在注释里，而实现里在 `apply()` 就起了定时器，直接吊死了测试进程
+（F23）。
 
 ### 8.7 数据不出局域网
 

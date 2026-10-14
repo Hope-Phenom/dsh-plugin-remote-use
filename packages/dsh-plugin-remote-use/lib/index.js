@@ -869,6 +869,10 @@ export function makeApprovalDecider(deps) {
       toolName: ask?.toolName,
       defaultTier: cfg.requiredTier,
     })
+    // What the worker ASKED for. `inferRequiredTier` answers "the minimum that would do", which is
+    // what the policy checks -- but the row a HUMAN reads must say what is being requested, or a
+    // danger-full-access request shows up as "needs workspace-write" (PITFALLS F22).
+    const requestedTier = readRequestedTier(ask?.rawInput)
 
     const engine = decideApproval(
       { taskId, toolCallId: ask?.toolCallId, toolName: ask?.toolName, rawInput: ask?.rawInput },
@@ -914,12 +918,13 @@ export function makeApprovalDecider(deps) {
       toolName,
       rawInput: ask?.rawInput,
       requiredTier,
+      requestedTier,
       reason: engine.reason,
       source: engine.source,
     })
     // Announce it before awaiting: the await lasts the whole budget, and a notification sent
     // after it would arrive once there is nothing left to decide.
-    announceApproval({ queue, log, peerId: worker.id, taskId, toolName, requiredTier })
+    announceApproval({ queue, log, peerId: worker.id, taskId, toolName, requiredTier, requestedTier })
     const optionId = await waiting
 
     // The queue's `onSettle` writes the audit row for this one: it holds the `by` detail
@@ -1067,6 +1072,29 @@ function rejectUnusableCwd(cwd, ctx) {
 }
 
 /**
+ * The tier a tool call ASKED for, when it asked explicitly.
+ *
+ * WHY THIS IS NOT `inferRequiredTier`: that one answers "what is the minimum that would do", which
+ * is what the policy checks. This one answers "what did the worker request", which is what a human
+ * is being asked to approve -- and the two disagree in the case that matters. Measured 2026-10-14:
+ * a request for `danger-full-access` reached the queue and the row the operator was deciding read
+ * `requiredTier: workspace-write`, because the row carried the inference. DSH states the request in
+ * the tool call's own arguments (`sandbox_permissions`, alongside `justification`).
+ *
+ * @param {unknown} rawInput
+ * @returns {string} the requested tier, or '' when the call asked for nothing wider
+ */
+export function readRequestedTier(rawInput) {
+  if (rawInput === null || typeof rawInput !== 'object') return ''
+  const value = rawInput.sandbox_permissions ?? rawInput.sandboxPermissions
+  if (typeof value === 'string') return value.trim()
+  // Defensive: a nested shape would otherwise be silently dropped, which is how the field went
+  // missing in the first place.
+  if (value !== null && typeof value === 'object' && typeof value.mode === 'string') return value.mode.trim()
+  return ''
+}
+
+/**
  * Tell the MODEL that a person is being waited on.
  *
  * WHY THIS IS NOT JUST THE SETTINGS PAGE: the page only reaches someone who is looking at it, and
@@ -1089,7 +1117,9 @@ export function approvalNotice(pending, timeoutMs) {
   const lines = rows.map((row) => {
     const left = Math.max(0, Math.round((budget - Number(row.ageMs ?? 0)) / 1000))
     const tool = String(row.toolName ?? '?')
-    const tier = String(row.requiredTier ?? '')
+    // The REQUESTED tier, falling back to the inferred minimum: the model repeats this to the
+    // operator, so it has to be the thing they are being asked about (PITFALLS F22).
+    const tier = String(row.requestedTier ?? '') !== '' ? String(row.requestedTier) : String(row.requiredTier ?? '')
     const task = String(row.taskId ?? '')
     const peer = String(row.peerId ?? '')
     return `- ${tool}${tier === '' ? '' : ` needs ${tier}`}${task === '' ? '' : ` for ${task}`}`
@@ -1126,9 +1156,10 @@ export function announceApproval(opts) {
     const row = rows.length === 0 ? undefined : rows[rows.length - 1]
     if (row === undefined) return false
     const seconds = Math.max(0, Math.round((queue.timeoutMs - Number(row.ageMs ?? 0)) / 1000))
+    const asked = String(row.requestedTier ?? '') !== '' ? String(row.requestedTier) : String(row.requiredTier ?? '?')
     const sent = notify({
       title: '远程任务：等待你批准',
-      message: `${String(row.toolName ?? '?')} 申请 ${String(row.requiredTier ?? '?')}`
+      message: `${String(row.toolName ?? '?')} 申请 ${asked}`
         + `（${String(row.peerId ?? '')}${row.taskId === '' ? '' : ` · ${String(row.taskId)}`}）`
         + `；请在设置页点「允许一次」，约 ${seconds} 秒后自动按拒绝处理。`,
       log,
@@ -1144,18 +1175,27 @@ export function announceApproval(opts) {
 /**
  * Where a decision on the settings route came from.
  *
- * WHY: `queue.decide` used to record every caller as `human`, which made the audit trail claim a
- * person had approved a request that this repo's own harness had approved over the route. A
- * browser sends `Origin` on EVERY POST -- the same fact `crossSitePostProblem` leans on -- so its
- * presence separates a click from a script cheaply.
+ * WHY THE PAGE DECLARES IT: `queue.decide` used to record every caller as `human`, which made the
+ * audit claim a person had approved a request that this repo's own harness had approved over the
+ * route. The first fix keyed off the `Origin` header -- on the theory that a browser sends it on
+ * every POST -- and **that theory was measured false in this app's own transport**: a real click on
+ * the settings page recorded `by=api`, because the request reached the route with no usable Origin
+ * (PITFALLS F22). So the page now says so itself, in the body.
  *
- * THIS IS EVIDENCE, NOT A BOUNDARY. A script can send the header, so `page` only ever changes how
- * the trail reads. Never branch an authorization decision on it.
+ * THIS IS EVIDENCE, NOT A BOUNDARY. Any caller can claim `via: 'page'`; the alternative was a field
+ * that never once said `page`, which is worse for the question the trail exists to answer. The
+ * threat model for this route is settled elsewhere (see `crossSitePostProblem`): a local process
+ * that can POST here can already do anything to this machine. Never branch an authorization
+ * decision on this value.
  *
  * @param {{ headers?: Record<string, unknown> }} req
+ * @param {{ via?: unknown }} [body]
  * @returns {'page'|'api'}
  */
-export function requestProvenance(req) {
+export function requestProvenance(req, body) {
+  if (body !== null && typeof body === 'object' && body.via === 'page') return 'page'
+  // Kept as a corroborating signal: a browser that DOES send a same-origin Origin is still a page
+  // even if an older client build forgot the body marker.
   const headers = req?.headers ?? {}
   const origin = typeof headers.origin === 'string' ? headers.origin.trim() : ''
   return origin === '' || origin.toLowerCase() === 'null' ? 'api' : 'page'
@@ -1580,7 +1620,7 @@ export function makeSettingsRoute(deps) {
             // than quietly accepted -- the page is showing a row that no longer exists, and
             // pretending otherwise would let a stale click look like a fresh approval.
             if (queue === undefined) return send(503, { ok: false, error: 'this build has no approval queue' })
-            const result = queue.decide(String(body?.id ?? ''), body?.decision, requestProvenance(req))
+            const result = queue.decide(String(body?.id ?? ''), body?.decision, requestProvenance(req, body))
             if (result.ok !== true) return send(409, { ok: false, error: result.error })
             return send(200, { ok: true, optionId: result.optionId, pending: queue.list() })
           }

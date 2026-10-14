@@ -11,7 +11,7 @@ import { strict as assert } from 'node:assert'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
 
-import { approvalNotice, announceApproval, requestProvenance } from '../lib/index.js'
+import { approvalNotice, announceApproval, readRequestedTier, requestProvenance } from '../lib/index.js'
 import { notifyDesktop, resolveNotifyScript, NOTIFY_PACKAGE } from '../lib/core/desktop-notify.js'
 
 // ---------------------------------------------------------------- the notifier path
@@ -176,11 +176,41 @@ test('announcing never propagates a failure: it runs on the approval path', () =
 
 // ---------------------------------------------------------------- who decided
 
-test('a browser request is a page; anything else is an API call', () => {
+test('a page says so in the body, because the Origin test never fired', () => {
+  // MEASURED, 2026-10-14: a real click on the settings page recorded `by=api`. The Origin header
+  // this used to key off is not usable in this app's own transport, so the page declares itself --
+  // and the declaration is EVIDENCE, not a boundary (any caller can send it).
+  assert.equal(requestProvenance({ headers: {} }, { via: 'page' }), 'page')
+  assert.equal(requestProvenance({ headers: { origin: 'null' } }, { via: 'page' }), 'page')
+  assert.equal(requestProvenance({ headers: {} }, { id: 'ap1', decision: 'allow' }), 'api', 'no marker: a script')
+  assert.equal(requestProvenance({ headers: {} }, { via: 'api' }), 'api')
+  assert.equal(requestProvenance({ headers: {} }, undefined), 'api')
+  // The header path is kept as corroboration for a client build that predates the marker.
   assert.equal(requestProvenance({ headers: { origin: 'http://127.0.0.1:19387', host: '127.0.0.1:19387' } }), 'page')
   assert.equal(requestProvenance({ headers: { host: '127.0.0.1:19387' } }), 'api', 'no Origin: a script')
-  assert.equal(requestProvenance({ headers: { origin: 'null' } }), 'api', 'an opaque origin is not a page')
   assert.equal(requestProvenance({ headers: { origin: '   ' } }), 'api')
   assert.equal(requestProvenance(undefined), 'api')
   assert.equal(requestProvenance({}), 'api')
+})
+
+// ---------------------------------------------------------------- which tier is being asked for
+
+test('the requested tier is read from the tool call, never guessed', () => {
+  assert.equal(readRequestedTier({ sandbox_permissions: 'danger-full-access' }), 'danger-full-access')
+  assert.equal(readRequestedTier({ sandboxPermissions: ' workspace-write ' }), 'workspace-write')
+  assert.equal(readRequestedTier({ sandbox_permissions: { mode: 'danger-full-access' } }), 'danger-full-access')
+  assert.equal(readRequestedTier({ file_path: 'x' }), '', 'no request at all')
+  assert.equal(readRequestedTier(undefined), '')
+  assert.equal(readRequestedTier('danger-full-access'), '')
+})
+
+test('the model-facing notice repeats the tier being asked for, not the inferred minimum', () => {
+  // The row a human decides on said `needs workspace-write` while the worker was asking for the
+  // unrestricted tier (PITFALLS F22). The notice is what the model reads out to that human.
+  const asked = approvalNotice([{
+    toolName: 'pwsh', requiredTier: 'workspace-write', requestedTier: 'danger-full-access', ageMs: 0,
+  }], 180_000)
+  assert.match(asked, /pwsh needs danger-full-access/)
+  const inferredOnly = approvalNotice([{ toolName: 'write', requiredTier: 'workspace-write', ageMs: 0 }], 180_000)
+  assert.match(inferredOnly, /write needs workspace-write/, 'no request: the inference is the honest answer')
 })
