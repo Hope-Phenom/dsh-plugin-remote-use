@@ -32,37 +32,77 @@ export function subsystemOf(file) {
 }
 
 /**
- * Does the DSH profile name this shim as the sandbox runner?
+ * Which shim does the DSH profile name as the sandbox runner?
  *
- * A structural scan rather than a YAML parse: the deployment has no YAML dependency on this
- * path, and the shape it looks for is six lines long. It reports what it found so a miss is
- * visible rather than inferred.
+ * THE PROFILE IS THE SOURCE OF TRUTH, and this function exists because treating a hardcoded default
+ * as the requirement was a real defect: a worker whose mediator had been materialized somewhere else
+ * -- and whose acp profile correctly pointed at it -- was refused with
+ *
+ *   the mediator works but DSH will not use it: runnerCommand names a different shim than
+ *   C:\dsh-sandbox-mediator\shim.mjs
+ *
+ * even though running a command through that very shim worked. The deployment location is not the
+ * plugin's business; what matters is that the profile names a shim and that the shim confines.
+ *
+ * A structural scan rather than a YAML parse: the deployment has no YAML dependency on this path, and
+ * the shape it looks for is six lines long.
+ *
+ * @param {string} profilePath
+ * @returns {{ ok: boolean, shim: string, reason: string }}
+ */
+export function shimNamedByProfile(profilePath) {
+  if (typeof profilePath !== 'string' || profilePath === '' || !existsSync(profilePath)) {
+    return { ok: false, shim: '', reason: `no profile patch at ${profilePath}` }
+  }
+  let text
+  try {
+    text = readFileSync(profilePath, 'utf8')
+  } catch (error) {
+    return { ok: false, shim: '', reason: `cannot read ${profilePath}: ${error.message}` }
+  }
+  const entry = /-\s*id:\s*sandbox\b[\s\S]{0,600}?runnerCommand:([\s\S]{0,400}?)(?=\n\S|\n-|$)/u.exec(text)
+  if (entry === null) {
+    // Actionable on purpose: this message is what an operator sees when arming is refused, and the
+    // sandbox case previously said only that something did not match.
+    return {
+      ok: false,
+      shim: '',
+      reason: `the profile has no sandbox entry with a runnerCommand -- add "- id: sandbox" with a runnerCommand naming a console-subsystem mediator and runnerFailureSignatures (see README, Windows sandbox)`,
+    }
+  }
+  const normalised = entry[1].replace(/\\\\/gu, '\\').replace(/["']/gu, '')
+  const match = /([A-Za-z]:\\[^\r\n"']*shim\.mjs)/u.exec(normalised)
+  if (match === null) {
+    return { ok: false, shim: '', reason: 'runnerCommand does not name a shim.mjs' }
+  }
+  if (!/runnerFailureSignatures/u.test(text)) {
+    return {
+      ok: false,
+      shim: '',
+      reason: 'runnerCommand is set without runnerFailureSignatures, which sandbox-local rejects at construction -- add the runner\'s error prefix, e.g. "windows-acl-run: "',
+    }
+  }
+  return { ok: true, shim: match[1], reason: '' }
+}
+
+/**
+ * Does the DSH profile name THIS shim as the sandbox runner?
+ *
+ * Kept as its own primitive because "the profile names exactly this path" is a useful question --
+ * for tests, and for a caller that wants to assert a specific wiring. It is deliberately NOT how
+ * probeSandbox decides which shim to exercise: there the profile's own answer wins.
  *
  * @param {string} profilePath
  * @param {string} shimPath
  * @returns {{ ok: boolean, reason: string }}
  */
 export function profileNamesShim(profilePath, shimPath) {
-  if (typeof profilePath !== 'string' || profilePath === '' || !existsSync(profilePath)) {
-    return { ok: false, reason: `no profile patch at ${profilePath}` }
-  }
-  let text
-  try {
-    text = readFileSync(profilePath, 'utf8')
-  } catch (error) {
-    return { ok: false, reason: `cannot read ${profilePath}: ${error.message}` }
-  }
-  const entry = /-\s*id:\s*sandbox\b[\s\S]{0,600}?runnerCommand:([\s\S]{0,400}?)(?=\n\S|\n-|$)/u.exec(text)
-  if (entry === null) return { ok: false, reason: 'the profile has no sandbox entry with a runnerCommand' }
-  const normalised = entry[1].replace(/\\\\/gu, '\\').replace(/["']/gu, '')
-  if (!normalised.includes('shim.mjs')) return { ok: false, reason: 'runnerCommand does not name a shim.mjs' }
-  // The exact path matters: a stale mediator from a previous install would still look right by
+  const named = shimNamedByProfile(profilePath)
+  if (!named.ok) return { ok: false, reason: named.reason }
+  // The exact path matters here: a stale mediator from a previous install would still look right by
   // filename while driving an old runner.
-  if (!normalised.includes(shimPath)) {
+  if (!named.shim.includes(shimPath)) {
     return { ok: false, reason: `runnerCommand names a different shim than ${shimPath}` }
-  }
-  if (!/runnerFailureSignatures/u.test(text)) {
-    return { ok: false, reason: 'runnerCommand is set without runnerFailureSignatures, which sandbox-local rejects' }
   }
   return { ok: true, reason: '' }
 }
@@ -116,10 +156,22 @@ function runConfined(deps, opts, command) {
  *             config: { ok: boolean, reason: string }, reason: string }}
  */
 export function probeSandbox(deps = {}) {
-  const mediator = deps.mediator ?? 'C:\\dsh-sandbox-mediator'
   const profile = deps.profile ?? join(process.env.USERPROFILE ?? '', '.dsh', 'profiles', 'desktop', 'cordis.patch.yml')
   const injectedSpawn = deps.spawn
   const spawn = injectedSpawn ?? ((file, args, opts) => spawnSync(file, args, opts))
+
+  // WHICH SHIM IS EXERCISED, in precedence order:
+  //
+  //   1. deps.mediator  -- an explicit override. Tests and diagnostics use it to point at a known
+  //                        location regardless of what the profile says.
+  //   2. the PROFILE     -- ★ the source of truth. This is the fix: the plugin used to require the
+  //                        hardcoded default, so a perfectly working mediator materialized anywhere
+  //                        else was refused. See shimNamedByProfile's note.
+  //   3. the default     -- only when the profile names nothing, so the failure is reported against
+  //                        the location an operator would have been told to use.
+  const named = shimNamedByProfile(profile)
+  const defaultMediator = 'C:\\dsh-sandbox-mediator'
+  const mediator = deps.mediator ?? (named.ok ? dirname(named.shim) : defaultMediator)
   const shim = join(mediator, 'shim.mjs')
   const runner = join(mediator, 'node_modules', '@deepseek-ai', 'dsh-sandbox-windows-acl', 'lib', 'runner.js')
   const workspace = deps.workspace ?? join(tmpdir(), 'dsh-sandbox-probe-ws')
@@ -128,10 +180,23 @@ export function probeSandbox(deps = {}) {
   const checks = []
   const add = (name, ok, detail = '') => checks.push({ name, ok, detail })
 
-  const config = profileNamesShim(profile, shim)
+  // `config` answers "does the profile name a usable shim", and it now names the one it found, so a
+  // refusal can say which file to fix instead of only that something did not match.
+  const config = deps.mediator === undefined
+    ? { ok: named.ok, reason: named.reason }
+    : profileNamesShim(profile, shim)
+
   if (!existsSync(shim) || !existsSync(runner)) {
-    add('the mediator is materialized', false, `shim=${existsSync(shim)} runner=${existsSync(runner)}`)
-    return { ok: false, checks, config, reason: 'the sandbox mediator is not materialized' }
+    add('the mediator is materialized', false,
+      `shim=${existsSync(shim)} runner=${existsSync(runner)} at ${mediator}`)
+    return {
+      ok: false,
+      checks,
+      config,
+      reason: config.ok
+        ? `the profile names ${shim} but it is not materialized there`
+        : `the sandbox mediator is not materialized: ${config.reason}`,
+    }
   }
   add('the mediator is materialized', true)
 
