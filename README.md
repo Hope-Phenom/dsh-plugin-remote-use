@@ -39,8 +39,43 @@ GUI 自动化测试和"看屏幕才知道结果"的验证，必须在一台**真
 | 主机 | DSH（本项目在 `0.2.0-rc.2` 上开发）、Node ≥ 20 |
 | 从机 | DSH 已装并**已登录**、Node ≥ 20、一个**已解锁的交互式桌面会话** |
 | 从机 | 沙箱 mediator 生效（见下方"安全模型"）——**沙箱不可用时会拒绝启用** |
+| 从机 | **一个虚拟显示器**（见下）——不满足时自检的 S2 **阻断**派单 |
 
 > **从机必须真的登录进桌面**。锁屏或无人登录时无法注入输入，自检会明确报出来。
+
+#### 为什么从机需要一个虚拟显示器
+
+不是为了"多一块屏"，而是为了**让显示固定下来**。勘察记录（`.research/07-slave-recon.md`）里的原始问题：
+
+```
+物理控制台 1920×1080  vs  RDP 2560×1440
+⇒ 同一个测试在两种会话下看到的布局不同
+```
+
+再加上一条运维上的矛盾：**从机若要独占物理显示器，操作者自己就没屏用了**。虚拟显示器一次解决两件事：
+
+| 好处 | 说明 |
+|---|---|
+| **坐标固定** | `1920×1080@60`、主屏在 `(0,0)` —— GUI 断言的坐标才有意义 |
+| **不占用物理屏** | 物理显示器**可随时还给主机**；也不需要 RDP |
+| **重启后保持** | Windows 记住布局，无人值守 |
+
+参考实现是 **Virtual-Display-Driver (VDD)**（MIT）。自检里与之相关的检查：
+
+| 检查 | 判据 | 级别 |
+|---|---|---|
+| **S1** | 至少一个 `ATTACHED_TO_DESKTOP` 的适配器 | 🔴 阻断 |
+| **S2** | **虚拟显示器存在且有 EDID** —— 不能是 `WinDisc` 兜底 | 🔴 **阻断** |
+| S3 | 主屏分辨率 `1920×1080` | 🟡 警告 |
+| **S4** | **虚拟屏必须是 primary 且在 `(0,0)`** | 🔴 **阻断** |
+
+> **S2 与 `WinDisc`**：虚拟显示器被禁用或驱动加载失败时，Windows 会回落到 `WinDisc`（Microsoft 基本显示适配器）——通常是 `1024x768`。它**能**让 S1 通过，但**不是**约定的显示，所以 S2 单独把它判为阻断，报错文案就是 `virtual display present (not WinDisc fallback)`。
+>
+> **S4 为什么是阻断级**：主屏不在原点时，GUI 自动化的绝对坐标会**整体偏移**，而症状是"点了但点偏了"——**不会报错**。这是这个项目里最危险的失败模式，所以它比分辨率（警告）更严格。
+>
+> **一个已知的取舍**：如果为了让"接着显示器时能看见登录界面"而把**物理屏设为 primary**，那么显示器接着的时候 S4 会失败、派单被阻断。这其实是**正确的保守行为**——插拔显示器会改变坐标空间，正在跑的任务会静默点偏。两种布局二选一，取决于你更在意哪一边。
+>
+> ⚠️ **运维警告（来自实测）**：**大版本 GPU / 芯片组驱动更新可能与 VDD 冲突**，症状是开机黑屏（虚拟屏被排到物理屏前面）。**动显示相关配置前先确认 SSH 可用**，它是唯一的逃生通道。
 
 ### 2. 主机侧：装插件
 
@@ -231,6 +266,39 @@ node relay.mjs --port 7331 --token <secret> `
 ---
 
 ## 运维
+
+### 虚拟显示器挂了怎么恢复
+
+**症状**：自检 `S2` 阻断、报 `virtual display present (not WinDisc fallback)`，派单被门禁拒绝。
+在从机上（需要管理员）：
+
+```powershell
+# 1. 看设备状态。Error + CM_PROB_DISABLED(Code 22) 就是它
+Get-PnpDevice -Class Display | Select-Object Status,Problem,FriendlyName,InstanceId | Format-List
+
+# 2. 看当前实际生效的是哪块屏 —— 出现 WinDisc 就说明已经回落到兜底了
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Screen]::AllScreens | ForEach-Object { "$($_.DeviceName) $($_.Bounds.Width)x$($_.Bounds.Height) at $($_.Bounds.X),$($_.Bounds.Y)" }
+
+# 3. 重新启用
+Enable-PnpDevice -InstanceId 'ROOT\DISPLAY\0000' -Confirm:$false
+
+# 4. 让它生效并复核
+Start-Sleep 5
+Get-PnpDevice -Class Display | Select-Object Status,FriendlyName
+```
+
+**如果启用后马上又变回 Code 22**，那就不是"被谁禁用"，而是**驱动框架没起来**。VDD 是用户态（UMDF）驱动，依赖 `\Driver\WUDFRd`：
+
+```powershell
+# 开机时是否报过这个 —— 事件 219「驱动程序 \Driver\WUDFRd 加载失败」就是它
+Get-WinEvent -FilterHashtable @{LogName='System'; Id=219} -MaxEvents 5 |
+  Select-Object TimeCreated,Message | Format-List
+```
+
+这种情况**重新启用可能不持久**，会每次开机复发。排查方向：`WUDFRd` 服务的启动类型、VDD 驱动包是否完整（`pnputil /enum-drivers`）、以及最近是否动过 GPU/芯片组驱动。
+
+> ⚠️ **动显示相关配置前先确认 SSH 可用** —— 它是唯一的逃生通道（设计文档 §7.8 的实测警告）。
 
 ### 排查顺序
 
