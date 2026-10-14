@@ -65,6 +65,9 @@
   - [F8. 改包名要同步的两类标识符，而且规则相反](#f8-改包名要同步的两类标识符而且规则相反)
   - [F9. DSH 起不来时，第一件事是读它自己写的崩溃日志](#f9-dsh-起不来时第一件事是读它自己写的崩溃日志)
   - [F10. 布防被拒："the sandbox mediator is not materialized" —— 而它明明物化过](#f10-布防被拒the-sandbox-mediator-is-not-materialized--而它明明物化过)
+  - [F11. Web 会话的工具目录来自 agent preset，不是整棵 loader 树](#f11-web-会话的工具目录来自-agent-preset不是整棵-loader-树)
+  - [F12. `--dump-config`：不启动就能看合成后的树，并暴露"未匹配的补丁目标"](#f12---dump-config不启动就能看合成后的树并暴露未匹配的补丁目标)
+  - [F13. 启动诊断在 `~/.dsh/logs/`，不在 Electron 的 `logs/` 目录](#f13-启动诊断在-dshlogs不在-electron-的-logs-目录)
 - [G. 需求本身的坑](#g-需求本身的坑)
   - [G1. "主屏必须是虚拟屏" —— 一条忠实实现后让机器无法登录的要求](#g1-主屏必须是虚拟屏--一条忠实实现后让机器无法登录的要求)
 - [这些教训的共同形状](#这些教训的共同形状)
@@ -2505,6 +2508,143 @@ OK   read-only can still read                             [exit=0]
 >   两者都没错，但**没有一处断言它们必须相同** —— 直到门禁来断言。
 > - **改了 profile 补丁，探测立刻生效，但 `sandbox-local` 要重启才消费它**：
 >   只重启前会得到"布防能过、跑任务时沙箱仍然坏"的状态，比直接失败更难查。
+
+---
+
+## F11. Web 会话的工具目录来自 **agent preset**，不是整棵 loader 树
+
+**现象**
+
+一个 loader 行**确实插进了合成后的树**，模块也**解析得到**，配置文件干净、启动无报错 —— 但**模型看不到那个工具**。调用它会得到：
+
+```
+Error: unknown tool "subagent_remote"
+```
+
+而同一个插件的另外四个工具（由插件在运行时注册）**工作正常**。
+
+**根因**
+
+Web 应用自己有一层 **agent preset**，一个会话的模型工具目录由它枚举，而不是由 loader 树的全部行决定：
+
+```yaml
+# dsh --profile web --dump-default-config 的输出里
+- id: preset-standard
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: standard
+    plugins:                     # <- 显式枚举，不在表里的工具模型就看不到
+      - persona
+      - agent-instructions
+      - tool-bash / tool-pwsh / tool-fs / tool-fs-search / tool-jobs
+      - skill-filesystem / tool-skill / command-goal / tool-goal
+      - planning ...
+```
+
+同族的还有 `preset-ptc` / `preset-minimal` / `preset-cordis`，注册表默认 `standard`。
+
+官方文档把这一点写得很直接：
+
+> The Web app **disables the base tool row** and exposes the same tools through its `cordis`, `ptc`, and `standard` **agent presets**.
+
+> each installed Bundle registers only its **dormant Host provider**; **a copied Preset must separately enable the matching tool row** for new Agents.
+
+**两条暴露途径的区别（这是坑的核心）**
+
+| 途径 | 能否到模型 |
+|---|---|
+| **插件运行时注册** `ctx.tools.register(def)`，按 agent 作用域 | **能**。绕开 preset 枚举，插件自己的工具就是这么工作的 |
+| **profile patch 里的 loader 行**（如 `tool-subagent`） | **不能**，除非该行被某个 agent preset 的 `plugins:` 列出 |
+
+**修法（按代价排序）**
+
+1. **让插件自己提供工具**，走 `ctx.tools.register` —— 与它已有的其他工具同一条路。不需要改 preset，不需要每台从机在 profile 里写一行。
+2. 覆盖 `preset-standard` 的 `config.plugins`，把整份列表抄下来再加上自己的行。
+
+⚠️ **方案 2 的隐藏代价**：文档明确说 "**a patch replaces the targeted row's complete `config` value rather than deep-merging keys**"、"**must restate every key the row needs**"。所以抄一份 preset 等于**把它冻结在抄写那一天** —— DSH 以后更新 preset（加工具、改提示词）都不会生效。为一个工具冻结整个 agent 定义，通常不划算。
+
+> **连带教训**：`DESIGN.md` 里曾写"插件不能在运行时新增工具行 —— 工具行只能来自 profile patch"。
+> 这句话把两件事混成了一件：插件确实**不能新增一个 `dsh-tool-subagent` 的 loader 行**，
+> 但它**完全可以提供自己的委派工具** —— 而它已经这么做了四次。
+> 一句含糊的结论，换来的是"把行放进 profile 补丁"这个方向，以及围绕它的一整轮排查。
+
+---
+
+## F12. `--dump-config`：**不启动**就能看合成后的树，并暴露"未匹配的补丁目标"
+
+**现象**
+
+排查"某一行为什么没生效"时，手上没有可用的观测手段：DSH 是 GUI，日志只在崩溃时才落盘，
+启动一次代价高，而**凭空猜测层级语义**会连续猜错（这一轮猜错了三次）。
+
+**官方的观测工具**
+
+```sh
+dsh --profile <name> --dump-default-config      # 只打印 bundle 层
+dsh --profile <name> --dump-config              # 再加上 profile 补丁、家目录补丁、--patch 覆盖层
+dsh --profile <name> --dump-config --patch <某个 profile 的 cordis.patch.yml>
+```
+
+它**不启动应用**，输出的是合成后的 YAML 条目表，并且：
+
+- **每一行都带注释，说明它来自哪个文件**：`# == @deepseek-ai/dsh-base`、
+  `# == @deepseek-ai/dsh-base, patched by @deepseek-ai/dsh-acp-app`；
+- **未匹配的补丁目标报到 stderr**：`dsh: [<文件>] patch: entry "ui-theme" not found`；
+- `!!js` 表达式保持未求值。
+
+**这一轮靠它一次性定下的三件事**
+
+1. **`insert:` 确实是新增行的正确语法**，行确实进了树 —— 于是"模块解析不到"这个推测被排除；
+2. **`- id:` 指向不存在的行会报 `not found`**，这条语义是从 stderr 上读到的，不是猜的；
+3. 顺带把 `--patch` 当"替身层"的用法学会了：**`desktop` 是保留 profile，CLI 拒绝 dump 它**
+   （`error: profile "desktop" is managed exclusively by the Electron application`），
+   但可以把它的补丁当覆盖层挂到别的 profile 上 dump。
+
+**两个限制**
+
+- 三个 dump 开关**互斥**，且**拒绝保留的 `desktop` profile** 与应用参数；
+- **dump 初始化缺失的 profile 文件**（我们这个已存在，无副作用，但要知道它会写盘）。
+
+> **方法上的教训**：这一轮我在拿到这个工具之前，连续做了三次层级语义的推测
+> （`insert:` 不生效 / 模块解析不到 / 解析上下文不同），**三次都错**。
+> 而它其实是一条**不启动、不写配置、带来源标注**的只读命令。
+> **排查"为什么没生效"时，先找有没有"打印生效结果"的开关。**
+
+---
+
+## F13. 启动诊断在 **`~/.dsh/logs/`**，不在 Electron 的 `logs/` 目录
+
+**现象**
+
+DSH 启动失败时去找日志，翻的是：
+
+```
+%APPDATA%\@deepseek-ai\dsh-desktop\logs\      <- 这里只有 crash-*.log（崩溃转储）
+```
+
+而**插件加载、行未激活、模块解析失败**这一类"启动诊断"，**根本不写在这里**。
+这个目录里没有对应文件，看起来就像"什么都没出错"。
+
+**官方位置**
+
+> The final `Full diagnostics:` line names a unique `startup-<timestamp>-<uuid>.log` file
+> directly under **`$DSH_HOME/logs/`** (default `~/.dsh/logs/`).
+
+它的内容是启动失败的完整现场：
+
+- DSH 与 Node 版本、平台、profile、根配置路径；
+- **每一个未激活插件的模块与状态**、原始错误、以及启动期的 warning/error 参数；
+- **包括没有 Fiber 的 import 错误**。
+
+两个判读要点：
+
+- **只有"必需的插件激活失败"才会写这份文件**。目录不存在 = 从来没有过这种失败，
+  这本身就是一条有效信息（本轮就是靠它排除了"插件加载失败"）；
+- 崩溃弹窗给出的路径（`crash-*-host.log`）是**另一回事**，两者不要混。
+
+> **与 F9 的关系**：`%APPDATA%\@deepseek-ai\<app>\logs\crash-*-host.log` 记录的是**进程崩溃**，
+> 里面有 `--- renderer console ---` 段（F9）；`~/.dsh/logs/startup-*.log` 记录的是**启动时插件失败**。
+> 排查时先问一句"**我要找的是崩溃，还是某个东西没被激活**"，再决定去哪个目录。
 
 ---
 

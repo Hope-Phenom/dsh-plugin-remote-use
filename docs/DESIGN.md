@@ -442,20 +442,34 @@ ctx.sessionProjections.register({
 | `remote_interrupt` | `interrupt_agent` | 走 ACP `session/cancel` |
 | `remote_selfcheck` | —（新增） | 查询从机就绪状态，见 §5.10.7 |
 
-**`subagent_remote` 的精确配置**（已核验）：
+**`subagent_remote` 的配置**（字段已核验；**行的写法在下面被更正过**）：
 
 ```yaml
-- id: tool-subagent-remote-labpc
-  name: '@deepseek-ai/dsh-tool-subagent'
-  config:
-    provider: remote-labpc
-    toolName: subagent_remote
-    backgroundMode: one-shot        # 🔒 C2：不能是 continuable
-    maxDepth: provider-managed      # 🔒 必须，否则 depthLimit 校验失败
-    # 以下三项必须"连键都不出现"，否则 provider 注册整体回滚（见下）：
-    # agentOptions / persona / toolFilter
-    modelSelectionSettings: false   # 默认值；保持 false 即模型无法请求 provider/model
+- insert:                               # ← 新增行必须包在 insert: 里，见下方更正
+    - id: tool-subagent-remote-labpc
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: remote-labpc
+        toolName: subagent_remote
+        backgroundMode: one-shot        # 🔒 C2：不能是 continuable
+        maxDepth: provider-managed      # 🔒 必须，否则 depthLimit 校验失败
+        # 以下三项必须"连键都不出现"，否则 provider 注册整体回滚（见下）：
+        # agentOptions / persona / toolFilter
+        modelSelectionSettings: false   # 默认值；保持 false 即模型无法请求 provider/model
 ```
+
+⚠️ **更正一：上面的 `- id:` 单独写是错的，必须是 `- insert:`。** 这一条当初写成了不带 `insert:` 的
+`- id: tool-subagent-remote-labpc`，而 patch 语义是「**带 `id` 的条目覆盖已有行，不创建新行**」。
+实测：目标行不存在时，loader 在 stderr 上打出
+
+```
+dsh: [<补丁文件>] patch: entry "tool-subagent-remote-labpc" not found
+```
+
+并**跳过该条目**。所以照这份文档写出来的行**根本不会进树**。
+正确写法见 `dsh-base` 自己的两行（它们是 bundle 补丁，但语法一致），以及
+`cordis.patch.yml` 头部注释：
+「a top-level YAML array of loader patch entries (id-targeted config overrides, disables, and **insert lists**)」。
 
 ⚠️ **`agentOptions` 连"配了但不填"都不行。** `dsh-tool-subagent` 在 `subagent/provider-added` 事件里同步调用 `assertSubagentProviderConfiguration`（`:369-386`）做校验，而 Cordis 的 `emit` 是 `dispatch(...).map(cb => cb(...))`（`cordis/src/events.ts:194-196`）——**监听器抛出的异常会冒出来，导致 provider 注册整体回滚**，工具根本不注册。所以远程行必须彻底省略 `agentOptions`。
 
@@ -467,7 +481,21 @@ ctx.sessionProjections.register({
 
 ✅ **U1 结论：可以保留主机本地子 Agent 的完整能力**（那是另一行配置），只对远程行关闭。
 
-⚠️ **U2 结论：插件不能在运行时新增工具行** —— 工具行只能来自 profile patch。所以「一台从机一行」需要用户在 profile patch 里手写，或由插件在安装时写入（需要审批）。这对安装体验是个实际负担，见 §11。
+⛔ **U2 结论（已被推翻，保留原文以记录错误）。** 原结论：「插件不能在运行时新增工具行 —— 工具行只能来自 profile patch。所以「一台从机一行」需要用户在 profile patch 里手写……这对安装体验是个实际负担，见 §11。」
+
+**这句话把两件事混成了一件，而且基于它做的实现方向是错的：**
+
+- 插件确实**不能新增一个 `dsh-tool-subagent` 的 loader 行** —— 这部分对；
+- 但插件**完全可以提供自己的委派工具**，走 `ctx.tools.register()`，与它已经提供给模型的四个工具
+  （`remote_selfcheck` / `remote_agents` / `remote_screenshot` / `remote_interrupt`，见 `lib/index.js:585`）
+  **同一条路**。
+
+更关键的是：**即便把行正确放进 profile 补丁，模型也看不到它**。Web 会话的模型工具目录由
+**agent preset** 枚举（`preset-standard` 的 `config.plugins`），不在表里的 loader 行不会出现在模型面前。
+详见 `PITFALLS.md` F11。所以"每台从机在 profile 里写一行"不仅负担重，而且**根本不起作用**。
+
+⇒ **正确做法**：插件自己注册委派工具（走 provider，与已有四个工具一致），
+用户**不需要**碰 profile 补丁，`§11` 里那条"安装负担"随之消失。
 
 推导依据：`assertCapabilities` 是**按字段是否存在**逐项校验（`dsh-subagent/lib/index.js:3173-3194`），request 里的 `agentOptions` / `persona` / `toolFilter` 只在 `config` 提供了对应值时才被填入（`dsh-tool-subagent/lib/index.js:509-520`），而 `maxDepth` 只在数值配置时才是数字（`maxDepth: 'provider-managed'` 使其为 `undefined`）。
 
