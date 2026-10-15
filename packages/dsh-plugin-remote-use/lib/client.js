@@ -138,6 +138,9 @@ window.__ModuleLoader__.load({
       approvalsPanelMissed: '无人应答而被拒（{n}）',
       approvalsPanelNoMissed: '没有错过的请求。',
       approvalsPanelAlso: '记录同时写在 {p}',
+      approvalsLeft: '剩 {s} 秒',
+      approvalsPanelPendingTitle: '等你批准',
+      approvalsPanelMissedTitle: '无人应答而被拒',
       btnAllowShort: '允许',
       btnDenyShort: '拒绝',
       colTool: '工具',
@@ -340,6 +343,9 @@ window.__ModuleLoader__.load({
       approvalsPanelMissed: 'Refused because nobody answered ({n})',
       approvalsPanelNoMissed: 'Nothing was missed.',
       approvalsPanelAlso: 'The record is also written to {p}',
+      approvalsLeft: '{s}s left',
+      approvalsPanelPendingTitle: 'Waiting for you',
+      approvalsPanelMissedTitle: 'Refused unanswered',
       btnAllowShort: 'Allow',
       btnDenyShort: 'Deny',
       colTool: 'Tool',
@@ -461,16 +467,41 @@ window.__ModuleLoader__.load({
       '.ru-approval-why{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
       '.ru-approval-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.ru-missed{display:flex;flex-direction:column;gap:6px;padding:9px 11px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm)}',
-      // --- the three surfaces that live where the work happens ---
-      // A waiting request is BLOCKING a worker, so it is outlined in the business colour and the
-      // buttons are filled: it must not read as another informational strip above the composer.
-      '.ru-dock{display:flex;flex-direction:column;gap:8px;margin:6px 0 0;padding:9px 11px;border:1px solid var(--dsw-alias-state-business-primary);border-radius:var(--dsw-radius-sm);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 6%,transparent)}',
-      '.ru-dock-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
-      '.ru-dock-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}',
-      '.ru-hdrbtn{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;cursor:pointer}',
-      '.ru-hdrbtn.warn{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
-      '.ru-panel{display:flex;flex-direction:column;gap:10px;padding:12px 14px;height:100%;overflow:auto}',
-      '.ru-panel-title{margin:0;font-size:13px;font-weight:600}',
+      // --- the three approval surfaces that live where the work happens -------------------
+      //
+      // DESIGN DIRECTION: these sit INSIDE DSH's own chrome (session header, composer, right pane),
+      // so the job is not to invent an identity -- it is to inherit the host's tokens and then spend
+      // the ONE loud element on the thing that is actually blocking a worker. Every colour below is
+      // a `--dsw-alias-*` token, so a skin swap restyles this with everything else, and a saturated
+      // accent appears only while something waits.
+      '.ru-dock{display:flex;flex-direction:column;gap:8px;margin:8px 0 0}',
+      '.ru-dock-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;padding:10px 12px 10px 15px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);animation:ru-in 140ms ease-out}',
+      '.ru-dock-row::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--dsw-alias-state-business-primary)}',
+      '.ru-dock-main{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}',
+      '.ru-dock-who{font-size:11px;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}',
+      '.ru-dock-actions{grid-column:1 / -1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}',
+      '.ru-tier{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:11px;font-family:ui-monospace,Consolas,monospace;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent);color:var(--dsw-alias-state-business-primary)}',
+      '.ru-count{font-size:11px;font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-secondary)}',
+      '.ru-tool{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);font-family:ui-monospace,Consolas,monospace}',
+      '.ru-hdrbtn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer}',
+      '.ru-hdrbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
+      '.ru-hdrbtn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}',
+      '.ru-hdrbtn.pending{color:var(--dsw-alias-state-business-primary);font-weight:600}',
+      '.ru-beacon{width:6px;height:6px;border-radius:50%;background:currentColor}',
+      '.ru-panel{display:flex;flex-direction:column;gap:4px;padding:14px 16px 20px;height:100%;overflow:auto}',
+      '.ru-panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:6px 0 2px}',
+      '.ru-panel-title{margin:0;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}',
+      '.ru-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;padding:11px 0;border-top:0.5px solid var(--dsw-alias-border-l1)}',
+      '.ru-row:first-of-type{border-top:0}',
+      '.ru-row-main{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}',
+      '.ru-row-actions{grid-column:1 / -1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}',
+      '.ru-empty{margin:0;padding:14px 0;font-size:12px;color:var(--dsw-alias-label-tertiary)}',
+      '.ru-why{margin:0;font-size:11px;line-height:1.55;color:var(--dsw-alias-label-tertiary)}',
+      '.ru-record{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 14px;padding:7px 0;border-top:0.5px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      '.ru-record:first-of-type{border-top:0}',
+      '.ru-record-when{font-family:ui-monospace,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);text-align:right}',
+      '@keyframes ru-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}',
+      '@media (prefers-reduced-motion: reduce){.ru-dock-row{animation:none}}',
       '.ru-args{margin:0;padding:6px 8px;max-height:96px;overflow:auto;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-interactive-bg-hover);font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--dsw-alias-label-secondary)}',
       '\.ru-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.ru-role-banner{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 11px;margin:8px 0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);font-size:12px}',
@@ -1731,27 +1762,88 @@ window.__ModuleLoader__.load({
       return requested !== '' ? requested : String(row?.requiredTier ?? '?')
     }
 
-    /** The request rows, rendered the same way in the dock and in the panel. */
-    function approvalRows(props) {
-      const { t, pending, busyId, onDecide, compact } = props
+    /** The `by` vocabulary in words, for the record list. */
+    function byWords(t, by) {
+      if (by === 'page') return t('auditByPage')
+      if (by === 'api') return t('auditByApi')
+      if (by === 'timeout') return t('auditByTimeout')
+      if (by === 'disposed') return t('auditByDisposed')
+      if (by === 'human') return t('auditByHuman')
+      return String(by ?? '')
+    }
+
+    /**
+     * The tier being ASKED for: the request first, the inferred minimum only as a fallback.
+     *
+     * Stated once, at the top of these surfaces, because this field is what the 0.2.4 fix was
+     * about: a request for the unrestricted tier used to display the minimum that would do.
+     */
+    function shownTier(row) {
+      const requested = String(row?.requestedTier ?? '')
+      return requested !== '' ? requested : String(row?.requiredTier ?? '?')
+    }
+
+    /** Who is asking, and for which task. */
+    function whoLine(row) {
+      const task = String(row.taskId ?? '')
+      return `${String(row.peerId ?? '')}${task === '' ? '' : ` \u00b7 ${task}`}`
+    }
+
+    /** How long is left, in mono so the digits do not jitter as they tick. */
+    function countdown(t, row, timeoutMs) {
+      const left = Math.max(0, Math.round((Number(timeoutMs) - Number(row.ageMs ?? 0)) / 1000))
+      return h('span', { className: 'ru-count' }, fmt(t('approvalsLeft'), { s: left }))
+    }
+
+    /** Both decisions, in one place so no surface can offer a different pair. */
+    function decideButtons(t, id, busyId, onDecide) {
+      return [
+        h('button', {
+          type: 'button', className: 'ru-btn primary', disabled: busyId !== '',
+          onClick: () => void onDecide(id, 'allow'),
+        }, t('btnAllowShort')),
+        h('button', {
+          type: 'button', className: 'ru-btn', disabled: busyId !== '',
+          onClick: () => void onDecide(id, 'deny'),
+        }, t('btnDenyShort')),
+      ]
+    }
+
+    /**
+     * The composer dock: one quiet strip per request, two lines each.
+     *
+     * WHY IT IS NOT THE PANEL IN MINIATURE: this strip sits directly above the input, so every pixel
+     * it takes is taken from writing. Line one answers "what is this?", line two answers "what do I
+     * do?" -- the reason and the arguments a decision may need stay in the panel, one click away.
+     */
+    function dockRows(t, pending, busyId, onDecide, timeoutMs) {
       return pending.map((row) => {
         const id = String(row.id ?? '')
-        const head = h('div', { className: 'ru-approval-head' },
-          h('strong', { className: 'ru-mono' }, String(row.toolName ?? '?')),
-          h('span', { className: 'ru-badge warn' }, shownTier(row)),
-          h('span', { className: 'ru-dim' }, `${String(row.peerId ?? '')} \u00b7 ${String(row.taskId ?? '')}`))
-        const why = compact === true ? null : h('div', { className: 'ru-approval-why' }, String(row.reason ?? ''))
-        const args = compact === true || row.rawInput === '' ? null : h('pre', { className: 'ru-args' }, String(row.rawInput))
-        const actions = h('div', { className: 'ru-approval-actions' },
-          h('button', {
-            type: 'button', className: 'ru-btn primary', disabled: busyId !== '',
-            onClick: () => void onDecide(id, 'allow'),
-          }, t('btnAllowShort')),
-          h('button', {
-            type: 'button', className: 'ru-btn', disabled: busyId !== '',
-            onClick: () => void onDecide(id, 'deny'),
-          }, t('btnDenyShort')))
-        return h('div', { className: 'ru-approval', key: id }, head, why, args, actions)
+        return h('div', { className: 'ru-dock-row', key: id },
+          h('div', { className: 'ru-dock-main' },
+            h('span', { className: 'ru-tool' }, String(row.toolName ?? '?')),
+            h('span', { className: 'ru-tier' }, shownTier(row))),
+          h('span', { className: 'ru-dock-who' }, whoLine(row)),
+          h('div', { className: 'ru-dock-actions' },
+            countdown(t, row, timeoutMs),
+            ...decideButtons(t, id, busyId, onDecide)))
+      })
+    }
+
+    /** The panel rows: the same facts, plus the reason and the arguments. */
+    function approvalRows(props) {
+      const { t, pending, busyId, onDecide, timeoutMs } = props
+      return pending.map((row) => {
+        const id = String(row.id ?? '')
+        return h('div', { className: 'ru-row', key: id },
+          h('div', { className: 'ru-row-main' },
+            h('span', { className: 'ru-tool' }, String(row.toolName ?? '?')),
+            h('span', { className: 'ru-tier' }, shownTier(row)),
+            h('span', { className: 'ru-dim' }, whoLine(row))),
+          countdown(t, row, timeoutMs),
+          h('p', { className: 'ru-why' }, String(row.reason ?? '')),
+          row.rawInput === '' ? null : h('pre', { className: 'ru-args' }, String(row.rawInput)),
+          h('div', { className: 'ru-row-actions' }, ...decideButtons(t, id, busyId, onDecide)))
       })
     }
 
@@ -1761,30 +1853,28 @@ window.__ModuleLoader__.load({
       const state = useApprovals(feed)
       const { busyId, error, decide } = useDecide(feed, post)
       if (state.pending.length === 0) return null
-      const head = h('div', { className: 'ru-dock-head' },
-        h('strong', null, fmt(t('approvalsDockWaiting'), { n: state.pending.length })),
-        h('span', { className: 'ru-dim' }, fmt(t('approvalsDockHint'), { s: Math.round(state.timeoutMs / 1000) })))
-      const rows = approvalRows({ t, pending: state.pending, busyId, onDecide: decide, compact: true })
-      return h('div', { className: 'ru-dock' },
-        head,
-        ...rows,
+      return h('div', { className: 'ru-dock', role: 'status', 'aria-live': 'polite' },
+        ...dockRows(t, state.pending, busyId, decide, state.timeoutMs),
         error === '' ? null : h('p', { className: 'ru-note warn' }, error))
     }
 
-    /** Session header: visible while working, and the way into the full panel. */
+    /** Session header: quiet while nothing waits, and the way into the panel. */
     function ApprovalsHeaderButton(props) {
       const { t, feed, openPanel } = props
       const state = useApprovals(feed)
-      if (state.pending.length === 0 && state.missedCount === 0) return null
-      const label = state.pending.length > 0
-        ? fmt(t('approvalsHeaderPending'), { n: state.pending.length })
-        : fmt(t('approvalsHeaderMissed'), { n: state.missedCount })
+      const pending = state.pending.length
+      if (pending === 0 && state.missedCount === 0) return null
+      // The beacon appears ONLY while a worker is actually stuck. A record of past misses is worth
+      // keeping reachable, not worth shouting about in every session forever.
+      const children = pending > 0
+        ? [h('span', { className: 'ru-beacon' }), h('span', null, fmt(t('approvalsHeaderPending'), { n: pending }))]
+        : [h('span', null, fmt(t('approvalsHeaderMissed'), { n: state.missedCount }))]
       return h('button', {
         type: 'button',
-        className: `ru-hdrbtn${state.pending.length > 0 ? ' warn' : ''}`,
+        className: `ru-hdrbtn${pending > 0 ? ' pending' : ''}`,
         title: t('approvalsOpenPanel'),
         onClick: () => openPanel(),
-      }, label)
+      }, ...children)
     }
 
     /** The right pane: what waits now, and what was missed before. */
@@ -1793,22 +1883,26 @@ window.__ModuleLoader__.load({
       const state = useApprovals(feed)
       const { busyId, error, decide } = useDecide(feed, post)
       const pendingBlock = state.pending.length === 0
-        ? h('p', { className: 'ru-note' }, t('approvalsPanelEmpty'))
-        : h('div', { className: 'ru-approvals' }, ...approvalRows({ t, pending: state.pending, busyId, onDecide: decide }))
-      const missedRows = state.missed.map((row, index) => h('div', { className: 'ru-approval-why', key: `${String(row.at)}-${index}` },
-        `${new Date(row.at).toLocaleString()} \u00b7 ${String(row.toolName ?? '?')} \u00b7 ${shownTier(row)} \u00b7 `,
-        h('span', { className: 'ru-dim' }, String(row.by ?? ''))))
+        ? h('p', { className: 'ru-empty' }, t('approvalsPanelEmpty'))
+        : h('div', null, ...approvalRows({ t, pending: state.pending, busyId, onDecide: decide, timeoutMs: state.timeoutMs }))
+      const missedRows = state.missed.map((row, index) => h('div', { className: 'ru-record', key: `${String(row.at)}-${index}` },
+        h('span', null, `${String(row.toolName ?? '?')} \u00b7 ${shownTier(row)} \u00b7 ${whoLine(row)} \u00b7 ${byWords(t, row.by)}`),
+        h('span', { className: 'ru-record-when' }, new Date(row.at).toLocaleString())))
       const missedBlock = state.missed.length === 0
-        ? h('p', { className: 'ru-note dim' }, t('approvalsPanelNoMissed'))
-        : h('div', { className: 'ru-missed' }, ...missedRows)
+        ? h('p', { className: 'ru-empty' }, t('approvalsPanelNoMissed'))
+        : h('div', null, ...missedRows)
       const auditNote = auditPath === undefined || auditPath === ''
         ? null
-        : h('p', { className: 'ru-note dim' }, fmt(t('approvalsPanelAlso'), { p: String(auditPath) }))
+        : h('p', { className: 'ru-why', style: { paddingTop: '12px' } }, fmt(t('approvalsPanelAlso'), { p: String(auditPath) }))
       return h('div', { className: 'ru-panel' },
-        h('h3', { className: 'ru-panel-title' }, fmt(t('approvalsPanelPending'), { n: state.pending.length })),
+        h('div', { className: 'ru-panel-head' },
+          h('h3', { className: 'ru-panel-title' }, t('approvalsPanelPendingTitle')),
+          h('span', { className: 'ru-count' }, String(state.pending.length))),
         pendingBlock,
         error === '' ? null : h('p', { className: 'ru-note warn' }, error),
-        h('h3', { className: 'ru-panel-title' }, fmt(t('approvalsPanelMissed'), { n: state.missedCount })),
+        h('div', { className: 'ru-panel-head' },
+          h('h3', { className: 'ru-panel-title' }, t('approvalsPanelMissedTitle')),
+          h('span', { className: 'ru-count' }, String(state.missedCount))),
         missedBlock,
         auditNote)
     }
@@ -1880,15 +1974,26 @@ window.__ModuleLoader__.load({
         name: 'conversation.session.header.actions',
         id: 'remote-use-approvals',
         locale: NS,
-      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: openApprovalsPane }))
+      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: () => openApprovalsPane(props?.sessionId) }))
 
       // The panel is optional on purpose. `sidebarRightTabs`/`sidebarRight` are first-party
       // services; on a shell that lacks them the dock and the header button still work, so a
       // missing pane must not take the rest of the plugin down with it. Neither is listed in
       // `inject`: requiring them would stop `apply` from running at all on such a shell.
-      function openApprovalsPane() {
+      //
+      // `openResource` calls an internal `require()` that THROWS when the controller has no adopted
+      // session at the moment of the click -- which is why the first click on the header button did
+      // nothing at all, and logged nothing we could see. `openResourceIn(sessionId, …)` is the
+      // non-throwing path, and the header slot hands us the session id.
+      function openApprovalsPane(sessionId) {
+        const controller = ctx.get('sidebarRight')
+        const address = `${APPROVALS_RESOURCE}/current`
         try {
-          ctx.get('sidebarRight')?.openResource?.(`${APPROVALS_RESOURCE}/current`)
+          if (sessionId !== undefined && sessionId !== '' && typeof controller?.openResourceIn === 'function') {
+            controller.openResourceIn(sessionId, address)
+          } else {
+            controller?.openResource?.(address)
+          }
         } catch (error) {
           console.warn('[remote-use] could not open the approvals pane:', error)
         }
