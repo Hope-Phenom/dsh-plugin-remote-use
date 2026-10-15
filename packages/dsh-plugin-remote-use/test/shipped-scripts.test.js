@@ -353,10 +353,22 @@ test('the deployment script copies everything the relay imports, and proves it r
   }
 
   // Every RELATIVE import has to be copied too -- the other half of the same failure.
-  const relative = [...relay.matchAll(/^import .* from '\.\/([^']+)'/gmu)].map((m) => m[1])
-  assert.ok(relative.length >= 3, `expected the relay's new relative imports, got ${relative.join(', ')}`)
-  for (const dep of relative) {
-    assert.ok(script.includes(`'${dep}'`), `${dep} is imported by the relay but not copied by the deployment`)
+  //
+  // Over EVERY deployed script, not just the relay: `make-launch-spec.mjs` now imports a sibling
+  // (`permission-pairing.mjs`), and a check that only read the relay would have let that module fail
+  // to deploy -- producing a worker where the spec generator dies with ERR_MODULE_NOT_FOUND at the
+  // exact moment someone is trying to set the worker up.
+  const scripts = readdirSync(SLAVE).filter((name) => name.endsWith('.mjs'))
+  assert.ok(scripts.length >= 5, `expected the deployed mjs scripts, got ${scripts.join(', ')}`)
+  const relative = []
+  for (const name of scripts) {
+    const text = readFileSync(join(SLAVE, name), 'utf8')
+    for (const match of text.matchAll(/^import .* from '\.\/([^']+)'/gmu)) relative.push(`${name}->${match[1]}`)
+  }
+  assert.ok(relative.some((r) => r.startsWith('relay.mjs->')), 'the relay still has its relative imports')
+  for (const pair of relative) {
+    const dep = pair.slice(pair.indexOf('->') + 2)
+    assert.ok(script.includes(`'${dep}'`), `${pair}: imported by a deployed script but not copied by the deployment`)
   }
 
   // And it must not declare success without running the result. A parse check passes on a module

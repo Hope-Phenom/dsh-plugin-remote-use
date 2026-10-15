@@ -472,7 +472,7 @@ python tools\dsh-env-backup.py restore --from D:\dsh-backups\before-upgrade
 | 文档 | 内容 | 什么时候看 |
 |---|---|---|
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计与全部决策记录（按轮次，含被推翻的结论） | 想知道**为什么这么设计** |
-| [`docs/PITFALLS.md`](docs/PITFALLS.md) | **踩坑与教训总集**（A–G 七类，71 条，每条附当时的原始输出与**发现方式**） | **先看这个通常最省时间** |
+| [`docs/PITFALLS.md`](docs/PITFALLS.md) | **踩坑与教训总集**（A–G 七类，72 条，每条附当时的原始输出与**发现方式**） | **先看这个通常最省时间** |
 | [`docs/INTERFACES.md`](docs/INTERFACES.md) | 上游契约与集成事实（provider 接缝、ACP、`ctx.tools.register`、Cordis 补丁语义） | 要改代码或写别的插件 |
 | [`docs/TESTING.md`](docs/TESTING.md) | 三套 harness 的命令、判据与每条守卫的理由 | 跑测试、加守卫 |
 | [`docs/research/`](docs/research/) | 当初的源码级调研原文与两轮验证发现（**归档**，有些结论已被推翻） | 考古、查"当时为什么这么想" |

@@ -13,8 +13,11 @@
 // .exe and let the argv path be constructed.
 //
 // Usage: node make-launch-spec.mjs [--install <dir>] [--profile acp] [--out <file>]
-import { existsSync, writeFileSync } from 'node:fs'
+//                                   [--permission-mode <mode>] [--dsh-home <dir>]
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+
+import { checkPairing } from './permission-pairing.mjs'
 
 const argv = process.argv.slice(2)
 function arg(name, fallback) {
@@ -28,6 +31,45 @@ const OUT = arg('out', 'agent-spec.json')
 // 'workspace-write' => sandbox denies out-of-workspace writes and approval policy is 'ask',
 //                      which is exactly the path that produces session/request_permission.
 const PERMISSION_MODE = arg('permission-mode', '')
+
+// ---------------------------------------------------------------------------
+// GATE: refuse a mode this worker's profile cannot compose (PITFALLS F34).
+//
+// This script is the ONLY place that knows which mode is being requested, so it is the only place
+// a gate can stand -- the plugin never learns the deployment mode at all. The check is here rather
+// than in the plugin on purpose: a check somewhere else would need new config to carry the mode
+// there, and that mechanism is exactly what this design does not have.
+//
+// Blocks on a KNOWN-BAD combination, and only warns when the profile cannot be read: refusing on
+// "unknown" would make a legitimate worker undeployable, while staying silent about "unknown" would
+// let the operator read silence as approval. The two cases are therefore reported differently.
+// ---------------------------------------------------------------------------
+const DSH_HOME = arg('dsh-home', process.env.DSH_HOME ?? join(process.env.USERPROFILE ?? '', '.dsh'))
+const PROFILE_PATH = join(DSH_HOME, 'profiles', PROFILE, 'cordis.patch.yml')
+let profileText
+try {
+  profileText = readFileSync(PROFILE_PATH, 'utf8')
+} catch {
+  profileText = undefined
+}
+
+const pairing = checkPairing({ mode: PERMISSION_MODE, profileText, profilePath: PROFILE_PATH })
+if (pairing.severity === 'block') {
+  console.error(`[make-launch-spec] REFUSING to generate this spec: --permission-mode ${PERMISSION_MODE}`)
+  console.error('')
+  console.error(pairing.reason)
+  console.error('')
+  console.error('Nothing was written. Fix the profile, then run this again.')
+  process.exit(3)
+}
+if (pairing.severity === 'warn') {
+  console.error(`[make-launch-spec] WARNING: ${pairing.reason}`)
+  console.error(`                 expected the profile patch at ${PROFILE_PATH}`)
+  if (PERMISSION_MODE === 'danger-full-access') {
+    console.error('                 A full-access worker also needs the approval row from')
+    console.error('                 slave/acp-profile-approval.patch.yml, or its ACP process may not start.')
+  }
+}
 
 // Hard-coded profile paths first: under a SYSTEM scheduled task LOCALAPPDATA points at
 // C:\Windows\system32\config\systemprofile, so environment-derived candidates miss.

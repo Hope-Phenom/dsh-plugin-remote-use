@@ -80,6 +80,7 @@ $files = @(
   @{ name = 'selfcheck.ps1'; why = 'S14/S15/S18 path fixes' },
   @{ name = 'screenshot.ps1'; why = 'capture' },
   @{ name = 'make-launch-spec.mjs'; why = 'optional: generates the ACP launch spec' },
+  @{ name = 'permission-pairing.mjs'; why = 'IMPORTED BY make-launch-spec.mjs (the F34 mode/profile gate)' },
   @{ name = 'acp-profile-approval.patch.yml'; why = 'the approval row a session-mode grant needs, or the worker becomes unreachable (F34)' }
 )
 
