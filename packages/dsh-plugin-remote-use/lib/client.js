@@ -2024,12 +2024,16 @@ window.__ModuleLoader__.load({
           threw: '',
         }
         try {
-          if (report.sessionId !== null && report.sessionId !== '' && report.methods.includes('openResourceIn')) {
-            controller.openResourceIn(report.sessionId, address)
-            report.used = 'openResourceIn'
-          } else if (report.methods.includes('openResource')) {
+          // THE PUBLIC CONTROLLER, per the docs: "`openResource(address, options?)` and
+          // `openTab(kind, options?)` are the navigation controller, and every way into the column
+          // calls one of them". `openResourceIn` is documented as NOT part of that face -- it is the
+          // Tab domain's internal path -- so the previous attempt used a private door (F27).
+          if (report.methods.includes('openResource')) {
             controller.openResource(address)
             report.used = 'openResource'
+          } else if (report.methods.includes('openResourceIn') && report.sessionId !== null && report.sessionId !== '') {
+            controller.openResourceIn(report.sessionId, address)
+            report.used = 'openResourceIn'
           }
         } catch (error) {
           report.threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
@@ -2042,10 +2046,24 @@ window.__ModuleLoader__.load({
           id: APPROVALS_TAB_ID,
           kind: 'remote-use-approvals',
           patterns: [`${APPROVALS_RESOURCE}/**`],
-          priority: 'builtin',
+          // The documented bands are `extension` (a type from outside the product -- the highest,
+          // and the default when none is named), `builtin` and `fallback`. This plugin IS a type
+          // from outside the product, so `builtin` was the wrong seat (PITFALLS F27).
+          priority: 'extension',
           // Recognises our own addresses, so another plugin's tab can never be hijacked by ours.
           canOpen: (address) => String(address).startsWith(APPROVALS_RESOURCE),
           title: () => t('approvalsPanel'),
+          // THE PIECE THAT WAS MISSING, straight from the docs: the pane's DEFAULT PAGE follows the
+          // number of registered guide entries -- one entry opens its page directly, zero or many
+          // open the guide. A type with no entry contributes nothing to that decision, so the
+          // operator had no way in from the pane itself. Picking a capsule calls
+          // `openTab(entry.kind, { replaceTab: true })`, which is why the entry names its kind.
+          guide: [{
+            id: APPROVALS_TAB_ID,
+            kind: 'remote-use-approvals',
+            title: () => t('approvalsPanel'),
+            description: () => t('approvalsOpenPanel'),
+          }],
         }), 'dsh-plugin-remote-use: approvals tab type')
         registerSlot('sidebar.right.pane.tab', {
           name: 'sidebar.right.pane.tab',
