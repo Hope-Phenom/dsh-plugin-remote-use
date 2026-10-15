@@ -480,7 +480,7 @@ window.__ModuleLoader__.load({
       '.ru-dock-main{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}',
       '.ru-dock-who{font-size:11px;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}',
       '.ru-dock-actions{grid-column:1 / -1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}',
-      '.ru-tier{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:11px;font-family:ui-monospace,Consolas,monospace;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent);color:var(--dsw-alias-state-business-primary)}',
+      '.ru-tier{display:inline-flex;align-items:center;flex:0 0 auto;padding:1px 7px;border-radius:999px;font-size:11px;font-family:ui-monospace,Consolas,monospace;white-space:nowrap;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent);color:var(--dsw-alias-state-business-primary)}',
       '.ru-count{font-size:11px;font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-secondary)}',
       '.ru-tool{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);font-family:ui-monospace,Consolas,monospace}',
       '.ru-hdrbtn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer}',
@@ -496,7 +496,10 @@ window.__ModuleLoader__.load({
       '.ru-row-main{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}',
       '.ru-row-actions{grid-column:1 / -1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}',
       '.ru-empty{margin:0;padding:14px 0;font-size:12px;color:var(--dsw-alias-label-tertiary)}',
-      '.ru-why{margin:0;font-size:11px;line-height:1.55;color:var(--dsw-alias-label-tertiary)}',
+      '.ru-why{grid-column:1 / -1;margin:0;font-size:11px;line-height:1.55;color:var(--dsw-alias-label-tertiary)}',
+      // The facts above sit in two columns; everything below them spans both, or a paragraph lands in
+      // the auto-width column and renders one word per line (measured 2026-10-15, on screen).
+      '.ru-row .ru-args{grid-column:1 / -1;max-width:100%}',
       '.ru-record{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 14px;padding:7px 0;border-top:0.5px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-secondary)}',
       '.ru-record:first-of-type{border-top:0}',
       '.ru-record-when{font-family:ui-monospace,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);text-align:right}',
