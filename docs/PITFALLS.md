@@ -3591,9 +3591,7 @@ props）。凡是"渲染取决于某个可选字段"的地方，都要问一句�
 ---
 ## F34. 把工作节点设成全权，会连带撞上"不命中任何 preset"—— 差点让从机不可达
 
-**状态：读源码 + `dsh --profile acp --dump-config` 预判出来的；0.2.14 起已变成**事前拦截**（见文末），
-但"运行时是否真会起不来"仍未在真机实测（出货前必须测）。**
-这条记的是"**差点踩到**"，以及它是怎么被拦住的。
+**状态：0.2.14 起已是**事前拦截**；真机实测已完成（见文末），而实测**推翻了我原先写的后果**。**
 
 **背景**：F33 定了方向——GUI 工作靠**会话级**档位，而不是 per-call 提权。查下来 DSH 已经支持：
 `sandbox-policy` 行的 `mode` 来自 `!!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`
@@ -3614,8 +3612,32 @@ policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger
   *(read-only, ask)* / *(workspace-write, ask)* / *(danger-full-access, **never**)* ——
   **一个都不命中**；
 - 该行**没有** `defaultPreset`，而 schema 注明它"**composition defaults match no preset 时必需**"。
-- 后果很可能是 `permission` 服务加载失败 ⇒ **ACP 进程起不来 ⇒ 从机不可达**（F24 那一类：
-  一个配置组合让整个应用起不来，而现象看起来像"从机坏了"）。
+
+**真机实测（2026-10-15，本机真实 acp profile，它把 `policy` 钉在 `ask`）**
+
+用 `.research/probe-session-new.mjs` 发 `initialize` + `session/new`，两个组合各跑一次：
+
+| 组合 | 结果 |
+|---|---|
+| 不设该变量（默认 `workspace-write`） | `initialize` OK，`session/new` OK，**stderr 干净** |
+| `DSH_PERMISSION_MODE=danger-full-access` | `initialize` OK，**`session/new` 也 OK**，但 stderr 有： |
+
+```
+dsh: warning: 1 entry did not activate
+permission (@deepseek-ai/dsh-permission-presets): Error: permission: composed sandbox and approval
+defaults match no preset; configure defaultPreset explicitly
+    at new PermissionPresetService (.../dsh-permission-presets/lib/index.js:180:42)
+```
+
+**实测推翻了我原来的结论。** 我原先写的是"**ACP 进程起不来 ⇒ 从机不可达**"。
+**错的**：进程起得来，会话也建得出来 —— 失败形态是**一个条目没有激活**（`1 entry did not activate`）
+加上 `permission-presets` 这个服务缺席。预测的**报错内容**逐字命中了（连 `defaultPreset explicitly`
+都对上了），但**我把后果夸大了整整一档**。这正是本仓库反复在修的那类问题：
+**一句没有实测过的后果，读起来和实测过的一模一样。**
+
+**仍然没测的**：`permission-presets` 缺席之后 **一个 turn 还能不能跑**。我只测到"会话建得出来"，
+**没有发过 prompt**。所以"降级"这个词的确切边界仍然未知 —— 这也是 0.2.14 那道门**仍然选择拒绝**
+而不是警告的原因：在"未知"上保守，但**把已知与未知分开写清楚**。
 
 **修法**：让 profile 那一条**镜像 `dsh-base` 自己的表达式**，不要写死。片段随包发布在
 `slave/acp-profile-approval.patch.yml`，由 `tools/deploy-slave.ps1` 部署到从机 ——

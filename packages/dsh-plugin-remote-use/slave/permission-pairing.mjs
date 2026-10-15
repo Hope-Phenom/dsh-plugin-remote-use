@@ -114,7 +114,12 @@ export function checkPairing(request) {
       `this profile pins the approval policy to "${policy}", but dsh-base pairs "${mode}" with "${wanted}" --`,
       `so requesting ${mode} would compose (${mode}, ${policy}), which is in NO configured preset,`,
       'and `defaultPreset` is unset, which dsh-permission-presets requires when the defaults match no preset.',
-      'The ACP process can then fail to start and the worker becomes unreachable.',
+      // MEASURED 2026-10-15 on a real acp profile (see PITFALLS F34): the app still STARTS and a
+      // session is still created. The row fails to activate and DSH reports it. The earlier wording
+      // here claimed the worker became unreachable, which the measurement disproved -- a gate that
+      // states a consequence it has not measured is the thing this project keeps having to fix.
+      'DSH then reports "1 entry did not activate" and the permission-presets service does not load:',
+      'the deployment is degraded, and whether a turn still runs in that state has NOT been measured.',
       '',
       'FIX: apply packages/dsh-plugin-remote-use/slave/acp-profile-approval.patch.yml to this profile,',
       'which derives the policy from DSH_PERMISSION_MODE instead of pinning it (a no-op for every other mode).',

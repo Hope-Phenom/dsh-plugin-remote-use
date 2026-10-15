@@ -1397,21 +1397,24 @@ node slave/make-launch-spec.mjs --permission-mode danger-full-access --out agent
 **待实测**：以 `DSH_PERMISSION_MODE=danger-full-access` 启动从机的 acp profile，确认进程正常起来、
 档位生效、GUI 真能跑。**这一条没测过就不算出货。**
 
-**剩下的一件事 → 0.2.14 已完成一半，剩下的是"实测"**
+**实测结果（2026-10-15，本机真实 acp profile）：预测的报错命中了，预测的后果夸大了**
 
-原先这套是"**文档 + 片段**"级的保护：片段随包发布、部署脚本会送到从机，但**没有任何东西检查从机
-到底有没有把它贴上**。一次忘记粘贴 = 从机不可达，而所有检查照旧报 OK。
+| 组合 | `initialize` | `session/new` | stderr |
+|---|---|---|---|
+| 默认（`workspace-write`） | OK | OK | 干净 |
+| `DSH_PERMISSION_MODE=danger-full-access` | OK | **OK** | `warning: 1 entry did not activate` + `permission: composed sandbox and approval defaults match no preset; configure defaultPreset explicitly` |
 
-现在**已经从事后阅读变成事前拦截**，而且拦截点只有唯一一个可选之处：
-`slave/make-launch-spec.mjs` 是**全系统唯一同时知道"要申请哪个档位"又能读到 profile 的地方**
-（插件本身从头到尾不知道部署档位 —— 档位只从这一个脚本的参数进入系统，这正是 §8.6.3 开头那个
-决定的直接后果）。实现放在 `slave/permission-pairing.mjs`（纯函数 + DSH preset 表的转写），
-判定规则与不对称性见 PITFALLS F34 的 0.2.14 小节。
+所以：**从机并没有不可达** —— 应用起得来、会话建得出来，坏掉的是 `permission-presets` 这一个条目
+（它没激活）。我原先写的"ACP 进程起不来 ⇒ 从机不可达"是**错的**，已在 PITFALLS F34 更正。
 
-**仍然只剩"实测"这一项**：以 `danger-full-access` 启动从机的 acp profile，确认进程真的起得来、
-档位真的生效、GUI 真的能跑。**在没有测过之前，(danger-full-access, ask) 是否真的会让服务加载失败
-仍然只是"读源码 + 读合成配置"的推断** —— 这道门是按"最坏情况"设的，宁可拦错也不放一个不可达的
-从机出去，但**拦对了不等于推断被证实**。这一条必须测。
+**仍未测**：`permission-presets` 缺席后**一个 turn 还能不能跑**（我只发了 `initialize` 与
+`session/new`，**没发 prompt**）。0.2.14 那道门因此仍选择**拒绝**：在"未知"上保守，
+但把"已知"与"未知"分开写。
+
+**已实现的事前拦截**：`slave/make-launch-spec.mjs` 是**全系统唯一同时知道"要申请哪个档位"又能读到
+profile 的地方**（插件本身从头到尾不知道部署档位 —— 档位只从这一个脚本的参数进入系统，这正是本节
+开头那个决定的直接后果）。判定规则与不对称性见 PITFALLS F34 的 0.2.14 小节；实现是
+`slave/permission-pairing.mjs`（纯函数 + DSH preset 表的转写，有单测与真实 profile 的验证）。
 
 ### 8.7 数据不出局域网
 

@@ -80,7 +80,12 @@ test('the known-bad combination is blocked with an actionable reason', () => {
   assert.equal(verdict.severity, 'block')
   assert.match(verdict.reason, /in NO configured preset/u)
   assert.match(verdict.reason, /acp-profile-approval\.patch\.yml/u, 'it must name the file that fixes it')
-  assert.match(verdict.reason, /unreachable/u, 'and why it matters')
+  // The consequence it states must be the one that was MEASURED, not the one that was predicted:
+  // a failed entry, not an unreachable worker. Claiming more than the evidence supports is what put
+  // this pitfall in the docs in the first place.
+  assert.match(verdict.reason, /did not activate/u)
+  assert.match(verdict.reason, /has NOT been measured/u, 'and it must say what is still unknown')
+  assert.doesNotMatch(verdict.reason, /unreachable/u, 'the unreachable claim was disproved by measurement')
 })
 
 test('every mode paired with the policy that profile will produce is judged by the table', () => {
