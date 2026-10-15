@@ -3589,38 +3589,44 @@ props）。凡是"渲染取决于某个可选字段"的地方，都要问一句�
 **我的授权粒度是否覆盖整个过程？**
 
 ---
-## F34. 把工作节点设成全权，会连带撞上"不命中任何 preset"—— 差点让从机不可达
+## F34. 全权档位会撞上"不命中任何 preset"—— 而我把后果**说错了两次**，两次都是实测纠正的
 
-**状态：0.2.14 起已是**事前拦截**；真机实测已完成（见文末），而实测**推翻了我原先写的后果**。**
+**状态：真机实测已做完（三轮，见下）。坑是真的（会永久留下一个失败条目），但它**不阻碍目标**。**
+**我先后写下的两个后果都是错的**：先是"从机不可达"，再是"保守起见先拒绝"。两个都被实测推翻了。
 
 **背景**：F33 定了方向——GUI 工作靠**会话级**档位，而不是 per-call 提权。查下来 DSH 已经支持：
 `sandbox-policy` 行的 `mode` 来自 `!!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`
 （`dsh-base/cordis.patch.yml:232`），而且从机的启动规格**已经**有 `--permission-mode` 把它塞进子进程 env
 （`slave/make-launch-spec.mjs:30,61`）。看起来只是"生成规格时多给一个参数"。
 
-**差点踩到的坑**：同一个变量在 `:248` 还决定**审批策略**：
+**坑在哪**：同一个变量在 `:248` 还决定**审批策略**（注意这句在 `dsh-base` 里是**带双引号**的）：
 
 ```yaml
 policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'"
 ```
 
 即 **DSH 自己的组合把"档位 + 审批策略"成对绑定**（这就是它的 preset 语义）。而从机 profile 补丁把
-`approval` 的 `policy` **写死成 `ask`**，而"补丁会替换该行的整个 `config`"。于是：
+`approval` 的 `policy` **写死成 `ask`**，且"补丁会替换该行的整个 `config`"。于是：
 
 - 只设 `DSH_PERMISSION_MODE=danger-full-access` → 实际组合成 **(danger-full-access, ask)**；
 - 而 `permission` 行（`dsh-permission-presets`）配的三个 preset 是
-  *(read-only, ask)* / *(workspace-write, ask)* / *(danger-full-access, **never**)* ——
-  **一个都不命中**；
+  *(read-only, ask)* / *(workspace-write, ask)* / *(danger-full-access, **never**)* —— **一个都不命中**；
 - 该行**没有** `defaultPreset`，而 schema 注明它"**composition defaults match no preset 时必需**"。
 
-**真机实测（2026-10-15，本机真实 acp profile，它把 `policy` 钉在 `ask`）**
+**真机实测（2026-10-15，本机真实 `acp` profile 与它的副本）**
 
-用 `.research/probe-session-new.mjs` 发 `initialize` + `session/new`，两个组合各跑一次：
+用 `.research/probe-session-new.mjs`（`initialize` + `session/new`）和
+`.research/probe-turn.mjs`（再加一次 `session/prompt`，让 agent **自报**它运行时上下文里那行
+`Current DSH file policy:` —— 这样"档位是否真的生效"不用猜日志，答案就在回答里）：
 
-| 组合 | 结果 |
-|---|---|
-| 不设该变量（默认 `workspace-write`） | `initialize` OK，`session/new` OK，**stderr 干净** |
-| `DSH_PERMISSION_MODE=danger-full-access` | `initialize` OK，**`session/new` 也 OK**，但 stderr 有： |
+| 组合 | 会话 | **turn** | stderr | agent 自报的档位 |
+|---|---|---|---|---|
+| 默认（`workspace-write`） | OK | — | 干净 | — |
+| `danger-full-access` + profile 钉 `ask`（**无配套**） | OK | **OK** | `1 entry did not activate`（`permission-presets`） | **danger-full-access** |
+| `danger-full-access` + 配套（但配套当时是坏的，见 F36） | OK | OK | `2 entries did not activate` | danger-full-access |
+| `danger-full-access` + **修好的**配套 | OK | OK | **干净** | **danger-full-access** |
+
+无配套时那条原文：
 
 ```
 dsh: warning: 1 entry did not activate
@@ -3629,22 +3635,28 @@ defaults match no preset; configure defaultPreset explicitly
     at new PermissionPresetService (.../dsh-permission-presets/lib/index.js:180:42)
 ```
 
-**实测推翻了我原来的结论。** 我原先写的是"**ACP 进程起不来 ⇒ 从机不可达**"。
-**错的**：进程起得来，会话也建得出来 —— 失败形态是**一个条目没有激活**（`1 entry did not activate`）
-加上 `permission-presets` 这个服务缺席。预测的**报错内容**逐字命中了（连 `defaultPreset explicitly`
-都对上了），但**我把后果夸大了整整一档**。这正是本仓库反复在修的那类问题：
-**一句没有实测过的后果，读起来和实测过的一模一样。**
+**我说错的第一遍：把后果夸大了整整一档。** 我原先写的是"**ACP 进程起不来 ⇒ 从机不可达**"。
+**错的**：进程起得来、会话建得出来、**turn 也跑得通**，而且**申请的档位确实生效**。
+预测的**报错内容**逐字命中了（连 `defaultPreset explicitly` 都对），但后果是"**一个条目没激活**"。
+这正是本仓库反复在修的那类问题：**一句没有实测过的后果，读起来和实测过的一模一样。**
 
-**仍然没测的**：`permission-presets` 缺席之后 **一个 turn 还能不能跑**。我只测到"会话建得出来"，
-**没有发过 prompt**。所以"降级"这个词的确切边界仍然未知 —— 这也是 0.2.14 那道门**仍然选择拒绝**
-而不是警告的原因：在"未知"上保守，但**把已知与未知分开写清楚**。
+**我说错的第二遍：把"保守"当成了不需要到期日的东西。** 更正之后我仍不知道"缺这个服务后 turn 能否跑"，
+于是把那道门设成**拒绝**（"在未知上保守"）。随后我把这个"未知"也测了——**turn 跑得通、档位生效**。
+于是那道门**是在拒绝一个已被实测证明可用的配置**。已降级为**警告**。
+**教训：「在未知上保守」必须带一个到期日。** 没有到期日的保守，就不是谨慎，而是**用一个未验证的恐惧
+永久挡住一条已验证可行的路**。
 
-**修法**：让 profile 那一条**镜像 `dsh-base` 自己的表达式**，不要写死。片段随包发布在
-`slave/acp-profile-approval.patch.yml`，由 `tools/deploy-slave.ps1` 部署到从机 ——
-**具体那行表达式不在这里重抄**（同一段抄三处就会有三处漂移，见 DESIGN §8.6.3），
-测试 `test/shipped-scripts.test.js` 钉住它必须是"由同一个变量推导"而不是写死的值。
+**结论（这才是这一条真正要留下的东西）**
 
-无变量时结果与今天**逐字相同**；三种档位都恰好命中一个已配置 preset。
+- **`--permission-mode danger-full-access` 一个参数就够**：全权**真的生效**（agent 自报），turn 跑得通。
+- **配套片段（`slave/acp-profile-approval.patch.yml`）是"可选的卫生措施"**，不是必需品：
+  它消除那条 `1 entry did not activate`，让 `permission-presets` 正常加载（那是 preset 选择器/记账，
+  ACP 驱动的从机用不到它）。
+- 反过来：**不贴它也不会挡住 GUI 工作** —— 这一点以前被我写成了"会挡住"，是错的。
+
+**修法**：让 profile 那一条**镜像 `dsh-base` 自己的表达式**（含双引号，见 F36）。片段随包发布在
+`slave/acp-profile-approval.patch.yml`，由 `tools/deploy-slave.ps1` 部署 ——
+**具体那行表达式不在这里重抄**（同一段抄三处就会有三处漂移，见 DESIGN §8.6.3）。
 
 **教训**
 
@@ -3653,33 +3665,33 @@ defaults match no preset; configure defaultPreset explicitly
    这次是 `grep` 到 **YAML** 才发现的，`grep *.js` 一个都没命中（值写在 `!!js` 表达式里）。
 2. **"补丁替换整个 `config`"意味着局部覆盖会抵销组合默认值。** 从机 profile 写死 `ask` 在**当时**是对的
    （F18 那一轮：让沙箱拒绝变成看得见的请求），但它与"档位由环境变量驱动"**互不知情**。
-   两个各自正确的决定合起来成了一个能锁死机器的组合 —— **组合出来的状态也要有人负责。**
+   两个各自正确的决定合起来产生了一个谁都没预期的状态 —— **组合出来的状态也要有人负责。**
 3. **拦阻来自"读配置的权威输出"（`--dump-config`）而不是读代码。** 代码只告诉我变量被读；
    只有**合成后的真实配置**才告诉我这两个读者会怎样相遇。
-4. **顺带一条更好的教训**：这个坑最初是在给一个"运行时授权"功能做设计时撞出来的，而那个功能本身
+4. **而真正定案的既不是代码也不是配置，是"跑一遍看它说什么"。** 两轮纸上分析都得到了一个**合理但错误**
+   的后果；一次 `session/prompt` 就把两轮都纠正了。**能跑的东西就不要推。**
+5. **顺带一条更好的教训**：这个坑最初是在给一个"运行时授权"功能做设计时撞出来的，而那个功能本身
    就是多余的——见 DESIGN §8.6.3。**复杂度不只是成本，它会主动带你去撞本来不必遇到的坑。**
 
-**0.2.14：从事后阅读变成事前拦截**
+**0.2.14 的那道门：现在只对"真的送不出去"的档位拒绝**
 
-上面那个修法（"记得把片段贴到 profile 里"）是**靠人记得**，那不算保护。拦截点只有一个可选：
-**`slave/make-launch-spec.mjs` 是全系统唯一同时知道"要申请哪个档位"又能读到 profile 的地方**
-（插件本身从头到尾不知道部署档位——档位只从这一个脚本的参数进入系统）。所以门就设在这里：
+拦截点只有一个可选：**`slave/make-launch-spec.mjs` 是全系统唯一同时知道"要申请哪个档位"又能读到
+profile 的地方**（插件本身从头到尾不知道部署档位 —— 档位只从这一个脚本的参数进入系统）。
 
-| 情形 | 行为 |
-|---|---|
-| 档位与 profile 的组合**命中**一个 preset | 静默通过 |
-| 档位与 profile 的组合**不命中任何** preset（就是本坑） | **拒绝生成**，退出码 3，**不写任何文件**，并指名要贴哪个片段 |
-| `--permission-mode` 写错（不在闭集内） | 同上拒绝 —— `dsh-base` 对未知档位在**加载时**就报错，这个 typo 本来会让从机起不来 |
-| profile 读不到（`DSH_HOME` 不常规等） | **只警告不拒绝**，并明说"配对**未**验证" |
+| 情形 | 行为 | 依据 |
+|---|---|---|
+| 组合命中一个 preset | 静默通过 | — |
+| **组合不命中任何 preset** | **警告**，仍写出规格 | **实测：档位生效、turn 跑得通**；拒绝会挡住可用的部署 |
+| `--permission-mode` 写错（不在闭集内） | **拒绝**（退出码 3），不写文件 | `dsh-base` 对未知档位**在加载时**就报错；typo 从来不是有意的 |
+| profile 读不到 | 警告，并明说"配对**未**验证" | 按"无法验证"拒绝会让正常从机没法部署；沉默又会被读成通过 |
 
-最后一行是有意的**不对称**：在"已知坏"上拦截，因为后果是从机不可达；在"不知道"上只警告，
-因为**按"无法验证"拒绝会让一个正常的从机没法部署**，而**对此保持沉默又会让操作者把沉默读成通过**。
-真机验证（本机真实 acp profile，它把 `policy` 钉在 `ask`）：
+真机验证（本机真实 profile）：
 
 ```
-workspace-write  -> exit 0，写出规格
-read-only        -> exit 0，写出规格
-danger-full-access -> exit 3，不写文件，stderr 指名 acp-profile-approval.patch.yml
+workspace-write     -> exit 0，写出规格，无输出
+read-only           -> exit 0，写出规格，无输出
+danger-full-access  -> exit 0，写出规格，stderr 一条警告并指名 acp-profile-approval.patch.yml
+yolo（拼错）         -> exit 3，不写文件
 ```
 
 ---
@@ -3708,6 +3720,56 @@ danger-full-access -> exit 3，不写文件，stderr 指名 acp-profile-approval
 **测试harness 也是一段被测代码，只是它没有测试。** 凡是"要观察一个进程的输出"的地方，
 先把三个通道（退出码、stdout、stderr）都无条件拿到手，再谈断言；
 用"只在失败时才有数据"的 API 去断言**成功路径**，等于断言一个常数。
+
+---
+## F36. 我发布的那个 YAML 片段**本身是坏的**：`!!js` 的三元表达式没加引号，被 YAML 吃成了映射
+
+**发现方式**：真机跑一遍。**不是**审阅发现的、**不是**单测发现的 —— 而且**我专门为它写的那道守卫
+一路绿灯**。
+
+**现象**
+
+把上一轮发布的 `slave/acp-profile-approval.patch.yml` 贴进 profile 后启动，stderr 出现：
+
+```
+dsh: warning: 2 entries did not activate
+approval (@deepseek-ai/dsh-user-approval): ValidationError: invalid config:
+  - $.policy expected "ask" | "never" but got {"[object Object]":"ask"} (at policy)
+permission (@deepseek-ai/dsh-permission-presets): pending (waiting for service: approval)
+```
+
+`got {"[object Object]":"ask"}` 是**决定性线索**：Cordis 拿到的不是字符串，而是一个**对象**。
+
+**根因**
+
+我写的是：
+
+```yaml
+policy: !!js (process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'
+```
+
+表达式里有 `: `（三元运算符 `? 'never' : 'ask'` 里那一个）。**YAML 把未加引号的 `: ` 读作映射分隔符**，
+于是这一行不是"一个标量"，而是"一个以表达式为键、`'ask'` 为值的对象"。
+
+**而 `dsh-base` 原本是加双引号的**（`cordis.patch.yml:248`）—— 我抄的时候把引号丢了，
+却没意识到那不是风格、而是**语法**。修法就是把引号加回去。
+
+**为什么守卫没拦住（这一条最值钱）**
+
+我为这个片段写了守卫，它断言的是"表达式**由同一个变量推导**、且 `danger-full-access` / `'never'` /
+`'ask'` 都出现"。**这些断言在坏文件上全部通过** —— 因为坏文件里这些 token **一个不少**，
+坏的只是 **YAML 会不会接受它**。**"检查了 token"和"检查了它能不能被解析"是两件事**，
+而我把前者当成了后者。
+
+**教训**
+
+1. **"我检查过"必须能回答"检查的是哪一个属性"。** 守卫检查的是"内容对不对"，
+   而实际坏掉的是"形式合不合法"。**同一个文件上，这两个属性可以一个全对、一个全错。**
+   （与总论"检查也能说谎"同形，也与 F35 同形：那次是"测试没去看"，这次是"测试看了别的东西"。）
+2. **抄一段外部表达式时，标点也是语义。** 双引号、`!!js` 标签的位置、缩进 —— 这些看起来像排版的东西
+   在 YAML 里是语法。**"照抄"要抄到标点，否则叫"照抄了能看懂的部分"。**
+3. **发布一个"给人粘贴的文件"，等价于发布代码。** 它没有编译器、没有类型检查，
+   唯一的验证就是**真的贴上并跑一次**。所以这类文件必须走真机，不能只走单测。
 
 ---
 ## G1. "主屏必须是虚拟屏" —— 一条**忠实实现后让机器无法登录**的要求

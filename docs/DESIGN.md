@@ -1374,18 +1374,21 @@ node slave/make-launch-spec.mjs --permission-mode danger-full-access --out agent
 这就是本节一度打算用"新 RPC + 主机侧设置项 + 审计 + 界面"去实现的东西 —— 而它其实是一个生成
 启动规格时的命令行参数。**在给一个能力造控制面板之前，先问它是不是一个部署常量。**
 
-**唯一非做不可的配套（否则设成全权会让从机不可达）**
+**可选但推荐的配套：让 DSH 的组合保持自洽**
 
 `dsh-base` 把"全权沙箱"与"审批 `never`"**成对**绑定（这就是 `danger-full-access` 这个 preset），
 而 `permission` 行的 preset 表里**没有** *(danger-full-access, ask)* 这一项，且没有 `defaultPreset`
 （schema 注明它"composition defaults match no preset 时必需"）。若 profile 把审批策略**写死**成
-`ask`，那么设成全权就会组合出**不命中任何 preset** 的状态，很可能让该服务加载失败 ⇒
-**ACP 进程起不来 ⇒ 从机不可达**（F24 那一类）。
+`ask`，那么设成全权就会组合出**不命中任何 preset** 的状态，`permission-presets` 因此不激活。
 
-所以 profile 里那一条要**镜像 `dsh-base` 自己的表达式**，而不是写死。**这条表达式只有一个出处**：
+**但实测（见下）表明这不会挡住 GUI 工作** —— 它只让那一个服务缺席、让 DSH 记一条失败条目。
+所以这是**推荐的卫生措施，不是必需品**。
+
+profile 里那一条要**镜像 `dsh-base` 自己的表达式**，而不是写死。**这条表达式只有一个出处**：
 随包发布的 `packages/dsh-plugin-remote-use/slave/acp-profile-approval.patch.yml`（含完整推导与理由），
 由 `tools/deploy-slave.ps1` 部署到从机。**本文与 PITFALLS 都不重抄那行表达式** —— 同一段东西抄在三处
 就有三处会各自漂移，而其中最难被跟着更新的那一处，恰好是会被发到从机上去的那一处。
+（**那行表达式的双引号是语法不是排版**：少了它 YAML 会把三元运算符读成映射 —— 见 PITFALLS F36。）
 
 无变量时结果与今天**逐字相同**；三种档位都恰好命中一个已配置 preset。
 
@@ -1397,24 +1400,27 @@ node slave/make-launch-spec.mjs --permission-mode danger-full-access --out agent
 **待实测**：以 `DSH_PERMISSION_MODE=danger-full-access` 启动从机的 acp profile，确认进程正常起来、
 档位生效、GUI 真能跑。**这一条没测过就不算出货。**
 
-**实测结果（2026-10-15，本机真实 acp profile）：预测的报错命中了，预测的后果夸大了**
+**实测结果（2026-10-15，三轮，见 PITFALLS F34）：目标已达成，配套是"可选卫生"**
 
-| 组合 | `initialize` | `session/new` | stderr |
-|---|---|---|---|
-| 默认（`workspace-write`） | OK | OK | 干净 |
-| `DSH_PERMISSION_MODE=danger-full-access` | OK | **OK** | `warning: 1 entry did not activate` + `permission: composed sandbox and approval defaults match no preset; configure defaultPreset explicitly` |
+| 组合 | 会话 | turn | stderr | agent 自报的档位 |
+|---|---|---|---|---|
+| 默认 `workspace-write` | OK | — | 干净 | — |
+| **`danger-full-access`，profile 原样（无配套）** | OK | **OK** | 1 个条目未激活（`permission-presets`） | **danger-full-access** |
+| `danger-full-access` + 修好的配套 | OK | OK | **干净** | **danger-full-access** |
 
-所以：**从机并没有不可达** —— 应用起得来、会话建得出来，坏掉的是 `permission-presets` 这一个条目
-（它没激活）。我原先写的"ACP 进程起不来 ⇒ 从机不可达"是**错的**，已在 PITFALLS F34 更正。
+结论：
 
-**仍未测**：`permission-presets` 缺席后**一个 turn 还能不能跑**（我只发了 `initialize` 与
-`session/new`，**没发 prompt**）。0.2.14 那道门因此仍选择**拒绝**：在"未知"上保守，
-但把"已知"与"未知"分开写。
+- **一个参数就够**。`node slave/make-launch-spec.mjs --permission-mode danger-full-access` 让全权
+  **真的生效**（agent 自报它的运行时上下文是 `Current DSH file policy: danger-full-access.
+  The DSH file sandbox does not restrict file modifications by available operations.`），turn 跑得通。
+- **配套片段是可选的**：它消除那一条 `1 entry did not activate`，让 `permission-presets`
+  （preset 选择器与记账，ACP 驱动的从机用不到）正常加载。**不贴它也不挡 GUI 工作。**
+- 因此 `make-launch-spec.mjs` 的门对"不命中 preset"**只警告、不拒绝**：拒绝会挡住一个已被实测
+  证明可用的部署。只有**闭集之外的档位**才拒绝（`dsh-base` 对未知值在加载时就报错）。
 
-**已实现的事前拦截**：`slave/make-launch-spec.mjs` 是**全系统唯一同时知道"要申请哪个档位"又能读到
-profile 的地方**（插件本身从头到尾不知道部署档位 —— 档位只从这一个脚本的参数进入系统，这正是本节
-开头那个决定的直接后果）。判定规则与不对称性见 PITFALLS F34 的 0.2.14 小节；实现是
-`slave/permission-pairing.mjs`（纯函数 + DSH preset 表的转写，有单测与真实 profile 的验证）。
+**我在这条上错了两次，两次都是"跑一遍"纠正的**：先写成"从机不可达"（实际只是少一个条目），
+再按"未知就保守"把门设成拒绝（随后把那个未知测了回来，turn 跑得通）。**"在未知上保守"必须带到期日。**
+完整记录见 PITFALLS F34，另一个只在真机上暴露的缺陷（配套片段里的 `!!js` 引号）见 F36。
 
 ### 8.7 数据不出局域网
 

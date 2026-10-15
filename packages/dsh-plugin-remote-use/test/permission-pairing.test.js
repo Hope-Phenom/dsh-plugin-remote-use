@@ -74,31 +74,39 @@ test('a pinned approval policy is detected, and a derived one is not mistaken fo
   assert.equal(pinnedApprovalPolicy(`${profileWith('')}\n- id: other\n  config:\n    x: !!js process.env.DSH_PERMISSION_MODE`).kind, 'absent')
 })
 
-test('the known-bad combination is blocked with an actionable reason', () => {
+test('the unpreset combination WARNS with the measured consequence, and never blocks', () => {
   const verdict = checkPairing({ mode: 'danger-full-access', profileText: PINNED_ASK, profilePath: 'P' })
-  assert.equal(verdict.ok, false)
-  assert.equal(verdict.severity, 'block')
+  // NOT a block, and that is a measured decision rather than a lenient one: with this exact
+  // mismatch the app starts, a session is created and a TURN completes, with the agent's own
+  // runtime context reporting the requested mode as effective. Blocking would refuse a
+  // configuration that demonstrably works.
+  assert.equal(verdict.ok, true, 'a combination that has been measured to work must not be refused')
+  assert.equal(verdict.severity, 'warn')
   assert.match(verdict.reason, /in NO configured preset/u)
-  assert.match(verdict.reason, /acp-profile-approval\.patch\.yml/u, 'it must name the file that fixes it')
-  // The consequence it states must be the one that was MEASURED, not the one that was predicted:
-  // a failed entry, not an unreachable worker. Claiming more than the evidence supports is what put
-  // this pitfall in the docs in the first place.
-  assert.match(verdict.reason, /did not activate/u)
-  assert.match(verdict.reason, /has NOT been measured/u, 'and it must say what is still unknown')
-  assert.doesNotMatch(verdict.reason, /unreachable/u, 'the unreachable claim was disproved by measurement')
+  assert.match(verdict.reason, /acp-profile-approval\.patch\.yml/u, 'it must name the file that removes it')
+  assert.match(verdict.reason, /MEASURED: the sandbox mode still applies and a turn still runs/u,
+    'the warning must state the measured consequence, not the predicted one')
+  // The claim the measurement disproved must not creep back in.
+  assert.doesNotMatch(verdict.reason, /unreachable|did not activate/u,
+    'the unreachable/failed-entry framing was replaced by what was measured')
 })
 
 test('every mode paired with the policy that profile will produce is judged by the table', () => {
-  // A literal `ask` is fine for the two modes dsh-base pairs with `ask`, and fatal for the third.
-  assert.equal(checkPairing({ mode: 'workspace-write', profileText: PINNED_ASK }).ok, true)
-  assert.equal(checkPairing({ mode: 'read-only', profileText: PINNED_ASK }).ok, true)
-  assert.equal(checkPairing({ mode: 'danger-full-access', profileText: PINNED_ASK }).ok, false)
-  // ...and the mirror image: a literal `never` is fine for full access and fatal for the others.
+  // `ok` means "not refused"; the nuance lives in `severity`, because the measured consequence of an
+  // unpreset combination is a degraded entry rather than a broken worker.
+  const verdictOf = (mode, profileText) => checkPairing({ mode, profileText })
+  // A literal `ask` is silent for the two modes dsh-base pairs with `ask`, and warns for the third.
+  assert.equal(verdictOf('workspace-write', PINNED_ASK).severity, 'ok')
+  assert.equal(verdictOf('read-only', PINNED_ASK).severity, 'ok')
+  assert.equal(verdictOf('danger-full-access', PINNED_ASK).severity, 'warn')
+  // ...and the mirror image: a literal `never` is silent for full access and warns for the others.
   const pinnedNever = profileWith(`- id: approval
   config:
     policy: never`)
-  assert.equal(checkPairing({ mode: 'danger-full-access', profileText: pinnedNever }).ok, true)
-  assert.equal(checkPairing({ mode: 'workspace-write', profileText: pinnedNever }).ok, false)
+  assert.equal(verdictOf('danger-full-access', pinnedNever).severity, 'ok')
+  assert.equal(verdictOf('workspace-write', pinnedNever).severity, 'warn')
+  // Only an unknown mode is ever a refusal, because dsh-base will not load it at all.
+  assert.equal(verdictOf('yolo', DERIVED).severity, 'block')
   // The recommended form agrees with dsh-base, so it is correct for every mode.
   for (const mode of SANDBOX_MODES) {
     assert.equal(checkPairing({ mode, profileText: DERIVED }).ok, true, `${mode} must pass with the derived form`)
@@ -152,19 +160,22 @@ function runScript(args, { profile }) {
   }
 }
 
-test('the script REFUSES to write a full-access spec against a profile pinned to ask', () => {
+test('the script WARNS but still writes the spec for the unpreset combination', () => {
+  // The measurement decides this: a full-access worker with a profile pinned to `ask` runs, so the
+  // gate must not stand between the operator and a working deployment. It says what will happen.
   const run = runScript(['--permission-mode', 'danger-full-access'], { profile: PINNED_ASK })
-  assert.equal(run.status, 3, 'it must exit non-zero rather than print a warning nobody reads')
-  assert.match(run.stderr, /REFUSING/u)
-  assert.match(run.stderr, /acp-profile-approval\.patch\.yml/u)
-  assert.equal(run.spec, undefined, 'and it must write NOTHING -- a half-generated spec is worse than none')
+  assert.equal(run.status, 0, `the gate refused a configuration measured to work: ${run.stderr}`)
+  assert.match(run.stderr, /WARNING/u)
+  assert.match(run.stderr, /in NO configured preset/u)
+  assert.match(run.stderr, /acp-profile-approval\.patch\.yml/u, 'the warning names the fix')
+  assert.equal(run.spec?.env?.DSH_PERMISSION_MODE, 'danger-full-access', 'and the spec is written')
 })
 
-test('the script generates the spec when the profile carries the companion', () => {
+test('the script is silent when the profile carries the companion', () => {
   const run = runScript(['--permission-mode', 'danger-full-access'], { profile: DERIVED })
   assert.equal(run.status, 0, `expected success, got: ${run.stderr}`)
   assert.equal(run.spec.env.DSH_PERMISSION_MODE, 'danger-full-access')
-  assert.equal(run.stderr, '', 'and it has nothing to warn about')
+  assert.equal(run.stderr, '', 'nothing to warn about')
 })
 
 test('the script still works for the mode it has always used, with the profile unchanged', () => {

@@ -64,10 +64,11 @@ if (pairing.severity === 'block') {
 }
 if (pairing.severity === 'warn') {
   console.error(`[make-launch-spec] WARNING: ${pairing.reason}`)
-  console.error(`                 expected the profile patch at ${PROFILE_PATH}`)
-  if (PERMISSION_MODE === 'danger-full-access') {
-    console.error('                 A full-access worker also needs the approval row from')
-    console.error('                 slave/acp-profile-approval.patch.yml, or its ACP process may not start.')
+  if (profileText === undefined) {
+    // "Could not verify" is not "verified fine", and the operator still needs to know what to check
+    // by hand when this script cannot read the profile (an unusual DSH_HOME, for instance).
+    console.error(`                 expected the profile patch at ${PROFILE_PATH}`)
+    console.error('                 if it pins the approval policy, apply slave/acp-profile-approval.patch.yml')
   }
 }
 

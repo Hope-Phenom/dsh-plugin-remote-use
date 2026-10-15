@@ -51,4 +51,16 @@
   config:
     # MUST stay this expression, not a literal. It mirrors `dsh-base` byte for byte for the modes that
     # yield `ask`, so this entry is a no-op except when a full-access deployment is in force.
-    policy: !!js (process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'
+    #
+    # THE DOUBLE QUOTES ARE LOAD-BEARING, and leaving them out is not a style choice. The expression
+    # contains ": " (before 'ask' in the ternary), and YAML reads an unquoted ": " as a MAPPING rather
+    # than as part of a scalar -- so the unquoted form parses as the object {"...? 'never'": "'ask'"},
+    # and Cordis rejects it: `$.policy expected "ask" | "never" but got {"[object Object]":"ask"}`.
+    # `dsh-base` quotes it for exactly this reason (cordis.patch.yml:248).
+    #
+    # MEASURED 2026-10-15: with the quotes missing, TWO entries failed to activate (approval failed
+    # validation; permission-presets then sat "pending (waiting for service: approval)") while the
+    # agent still answered and the sandbox mode still applied -- so nothing looked broken unless
+    # stderr was read. A guard that checks the expression's tokens does NOT catch this; only running
+    # it, or checking the quoting, does.
+    policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'"

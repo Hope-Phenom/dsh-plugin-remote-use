@@ -107,21 +107,24 @@ export function checkPairing(request) {
   if (match !== undefined) return { ok: true, severity: 'ok', reason: '' }
 
   const wanted = approvalPolicyFor(mode)
+  // WARN, not block. MEASURED 2026-10-15 on a real acp profile: with this exact mismatch, the app
+  // starts, a session is created, a TURN completes, and the agent's own runtime context reports the
+  // requested mode as effective ("Current DSH file policy: danger-full-access"). Only the
+  // `permission-presets` entry fails to activate.
+  //
+  // An earlier version of this file BLOCKED here, on a predicted "the worker becomes unreachable"
+  // that the measurement disproved. A gate that refuses a configuration it has measured to work is
+  // worse than no gate: it costs real deployments and teaches people to bypass the check.
   return {
-    ok: false,
-    severity: 'block',
+    ok: true,
+    severity: 'warn',
     reason: [
-      `this profile pins the approval policy to "${policy}", but dsh-base pairs "${mode}" with "${wanted}" --`,
-      `so requesting ${mode} would compose (${mode}, ${policy}), which is in NO configured preset,`,
-      'and `defaultPreset` is unset, which dsh-permission-presets requires when the defaults match no preset.',
-      // MEASURED 2026-10-15 on a real acp profile (see PITFALLS F34): the app still STARTS and a
-      // session is still created. The row fails to activate and DSH reports it. The earlier wording
-      // here claimed the worker became unreachable, which the measurement disproved -- a gate that
-      // states a consequence it has not measured is the thing this project keeps having to fix.
-      'DSH then reports "1 entry did not activate" and the permission-presets service does not load:',
-      'the deployment is degraded, and whether a turn still runs in that state has NOT been measured.',
-      '',
-      'FIX: apply packages/dsh-plugin-remote-use/slave/acp-profile-approval.patch.yml to this profile,',
+      `this profile pins the approval policy to "${policy}", but dsh-base pairs "${mode}" with "${wanted}",`,
+      `so requesting ${mode} composes (${mode}, ${policy}), which is in NO configured preset and`,
+      '`defaultPreset` is unset. DSH reports one failed entry and dsh-permission-presets does not load.',
+      'MEASURED: the sandbox mode still applies and a turn still runs, so this degrades the preset',
+      'bookkeeping rather than the worker.',
+      'TO REMOVE THE WARNING: apply packages/dsh-plugin-remote-use/slave/acp-profile-approval.patch.yml,',
       'which derives the policy from DSH_PERMISSION_MODE instead of pinning it (a no-op for every other mode).',
     ].join(' '),
   }

@@ -322,6 +322,20 @@ test('the worker profile snippet keeps the preset pairing coherent, and reaches 
     /^[ \t]*policy:[ \t]*!!js[^\n]*DSH_PERMISSION_MODE[^\n]*danger-full-access[^\n]*'never'[^\n]*'ask'/mu,
     'the approval policy must be derived from the same variable the mode is, reproducing dsh-base\'s pairing')
 
+  // ...and the expression must be QUOTED, which is a different property from having the right tokens.
+  //
+  // MEASURED 2026-10-15: the unquoted form shipped, and it is not valid YAML -- the ternary contains
+  // ": " before 'ask', so YAML parsed it as a MAPPING and Cordis rejected it with
+  // `$.policy expected "ask" | "never" but got {"[object Object]":"ask"}`. The assertion above passed
+  // the whole time, because checking a token sequence says nothing about whether YAML will accept it.
+  // So this checks the quoting, and the comment above records why it is not cosmetic.
+  const js = /^[ \t]*policy:[ \t]*!!js[ \t]+(.+)$/mu.exec(body)
+  assert.ok(js !== null, 'the approval entry has no !!js policy line')
+  const scalar = js[1].trim()
+  assert.ok((scalar.startsWith('"') && scalar.endsWith('"')) || (scalar.startsWith("'") && scalar.endsWith("'")),
+    `the !!js expression must be quoted or YAML reads its ": " as a mapping -- got: ${scalar}`)
+  assert.equal(scalar.includes('": "') || scalar.includes("': '"), false, 'a bare ": " before a quote would still split the scalar')
+
   // And it has to reach the worker. That it SHIPS is proved against the real tarball by the packer
   // test above; what no other test covers is the deployment script, which copies by explicit name.
   const deploy = readFileSync(join(PKG_ROOT, '..', '..', 'tools', 'deploy-slave.ps1'), 'utf8')
