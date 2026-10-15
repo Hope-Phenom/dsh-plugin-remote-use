@@ -47,6 +47,29 @@ export function approvalPolicyFor(mode) {
 }
 
 /**
+ * The sandbox mode a child spawned by the relay will ACTUALLY get, and where it came from.
+ *
+ * THIS IS THE QUESTION THAT KEPT BEING ANSWERED WRONGLY. The relay spawns the ACP child with
+ * `{ ...process.env, ...LAUNCH.env }`, so the spec wins over the relay's own environment -- and
+ * neither of those is "the file someone edited". Measured 2026-10-15: an operator changed
+ * `C:\dsh-remote\plugin-slave\agent-spec.json` while the live relay had been started with a TEMP
+ * spec (`...\Temp\...\acp-spec-<pid>-<port>.json`, rewritten on every arm) that nothing re-read, so
+ * "the file says full access" and "the session runs workspace-write" were BOTH true for hours.
+ *
+ * @param {{ specEnv?: object, env?: object }} sources
+ * @returns {{ mode: string, from: 'spec' | 'relay-env' | 'nothing' }}
+ */
+export function effectiveSessionMode(sources = {}) {
+  const spec = sources.specEnv?.DSH_PERMISSION_MODE
+  if (typeof spec === 'string' && spec !== '') return { mode: spec, from: 'spec' }
+  const env = sources.env?.DSH_PERMISSION_MODE
+  if (typeof env === 'string' && env !== '') return { mode: env, from: 'relay-env' }
+  // Empty means the child falls through to `dsh-base`'s own default, which is workspace-write.
+  // Reported as '' rather than as that default, so a reader can tell "not set here" from "set here".
+  return { mode: '', from: 'nothing' }
+}
+
+/**
  * The approval policy a profile patch PINS, if it pins one at all.
  *
  * A structural scan, not a YAML parse, for the same reason `shimNamedByProfile` is one: this runs on

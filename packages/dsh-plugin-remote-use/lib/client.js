@@ -74,6 +74,10 @@ window.__ModuleLoader__.load({
       heartbeatFailures: '心跳失败 {n} 次',
       generatedAt: '报告时间',
       cachedAge: '缓存 {n} 毫秒',
+      labelSessionMode: '会话档位',
+      // 三个值都不翻译成中文：它们是 DSH 的闭集取值，翻成中文就对不上 profile 与日志里写的了。
+      sessionModeUnset: '未设置（DSH 默认 workspace-write）',
+      sessionModeNeedsFull: 'GUI 自动化需要 danger-full-access',
       btnSelfcheck: '重新自检',
       btnScreenshot: '截图',
       btnPing: '连接测试',
@@ -112,6 +116,8 @@ window.__ModuleLoader__.load({
       fieldSessions: '本机会话状态',
       fieldKeepShots: '每个工作节点保留的截图数',
       fieldKeepShotsHint: '保留最新的若干张。全分辨率截图约 9.5 MB，这一项决定了长时间 GUI 验证会占用多少磁盘。填负数表示全部保留。',
+      fieldWorkerSessionMode: '本机远程会话的沙箱档位',
+      fieldWorkerSessionModeHint: '布防时写进启动规格：之后由本机接的远程会话都从这一档开始。GUI 自动化需要 danger-full-access —— GUI 在受限令牌下的失败是静默的（命令返回成功、只留一个桌面对话框），所以它不能被逐次审批掉。',
       fieldAuditMaxBytes: '审计文件轮转阈值（字节）',
       fieldAuditMaxBytesHint: '审计是追加式文件，本身没有停止点。达到该大小就改名归档并另起一个，绝不截断正在写的文件。填 0 或负数表示不轮转（无限增长）。',
       fieldAuditKeepFiles: '保留的审计归档数',
@@ -289,6 +295,11 @@ window.__ModuleLoader__.load({
       heartbeatFailures: '{n} heartbeat failures',
       generatedAt: 'Reported at',
       cachedAge: 'cached {n} ms',
+      labelSessionMode: 'Session mode',
+      // The values themselves stay untranslated: they are DSH's closed vocabulary, and a translated
+      // one would no longer match what the profile and the logs say.
+      sessionModeUnset: 'not set (DSH defaults to workspace-write)',
+      sessionModeNeedsFull: 'GUI automation needs danger-full-access',
       btnSelfcheck: 'Re-check now',
       btnScreenshot: 'Screenshot',
       btnPing: 'Test link',
@@ -327,6 +338,8 @@ window.__ModuleLoader__.load({
       fieldSessions: 'Local sessions',
       fieldKeepShots: 'Screenshots kept per worker',
       fieldKeepShotsHint: 'Newest first. A full-resolution capture is roughly 9.5 MB, so this bounds what a long GUI run costs on disk. Negative keeps everything.',
+      fieldWorkerSessionMode: 'Sandbox mode for this machine\'s remote sessions',
+      fieldWorkerSessionModeHint: 'Written into the launch spec when arming: remote sessions this machine accepts start at this level. GUI automation needs danger-full-access -- a GUI process failing under a restricted token does so SILENTLY (the command returns success; only a desktop dialog is left), so it cannot be surfaced as a per-call approval.',
       fieldAuditMaxBytes: 'Audit rotation threshold (bytes)',
       fieldAuditMaxBytesHint: 'The trail is append-only, so it has no stopping point of its own. At this size it is renamed to an archive and a fresh file starts -- the live file is never truncated. 0 or negative disables rotation (unbounded growth).',
       fieldAuditKeepFiles: 'Audit archives kept',
@@ -478,6 +491,9 @@ window.__ModuleLoader__.load({
       '.ru-note{margin:0;font-size:12px;color:var(--dsw-alias-label-tertiary)}',
       '.ru-note.warn{color:var(--dsw-alias-state-error-primary)}',
       '.ru-note.dim{font-size:11px}',
+      // A session level that cannot run GUI automation is not an error, so it is not red: it is the
+      // one value in this row that a reader may need to act on, and colour is how that reads.
+      '.ru-mode-warn{color:var(--dsw-alias-state-business-primary)}',
       '.ru-dim{color:var(--dsw-alias-label-tertiary)}',
       // A pending approval is the one thing on this page that is BLOCKING a worker, so it is
       // outlined in the business colour rather than reading as another informational card.
@@ -714,6 +730,18 @@ window.__ModuleLoader__.load({
           })))
       kv.push(h('span', { key: 'k-active', className: 'ru-k' }, t('labelActive')))
       kv.push(h('span', { key: 'v-active', className: 'ru-v' }, String(row.activeTasks ?? 0)))
+      // What level this node's remote sessions ACTUALLY run at, as reported by the relay that spawns
+      // them. Until this existed, the master could not tell a GUI-capable worker from a confined one:
+      // "I set it to full access" and "the session runs workspace-write" were indistinguishable from
+      // here (measured 2026-10-15 -- and they were both true at once, for hours).
+      const mode = typeof report?.sessionMode === 'string' ? report.sessionMode : ''
+      kv.push(h('span', { key: 'k-mode', className: 'ru-k' }, t('labelSessionMode')))
+      kv.push(h('span', {
+        key: 'v-mode',
+        className: `ru-v ru-mono${mode !== '' && mode !== 'danger-full-access' ? ' ru-mode-warn' : ''}`,
+      }, mode === ''
+        ? t('sessionModeUnset')
+        : (mode === 'danger-full-access' ? mode : `${mode} \u00b7 ${t('sessionModeNeedsFull')}`)))
 
       const head = [
         h('span', { key: 'name', className: 'ru-name' }, String(row.name ?? row.peerId ?? '')),
@@ -887,6 +915,7 @@ window.__ModuleLoader__.load({
         approvalTimeoutMs: settings.approvalTimeoutMs ?? 180000,
         heartbeatMs: settings.heartbeatMs ?? 15000,
         keepShots: settings.keepShots ?? 20,
+        workerSessionMode: settings.workerSessionMode ?? 'danger-full-access',
         auditMaxBytes: settings.auditMaxBytes ?? 8388608,
         auditKeepFiles: settings.auditKeepFiles ?? 5,
         delegationPolicy: settings.delegationPolicy ?? '',
@@ -912,6 +941,16 @@ window.__ModuleLoader__.load({
         // between a session-long GUI run costing hundreds of megabytes and costing a bounded
         // amount. Negative disables pruning, for an operator who archives them elsewhere.
         number('keepShots', 'fieldKeepShots', 'fieldKeepShotsHint', -1),
+        // The level this machine's own remote sessions run at, written into the launch spec when the
+        // worker role is armed. It sits next to `requiredTier` on purpose, because they are easy to
+        // confuse and are opposites: `requiredTier` is the ceiling the MASTER's review engine will
+        // accept from a request, while this is the floor the WORKER's own sessions start at.
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldWorkerSessionMode')),
+          h('select', { className: 'ru-input', value: form.workerSessionMode, onChange: set('workerSessionMode') },
+            ...[['danger-full-access', 'danger-full-access'], ['workspace-write', 'workspace-write'], ['read-only', 'read-only']]
+              .map(([value, label]) => h('option', { key: value, value }, label))),
+          h('span', { className: 'ru-field-hint' }, t('fieldWorkerSessionModeHint'))),
         // The audit trail is append-only, so it has no natural stopping point: without a cap it
         // grows for as long as the plugin is installed. These two are what bound it. Negative
         // disables the bound, for an operator who archives the trail elsewhere.
@@ -934,6 +973,7 @@ window.__ModuleLoader__.load({
               approvalTimeoutMs: Number(form.approvalTimeoutMs) || 180000,
               heartbeatMs: Number(form.heartbeatMs) || 0,
               keepShots: Number.isFinite(Number(form.keepShots)) ? Number(form.keepShots) : 20,
+              workerSessionMode: form.workerSessionMode,
               auditMaxBytes: Number.isFinite(Number(form.auditMaxBytes)) ? Number(form.auditMaxBytes) : 8388608,
               auditKeepFiles: Number.isFinite(Number(form.auditKeepFiles)) ? Number(form.auditKeepFiles) : 5,
               // An empty string is a real choice -- it switches the injected prompt off while

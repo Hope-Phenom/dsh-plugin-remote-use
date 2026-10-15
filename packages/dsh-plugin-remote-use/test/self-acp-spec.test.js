@@ -106,6 +106,26 @@ test('an explicit install directory is tried before the environment', () => {
   assert.equal(resolved.installDir, explicit)
 })
 
+test('an UNKNOWN permission mode is refused, never passed through', () => {
+  // `dsh-base` validates the value at load and rejects the whole sandbox-policy row, so a typo would
+  // start a worker whose session has NO resolved policy -- much harder to notice than a failed arm.
+  // And it must not be coerced either: the caller's default is the UNRESTRICTED mode, so a silent
+  // fallback would convert a typo into the widest possible access.
+  for (const bad of ['yolo', 'full-access', 'danger_full_access', 'DANGER-FULL-ACCESS']) {
+    assert.throws(() => acpLaunchSpec({ installDir: INSTALL, permissionMode: bad }),
+      /not a sandbox mode DSH understands/u, `"${bad}" must be refused`)
+  }
+  assert.equal(acpLaunchSpec({ installDir: INSTALL, permissionMode: 'danger-full-access' }).env.DSH_PERMISSION_MODE, 'danger-full-access')
+  assert.equal(acpLaunchSpec({ installDir: INSTALL, permissionMode: 'read-only' }).env.DSH_PERMISSION_MODE, 'read-only')
+})
+
+test('the mode is the ONLY thing the caller can put in the child environment', () => {
+  // The env is handed to another process verbatim; an arbitrary pass-through here would be a way to
+  // set any variable in the worker's agent. Pinned so adding a second knob is a deliberate act.
+  assert.deepEqual(Object.keys(acpLaunchSpec({ installDir: INSTALL, permissionMode: 'workspace-write' }).env).sort(),
+    ['DSH_PERMISSION_MODE', 'ELECTRON_RUN_AS_NODE'])
+})
+
 test('a bad profile is reported as a resolution failure, not thrown through', () => {
   const resolved = resolveAcpLaunchSpec({
     profile: '../escape',

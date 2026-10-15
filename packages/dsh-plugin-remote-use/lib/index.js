@@ -197,6 +197,23 @@ export const Config = Schema !== null
      */
     keepShots: Schema.number().default(20),
     /**
+     * The sandbox mode THIS machine's remote sessions run under, written into the launch spec when
+     * the worker role is armed.
+     *
+     * WHY IT DEFAULTS TO FULL ACCESS: a GUI workflow is many calls, and the failure that keeps it
+     * from starting under a confined token -- `0xC0000142` from a GUI-subsystem child -- is SILENT:
+     * the command returns success, no denial is reported, and the only trace is a dialog on someone's
+     * desktop (PITFALLS F21/F33). A decision that cannot be seen cannot be escalated, so it must not
+     * be left to a per-call judgement. Measured: with the same evidence, one run judged that failure
+     * "a denial" and requested a wider tier, another judged it "environmental" and refused -- a
+     * decision that flips is not a decision.
+     *
+     * It is a DEPLOYMENT value, not a runtime one: it is read when the spec is generated, and a
+     * change governs the next arming. Set `workspace-write` for a worker that only runs confined
+     * work; unknown values are refused when the spec is built rather than silently coerced.
+     */
+    workerSessionMode: Schema.string().default('danger-full-access'),
+    /**
      * Rotate the audit trail once the live file reaches this many bytes.
      *
      * The trail is append-only, so nothing stops it growing; without a cap it grows for as long as
@@ -228,6 +245,9 @@ export const Config = Schema !== null
     reportBudgetMs: 4_000,
     selfcheckBudgetMs: 25_000,
     keepShots: 20,
+    // The deployment default for a remote session, and the reason is in the schema above: the GUI
+    // failure it prevents is silent, so it cannot be left to a per-call decision.
+    workerSessionMode: 'danger-full-access',
     auditMaxBytes: 8 * 1024 * 1024,
     auditKeepFiles: 5,
     delegationPolicy: DEFAULT_DELEGATION_POLICY,
@@ -321,7 +341,7 @@ export function apply(ctx, config) {
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
     // Read at start time, so a change on the settings page governs the next arming.
     keepShots: () => cfg.keepShots,
-    launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp' }),
+    launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp', permissionMode: cfg.workerSessionMode }),
   })
   const arming = new WorkerArming({
     interfaces: () => networkInterfaces(),
@@ -574,6 +594,13 @@ export function apply(ctx, config) {
       // MUST be listed here. A key the route can SAVE but this function omits is written to
       // disk and then read back as `undefined`, so the page shows the default again -- the
       // setting appears to work once and silently revert. Caught by the round-trip test.
+      //
+      // RE-CAUGHT 2026-10-15: `auditMaxBytes` and `auditKeepFiles` reached the schema, the save
+      // route and the form, but NOT this list -- so both silently reverted for a whole release,
+      // and no round-trip test existed for them to notice. All three are covered by one now.
+      auditMaxBytes: cfg.auditMaxBytes,
+      auditKeepFiles: cfg.auditKeepFiles,
+      workerSessionMode: cfg.workerSessionMode,
       delegationPolicy: cfg.delegationPolicy,
       // Same rule: `WorkerArming.persist` writes this through `persistSettings`, so omitting it
       // here would make arming appear to succeed and then vanish on the next read.
@@ -834,6 +861,12 @@ export function normalizeConfig(config) {
     // NOT clamped at 0: a negative value is the documented way to disable pruning, and each
     // capture may free tens of megabytes.
     keepShots: Number.isFinite(config?.keepShots) ? Number(config.keepShots) : 20,
+    // NOT validated here: an unknown mode must fail when the launch spec is BUILT, loudly, rather
+    // than be coerced to a default here. Coercing is the dangerous direction -- the default is the
+    // unrestricted mode, so a typo would silently grant the widest access instead of none.
+    workerSessionMode: typeof config?.workerSessionMode === 'string' && config.workerSessionMode !== ''
+      ? config.workerSessionMode
+      : 'danger-full-access',
     // Not clamped at 0 for the same reason as `keepShots`: 0 or negative is the documented way to
     // say "do not rotate / keep every archive", which is a choice, not an invalid value.
     auditMaxBytes: Number.isFinite(config?.auditMaxBytes) ? Number(config.auditMaxBytes) : 8 * 1024 * 1024,
@@ -1334,6 +1367,10 @@ export function makeSettingsRoute(deps) {
       approvalTimeoutMs: settings.approvalTimeoutMs,
       heartbeatMs: settings.heartbeatMs,
       keepShots: settings.keepShots,
+      // The mode this machine will arm its own remote sessions with. Shown on the page because
+      // "which permission level is this worker actually deployed at" was, until now, answerable
+      // only by reading a spec file that the running relay may never have read.
+      workerSessionMode: settings.workerSessionMode,
       auditMaxBytes: settings.auditMaxBytes,
       auditKeepFiles: settings.auditKeepFiles,
       // The delegation policy is editable from the page because getting the wording right is
@@ -1605,6 +1642,10 @@ export function makeSettingsRoute(deps) {
             if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
             if (Number.isFinite(incoming.heartbeatMs)) next.heartbeatMs = Number(incoming.heartbeatMs)
             if (Number.isFinite(incoming.keepShots)) next.keepShots = Number(incoming.keepShots)
+            // An unknown mode is accepted here and refused when the spec is built -- see the schema.
+            if (typeof incoming.workerSessionMode === 'string' && incoming.workerSessionMode !== '') {
+              next.workerSessionMode = incoming.workerSessionMode
+            }
             if (Number.isFinite(incoming.auditMaxBytes)) next.auditMaxBytes = Number(incoming.auditMaxBytes)
             if (Number.isFinite(incoming.auditKeepFiles)) next.auditKeepFiles = Number(incoming.auditKeepFiles)
             // An empty string is a real choice here: it switches the prompt injection off while

@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { PRESETS, SANDBOX_MODES, approvalPolicyFor, checkPairing, pinnedApprovalPolicy } from '../slave/permission-pairing.mjs'
+import { PRESETS, SANDBOX_MODES, approvalPolicyFor, checkPairing, effectiveSessionMode, pinnedApprovalPolicy } from '../slave/permission-pairing.mjs'
 
 const SLAVE = join(dirname(fileURLToPath(import.meta.url)), '..', 'slave')
 const SCRIPT = join(SLAVE, 'make-launch-spec.mjs')
@@ -206,4 +206,22 @@ test('a missing profile warns on stderr but still writes the spec', () => {
   // The warning names the fix, because this is the path an operator on an unusual DSH_HOME takes.
   assert.match(run.stderr, /acp-profile-approval\.patch\.yml/u)
   assert.equal(run.spec.env.DSH_PERMISSION_MODE, 'danger-full-access')
+})
+
+test('the mode a child will actually get is read from the SPEC first, then the relay env', () => {
+  // Ordered by what the relay really does: `spawn(..., { env: { ...process.env, ...LAUNCH.env } })`,
+  // so the spec wins. Both beats matter because "not in the spec" is NOT the same as "not set".
+  assert.deepEqual(
+    effectiveSessionMode({ specEnv: { DSH_PERMISSION_MODE: 'read-only' }, env: { DSH_PERMISSION_MODE: 'danger-full-access' } }),
+    { mode: 'read-only', from: 'spec' })
+  assert.deepEqual(effectiveSessionMode({ specEnv: {}, env: { DSH_PERMISSION_MODE: 'workspace-write' } }),
+    { mode: 'workspace-write', from: 'relay-env' })
+  // Nothing anywhere is reported as NOTHING, not as the default DSH will apply: a reader must be able
+  // to tell "set here to X" from "set nowhere, so dsh-base will pick workspace-write".
+  assert.deepEqual(effectiveSessionMode({ specEnv: {}, env: {} }), { mode: '', from: 'nothing' })
+  assert.deepEqual(effectiveSessionMode({}), { mode: '', from: 'nothing' })
+  // An empty string counts as unset -- passing it through would be a value dsh-base rejects at load.
+  assert.deepEqual(
+    effectiveSessionMode({ specEnv: { DSH_PERMISSION_MODE: '' }, env: { DSH_PERMISSION_MODE: 'read-only' } }),
+    { mode: 'read-only', from: 'relay-env' })
 })

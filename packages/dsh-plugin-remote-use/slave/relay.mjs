@@ -39,6 +39,7 @@ import { WebSocketServer } from 'ws'
 import { RELAY_SHOT_PATTERN, pruneShots } from './prune-shots.mjs'
 import { encodePairing } from './pairing.mjs'
 import { bestAddress } from './net-address.mjs'
+import { effectiveSessionMode } from './permission-pairing.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -290,7 +291,11 @@ async function handleLocalRpc(msg) {
     case `${PLUGIN_PREFIX}selfcheck`: {
       const maxAgeMs = Number.isFinite(msg.params?.maxAgeMs) ? Number(msg.params.maxAgeMs) : SELFCHECK_CACHE_MS
       try {
-        return reply(await runSelfCheck(maxAgeMs))
+        // The session mode rides along with the report the master ALREADY renders. It is the answer
+        // to "which permission level is this worker actually at", which until now could only be
+        // guessed from a spec file that this process may never have read (see effectiveSessionMode).
+        const mode = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env })
+        return reply({ ...(await runSelfCheck(maxAgeMs)), sessionMode: mode.mode, sessionModeFrom: mode.from })
       } catch (e) {
         return fail(-32603, `self-check failed: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -519,6 +524,9 @@ const server = createServer((req, res) => {
       // breaks child process creation (pwsh dies with 0xC0000142 / STATUS_DLL_INIT_FAILED).
       // Surfacing it here makes that misconfiguration visible instead of mysterious.
       cwd: process.cwd(),
+      // The mode the child this relay spawns will actually run at, so a mismatch between "what the
+      // operator set" and "what this process will do" is visible from either side.
+      ...(() => { const m = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env }); return { sessionMode: m.mode, sessionModeFrom: m.from } })(),
       pluginRpc: [`${PLUGIN_PREFIX}ping`, `${PLUGIN_PREFIX}selfcheck`, `${PLUGIN_PREFIX}screenshot`],
       http: ['/healthz', '/screenshot'],
     }))

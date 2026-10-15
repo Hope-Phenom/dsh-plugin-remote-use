@@ -36,6 +36,14 @@ export const MANAGED_KEYS = [
   // managed here would be dropped on the next read -- the quiet way a setting seems to work
   // once and then reverts.
   'keepShots',
+  // Added with the audit-retention controls. These were LEFT OUT here when they shipped, so both
+  // silently reverted: saved to disk, dropped by the merge, and shown as the default again on the
+  // next read. Found 2026-10-15 while adding the third of them, by a guard that now checks the whole
+  // exposed set at once instead of relying on one round-trip test per key.
+  'auditMaxBytes',
+  'auditKeepFiles',
+  // The sandbox mode this machine arms its own remote sessions with.
+  'workerSessionMode',
   'delegationPolicy',
   // The worker role: whether this machine accepts remote execution, on which interface, and
   // the credential a paired master presents. It holds a secret, so anything that renders it

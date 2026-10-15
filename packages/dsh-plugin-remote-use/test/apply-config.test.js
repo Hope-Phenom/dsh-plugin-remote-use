@@ -23,8 +23,10 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply, REMOTE_TOOL_NAMES } from '../lib/index.js'
+import { acpLaunchSpec } from '../lib/core/self-acp-spec.js'
 import { encodePairing } from '../slave/pairing.mjs'
 import { settingsPath } from '../lib/core/settings-store.js'
+import { MANAGED_KEYS } from '../lib/core/settings-store.js'
 
 // ---------------------------------------------------------------------------
 // fake Cordis context
@@ -467,6 +469,90 @@ test('keepShots may be NEGATIVE, which is how an operator disables pruning', asy
     const h = mountWithGate()
     const saved = await post(h.routes[0], 'settings.save', { settings: { keepShots: -1 } })
     assert.equal(saved.body.settings.keepShots, -1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the session mode this machine arms its own remote sessions with
+// ---------------------------------------------------------------------------
+
+test('EVERY setting the page exposes is one the store manages', async () => {
+  // THE GENERIC GUARD FOR THE SILENT-REVERT CLASS. A page-editable setting has to be registered in
+  // four places -- the schema, the save route, `MANAGED_KEYS`, and `currentSettings()` -- and each
+  // omission fails the same quiet way: it saves, then reads back as undefined, and the page shows
+  // the default again. Both the code comments warning about this were written after being bitten.
+  //
+  // Per-key round-trip tests only cover the keys someone remembered to write one for; this covers
+  // the set. It would have caught `auditMaxBytes`/`auditKeepFiles` (shipped broken) and the omission
+  // that prompted it, because `publicSettings` lists every exposed key even when its value is
+  // undefined -- which is exactly how the omission presents.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    // Computed on every read and never stored, so they are not settings and cannot "revert". Naming
+    // them is deliberate: a new derived field has to be added here, which is the moment to ask
+    // whether it really is derived or is a setting someone forgot to register.
+    const DERIVED = new Set(['sessionsEnabled', 'enableCommand'])
+    const exposed = Object.keys((await get(h.routes[0])).body.settings)
+      .filter((key) => !DERIVED.has(key))
+    const unmanaged = exposed.filter((key) => !MANAGED_KEYS.includes(key))
+    assert.deepEqual(unmanaged, [],
+      `these are exposed on the page but not managed by the store, so they would silently revert: ${unmanaged.join(', ')}`)
+    // And the reverse direction, so a managed key the projection forgot cannot hide: `publicSettings`
+    // must actually surface everything the store will persist.
+    const hidden = MANAGED_KEYS.filter((key) => !exposed.includes(key))
+    assert.deepEqual(hidden, [],
+      `these are persisted but never exposed, so the page cannot show what it is doing: ${hidden.join(', ')}`)
+  })
+})
+
+test('the audit retention settings round-trip, because they did NOT before', async () => {
+  // Kept as an explicit regression: these were the two keys that shipped in 0.2.12 exposed, savable,
+  // and completely revertable.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { auditMaxBytes: 4096, auditKeepFiles: 2 } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.auditMaxBytes, 4096)
+    assert.equal(saved.body.settings.auditKeepFiles, 2)
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.auditMaxBytes, 4096, 'it must survive the read-back, not revert')
+    assert.equal(after.body.settings.auditKeepFiles, 2)
+  })
+})
+
+test('the session mode DEFAULTS to full access', async () => {
+  // The default is the security-relevant part, so it is pinned rather than left to the schema
+  // declaration. It is deliberate: a GUI process failing under a restricted token fails SILENTLY
+  // (success return, no denial, only a desktop dialog), so it cannot be surfaced as an approval and
+  // must not be left to a per-call judgement. See PITFALLS F21/F33 and the schema's own note.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const initial = await get(h.routes[0])
+    assert.equal(initial.body.settings.workerSessionMode, 'danger-full-access')
+  })
+})
+
+test('the session mode round-trips, and a confined worker is still expressible', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { workerSessionMode: 'workspace-write' } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.workerSessionMode, 'workspace-write')
+    // Through the settings file, or the page would look like it worked and then revert.
+    assert.equal((await get(h.routes[0])).body.settings.workerSessionMode, 'workspace-write')
+  })
+})
+
+test('an UNKNOWN session mode is STORED, not silently coerced to the default', async () => {
+  // Coercing would be the dangerous direction: the default is the unrestricted mode, so a typo would
+  // quietly grant the widest access. It is refused where it is used instead -- when the launch spec
+  // is built -- so arming fails loudly and nothing is deployed.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { workerSessionMode: 'yolo' } })
+    assert.equal(saved.body.settings.workerSessionMode, 'yolo')
+    assert.throws(() => acpLaunchSpec({ installDir: 'C:\\x', permissionMode: 'yolo' }),
+      /not a sandbox mode DSH understands/u)
   })
 })
 

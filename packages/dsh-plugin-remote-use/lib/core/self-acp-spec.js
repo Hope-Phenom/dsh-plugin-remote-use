@@ -20,6 +20,14 @@
 
 import { existsSync } from 'node:fs'
 
+/**
+ * Every file-effect sandbox mode DSH understands.
+ *
+ * Mirrors `SANDBOX_MODES` in `@deepseek-ai/dsh-sandbox-policy`. It is duplicated rather than
+ * imported because this module runs on a worker that may have no DSH package tree of its own.
+ */
+export const SESSION_MODES = ['read-only', 'workspace-write', 'danger-full-access']
+
 /** Where DSH installs by default on Windows, best candidate first. */
 export function installCandidates(env = process.env) {
   return [
@@ -44,6 +52,14 @@ export function acpLaunchSpec(opts) {
   if (installDir === '') throw new Error('acpLaunchSpec: no install directory')
   const profile = String(opts.profile ?? 'acp')
   if (!/^[\w.-]+$/u.test(profile)) throw new Error(`acpLaunchSpec: profile "${profile}" is not a plain profile name`)
+  // REFUSE an unknown mode instead of passing it through. `dsh-base` validates the value at load
+  // and rejects the whole `sandbox-policy` row, so a typo would start a worker whose session has no
+  // resolved policy at all -- a failure that is far harder to notice than a failed arming.
+  const permissionMode = opts.permissionMode
+  const wantsMode = typeof permissionMode === 'string' && permissionMode !== ''
+  if (wantsMode && !SESSION_MODES.includes(permissionMode)) {
+    throw new Error(`acpLaunchSpec: "${permissionMode}" is not a sandbox mode DSH understands; expected one of ${SESSION_MODES.join(', ')}`)
+  }
   return {
     command: `${installDir}\\DeepSeek Harness.exe`,
     args: [
@@ -54,9 +70,7 @@ export function acpLaunchSpec(opts) {
     ],
     env: {
       ELECTRON_RUN_AS_NODE: '1',
-      ...(typeof opts.permissionMode === 'string' && opts.permissionMode !== ''
-        ? { DSH_PERMISSION_MODE: opts.permissionMode }
-        : {}),
+      ...(wantsMode ? { DSH_PERMISSION_MODE: permissionMode } : {}),
     },
   }
 }

@@ -39,7 +39,7 @@ const GOOD_SPEC = {
   spec: {
     command: 'C:\\Users\\you\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe',
     args: ['--expose-internals', 'C:\\...\\cli.js', '--profile', 'acp'],
-    env: { ELECTRON_RUN_AS_NODE: '1' },
+    env: { ELECTRON_RUN_AS_NODE: '1', DSH_PERMISSION_MODE: 'danger-full-access' },
   },
 }
 
@@ -173,6 +173,11 @@ test('the ACP agent is handed over as a spec FILE, not a command line', () => {
     })
     // The relay passes this env to the agent, so missing it means a GUI image with no node mode.
     assert.equal(written.env.ELECTRON_RUN_AS_NODE, '1')
+    // ...and this is THE hop that carries the session's permission level to the worker: the mode is
+    // written into the spec file the relay reads at startup, and the relay merges that env over its
+    // own when it spawns the ACP child. A mode that stops at the resolver and never lands here is
+    // exactly how "I set it to full access" and "it runs workspace-write" were both true at once.
+    assert.equal(written.env.DSH_PERMISSION_MODE, 'danger-full-access')
   } finally {
     supervisor.stop()
     rmSync(dir, { recursive: true, force: true })
