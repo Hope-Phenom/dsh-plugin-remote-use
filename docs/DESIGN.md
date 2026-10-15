@@ -1270,18 +1270,51 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 `api`），其余一律 `api`。默认值取**保守**的那个，因为把脚本记成"人批的"会让"人在环里"这个结论
 无法被验证（PITFALLS F19 / F22）。
 
-**三处「在工作现场」的界面（0.2.4）**：设置页默认关着，而"等我批准"恰恰要求人不必去开它。所以审批
+**三处「在工作现场」的界面（0.2.4 起）**：设置页默认关着，而"等我批准"恰恰要求人不必去开它。所以审批
 同时出现在三个**常驻**位置，各自只用不与第一方冲突的槽位：
 
 | 槽位 | 内容 | 为什么是这个位置 |
 |---|---|---|
-| `conversation.composer.dock`（`list`） | 输入框上方的待批准条 + 允许/拒绝 | 操作者本来就在看这里；`conversation.input.permission` 是 `single` 且已被 DSH 自己的权限选择器占用，**不能抢** |
+| `conversation.input.dock`（`list`，`order: 30`） | 输入框**正上方**的待批准条（整行）+ 允许/拒绝 | 它是一个**整行**，且紧贴输入框；DSH 自己的三条同形提示也在这里（`todo` 0 / `goal` 10 / 队列 `queue` 20）。`conversation.input.permission` 是 `single` 且已被 DSH 自己的权限选择器占用，**不能抢** |
 | `conversation.session.header.actions`（`list`） | 会话头部的「审批 N」按钮，点开右侧面板 | 工作时常驻可见；`sidebar.toggle.badge` 同为 `single` 且已被更新角标占用 |
-| `sidebar.right.pane.tab` + `.title`（`keyed`） | 右侧面板「审批」标签页：待批准 + 无人应答被拒的记录 | 与"文件/预览"并列、用现成快捷键开合，正合"审批记录要单独拆出来" |
+| `sidebar.right.pane.tab` + `.title`（`keyed`） | 右侧面板「审批」标签页：待批准 + 无人应答被拒的记录 + 清空记录 | 与"文件/预览"并列、用现成快捷键开合，正合"审批记录要单独拆出来" |
+
+> **席位的更正（0.2.11，PITFALLS F28）。** 待批准条最初注册在 `conversation.composer.dock`。那个位置
+> **名字像"输入框上方的 dock"，实际渲染在输入框的状态行里**（与上下文占比、活动读数同一 flex 行），
+> 所以它是"再塞一个 flex 项"：**位置随同行宽度漂移**，排版也继承状态行的紧凑样式（用户看到的
+> "一个词一行"与胶囊折断就是这么来的）。结构性原因，不是样式问题。
+>
+> 另外两个候选及否决理由：`conversation.composer`（`chain`，DSH 自己的审批提示注册在此）**不能用** ——
+> 其 owner 以 `overlay: true` 渲染，而 `renderChainResult` 在**有人当选时把 fallback 设为
+> `display: none`**，那个 fallback **就是含输入框的 composer bar**：一旦当选，**远程请求等待期间输入框会消失**。
+> 留在原地只改样式则位置仍由 host 行布局决定。
 
 三者共用**一个**轮询源（`createApprovalFeed`）：首个订阅者才启动、最后一个退订即停。没人在看时
 不该有轮询 —— 这条性质曾经只写在注释里，而实现里在 `apply()` 就起了定时器，直接吊死了测试进程
-（F23）。
+（F23）。面板 body 另外按文档经 `useTabInfo()` 读自己的 occurrence，用 `tab.visible` 决定**是否持有订阅**
+（后台会话、折叠的列都不该是那个"让轮询活着"的订阅者）；缺这个 hook 时**抛错而不是静默降级**（F25 的教训）。
+
+### 8.6.1 清空"错过的请求"
+
+**需求（用户原话）**："设置页和侧面板里都应该提供清空审批记录的功能，否则比如本会话就会一直显示错过 6 件了，很怪。"
+
+**实现**：**不删行**。审计文件是追加式证据，删掉"无人应答的拒绝"会让这份记录**有能力撒谎**；
+而"清空一个列表"这个诉求，不构成销毁证据的理由。改为追加一条水印行：
+
+```json
+{ "at": "2026-10-15T...Z", "kind": "approvals-cleared", "by": "page" }
+```
+
+读取只看水印**之后**的行（`AuditLog.#visible()`）。于是两件事同时成立：
+**每条错过都还在文件里**，且**"有人清空过、什么时候、从哪条路"也在文件里** —— 后者本身值得审计，
+因为它是唯一一个"让过去的拒绝不再可见"的动作。`by` 复用决策那套来源判据（`page` / `api`）。
+
+水印按**行位置**（`clearedIndex`）而不是时间戳比较：第一版用 `row.at > clearedAt`，而 `at` 只有毫秒
+分辨率 —— 同一毫秒内"清空"后紧接着产生的**新**记录会被判为"不在水印之后"而**一起被隐藏**，
+即"刚发生的拒绝看不见了"。这个 bug 是**测试用例**当场证伪的（PITFALLS F31）。
+
+清空**只影响"错过"的视图**（计数与列表），不动"最近的裁定"：后者是**文件的原始尾部视图**，
+它自称"追加写入，位置：…"，把行从那里藏掉才是真的在骗人。
 
 ### 8.7 数据不出局域网
 
@@ -1292,7 +1325,8 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 
 ## 9. 审计
 
-**位置**：`$DSH_HOME/storages/dsh-plugin-remote-use/audit/<yyyy-mm-dd>.jsonl`
+**位置**：`$DSH_HOME/storages/dsh-plugin-remote-use/audit.jsonl`（**单文件、追加式**，不是按日切分；
+下面那张草图里的按日子目录没有实现）
 
 **记录**（任务开始/结束各一行，每次审批决策一行）：
 
@@ -1326,6 +1360,16 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 > 取值 `page | api | timeout | disposed | no-answerer`（另有两个历史值 `human` / `engine`）。
 > **`page` 与 `api` 必须分开**：两者都走同一个路由，混在一起就会把脚本批准记成"人批的"（F19）。
 > `gate` 同步区分：超时不再写 `gate: 'human'`。
+>
+> **另一种 `kind`（0.2.11）**：`approvals-cleared` —— 清空"错过"视图的水印行，字段
+> `{at, kind, by}`。它不是审批裁定，读 `tail()` 时会出现；`missed()` / `missedCount` 只看它在
+> **之后**的行（§8.6.1）。`requestedTier` 与 `requiredTier` 同时在场：前者是请求方**申请**的档位，
+> 后者是推断的**最小够用**档位，界面显示前者。
+>
+> **`kind: 'pane-probe'` 已移除（0.2.11）**：0.2.8 曾把右侧面板打开动作的现场情况（控制器有哪些方法、
+> 抛了什么错）回传到审计里，因为主机看不到浏览器控制台。公开路径 `openResource` 确认可用之后，
+> 这一段探针连同它的路由分支一起删掉了 —— `docs/PITFALLS.md` 的 F27 保留了它得出的结论，
+> 而**出货路径里不留只为调试存在的东西**。
 
 **保留**：默认 30 天，可配。**轮转**：单文件 64MB。**配额**：总大小上限，超限告警而非静默丢弃。
 

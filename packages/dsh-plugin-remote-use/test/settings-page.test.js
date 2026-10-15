@@ -240,6 +240,28 @@ test('a host that never sent the missed list still renders (older snapshot)', ()
   const text = textOf(tree).join(' ')
   assert.match(text, /APPROVALS-NONE/)
   assert.doesNotMatch(text, /MISSED/, 'no misses: no block, and no crash reading an absent field')
+  // ...and nothing to clear, so offering the control would be a button that cannot do anything.
+  assert.deepEqual(findButton(tree, 'BTN-CLEAR'), [], 'no misses means no clear control')
+})
+
+test('the missed list offers a way to clear it, and says what clearing does not do', () => {
+  // The operator's report: a count of past misses stayed on screen forever and read as a live
+  // problem ("本会话就会一直显示错过6件了，很怪"). The control has to be HERE, next to the list it
+  // clears, and it has to say that the record file is untouched -- otherwise it reads as "delete
+  // the evidence" and an operator who wanted the record kept would not dare press it.
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    approvals: {
+      available: true, timeoutMs: 180_000, recent: [], pending: [], missedCount: 1,
+      missed: [{ at: '2026-10-14T10:46:28.000Z', toolName: 'pwsh', requiredTier: 'danger-full-access', peerId: 'w1', waitedMs: 178_000, by: 'timeout' }],
+    },
+    audit: { available: true, path: 'p', error: '', recent: [] },
+  })
+  const buttons = findButton(tree, 'BTN-CLEAR')
+  assert.equal(buttons.length, 1, 'exactly one clear control on the page')
+  assert.match(textOf(tree).join(' '), /CLEAR-NOTE/)
+  // Nothing has been cleared yet, so no result message and no error.
+  assert.doesNotMatch(textOf(tree).join(' '), /CLEARED-/)
 })
 
 test('a build with no approval queue says so rather than showing an empty list', () => {
@@ -564,12 +586,17 @@ test('the icon is well-formed XML, because the browser decodes it as an <img>', 
  * The kinds of the slots this plugin uses, as DSH declares them.
  *
  * Read from `dsh-client-ui-conversation`, `dsh-client-ui-sidebar-right` and `dsh-client-ui-sidebar`:
- * `conversation.composer.dock` is `list`, `conversation.session.header.actions` is `list`,
+ * `conversation.input.dock` is `list`, `conversation.session.header.actions` is `list`,
  * `sidebar.right.pane.tab` and `.title` are `keyed`, `settings.section` is `single`. Keeping this
  * table here is what lets the stub enforce the same requirement the real service does.
+ *
+ * `conversation.composer` is deliberately ABSENT: it is `chain`, and this plugin must not register
+ * there. Its owner renders it with `overlay: true`, and an elected chain entry is drawn with the
+ * fallback -- the composer bar itself -- set to `display: none`, so electing would hide the input
+ * box for as long as a remote request waits (see the seat note in lib/client.js and PITFALLS F28).
  */
 const SLOT_SPECS = {
-  'conversation.composer.dock': 'list',
+  'conversation.input.dock': 'list',
   'conversation.session.header.actions': 'list',
   'sidebar.right.pane.tab': 'keyed',
   'sidebar.right.pane.tab.title': 'keyed',
@@ -681,11 +708,15 @@ test('the approval surfaces use shared slots, and never a single-occupancy one',
     sidebarRight: { openResource: () => {} },
   })
   const names = registered.map((entry) => entry.decl?.name)
-  // Where the work happens: above the composer, in the session header, and in the right pane.
-  assert.ok(names.includes('conversation.composer.dock'), 'the dock is the primary surface')
+  // Where the work happens: the full-width strip above the input bar, the session header, the pane.
+  assert.ok(names.includes('conversation.input.dock'), 'the dock is the primary surface')
   assert.ok(names.includes('conversation.session.header.actions'))
   assert.ok(names.includes('sidebar.right.pane.tab'))
   assert.ok(names.includes('sidebar.right.pane.tab.title'))
+  // The `chain` seat DSH's own approval prompt uses is NOT ours to take: electing there hides the
+  // composer bar (`overlay: true` sets the fallback to `display: none`), i.e. the input box.
+  assert.equal(names.includes('conversation.composer'), false)
+  assert.equal(names.includes('conversation.composer.dock'), false)
   // `conversation.input.permission` and `sidebar.toggle.badge` are `kind: "single"` and already
   // owned by DSH's own plugins (the permission selector and the desktop-update badge). Claiming
   // either would DISPLACE first-party UI, so their absence here is a tested property.
@@ -703,12 +734,63 @@ test('the approval surfaces use shared slots, and never a single-occupancy one',
 
 test('the composer dock renders nothing while no request waits', () => {
   const { registered } = loadClient()
-  const dock = registered.find((entry) => entry.decl?.name === 'conversation.composer.dock')
+  const dock = registered.find((entry) => entry.decl?.name === 'conversation.input.dock')
   assert.ok(dock !== undefined)
+  // Why this seat and not the status line: `order` is what fixes the strip's position in the list,
+  // and the list renders in ascending order between DSH's own docks (todo 0, goal 10, queue 20).
+  // Without it the strip sat wherever the host's status row happened to put it (F28).
+  assert.equal(dock.decl.order, 30)
   const t = (key) => key
   // The closure hands the component the REAL feed, which has seen no snapshot yet, so the honest
   // render is "nothing" -- an empty strip above the composer would be noise in every session.
   assert.equal(expand(dock.component({ t })), null)
+})
+
+// ---------------------------------------------------------------------------
+// the right pane's body and its framework hook
+//
+// The documented contract for a pane body is `useTabInfo()`, framework-injected, delivering
+// `{ sidebar, panel, tab }`. The body uses exactly one field of it -- `tab.visible` -- because it
+// decides whether this occurrence should hold a subscription to the shared feed.
+// ---------------------------------------------------------------------------
+
+/** The first `data-ru-tab` value in the tree, or undefined. */
+function tabMarker(node, out = []) {
+  if (node === null || typeof node !== 'object') return out[0]
+  if (Array.isArray(node)) { for (const child of node) tabMarker(child, out); return out[0] }
+  if (node.props?.['data-ru-tab'] !== undefined) out.push(node.props['data-ru-tab'])
+  if (Array.isArray(node.children)) for (const child of node.children) tabMarker(child, out)
+  return out[0]
+}
+
+function paneBody() {
+  const { registered } = loadClient({
+    sidebarRightTabs: { register: () => () => {} },
+    sidebarRight: { openResource: () => {} },
+  })
+  const body = registered.find((entry) => entry.decl?.name === 'sidebar.right.pane.tab')
+  assert.ok(body !== undefined, 'the pane body must be registered')
+  return body.component
+}
+
+test('the pane body takes its occurrence from the framework hook', () => {
+  const component = paneBody()
+  const t = (key) => key
+  const shown = expand(component({ t, useTabInfo: () => ({ tab: { id: 'tab-7', visible: true }, panel: { id: 'pane-1' }, sidebar: {} }) }))
+  assert.equal(tabMarker(shown), 'tab-7', 'the body marks WHICH occurrence it belongs to')
+
+  // A hidden occurrence still RENDERS. `visible` gates the subscription, not the content: blanking
+  // the pane would hide the record the operator opened the pane to read.
+  const hidden = expand(component({ t, useTabInfo: () => ({ tab: { id: 'tab-8', visible: false } }) }))
+  assert.equal(tabMarker(hidden), 'tab-8')
+  assert.match(textOf(hidden).join(' '), /approvalsPanelMissedTitle/, 'and it still draws its sections')
+})
+
+test('a pane body with no useTabInfo fails LOUDLY instead of quietly dropping the gate', () => {
+  // The lesson from F25: a swallowed failure is a feature that stops working with nothing to show
+  // for it. The renderer's entry boundary turns this into one dead pane, which is the right price.
+  const component = paneBody()
+  assert.throws(() => expand(component({ t: (key) => key })), /useTabInfo/)
 })
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1145,8 @@ function makeTranslator() {
       fieldPairing: 'F-PAIRING', fieldPairingHint: 'PAIR-HINT', fieldPairingPlaceholder: 'dshpair1.', pairDone: 'PAIR-DONE',
       approvalsUnavailable: 'APPROVALS-UNAVAILABLE', approvalsNone: 'APPROVALS-NONE',
       approvalsMissed: 'MISSED-{n}', approvalsMissedNote: 'MISSED-NOTE', colSettled: 'COL-SETTLED',
+      btnClearMissed: 'BTN-CLEAR', btnClearing: 'BTN-CLEARING', clearedMissed: 'CLEARED-{n}',
+      clearMissedNote: 'CLEAR-NOTE',
       auditNone: 'AUDIT-NONE',
       auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',
       auditByEngine: 'AUDIT-BY-ENGINE', auditByTimeout: 'AUDIT-BY-TIMEOUT',
@@ -1600,6 +1684,112 @@ test('a build with no queue says so instead of pretending nothing is waiting', a
 
   const decided = await callRoute(route, 'POST', JSON.stringify({ action: 'approvals.decide', id: 'x', decision: 'allow' }))
   assert.equal(decided.status, 503)
+})
+
+test('approvals.clear resets the miss views and says how many it dropped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ru-audit-clear-'))
+  const audit = new AuditLog({ env: { DSH_HOME: dir } })
+  audit.record({ kind: 'approval', by: 'timeout', toolName: 'write' })
+  audit.record({ kind: 'approval', by: 'timeout', toolName: 'pwsh' })
+  const { route } = makeRoute({ audit })
+
+  const before = await callRoute(route, 'GET')
+  assert.equal(before.body.approvals.missedCount, 2)
+
+  const { status, body } = await callRoute(route, 'POST', JSON.stringify({ action: 'approvals.clear', via: 'page' }))
+  assert.equal(status, 200)
+  assert.equal(body.ok, true)
+  assert.equal(body.cleared, 2, 'the page can say what it did instead of looking inert')
+  assert.equal(body.missedCount, 0)
+
+  const after = await callRoute(route, 'GET')
+  assert.equal(after.body.approvals.missedCount, 0)
+  assert.deepEqual(after.body.approvals.missed, [])
+  // The trail keeps the refusals AND the fact that a person cleared the view.
+  assert.deepEqual(audit.tail(1).map((row) => [row.kind, row.by]), [['approvals-cleared', 'page']])
+  assert.equal(audit.size, 3, 'two refusals plus the watermark: the trail lost nothing')
+  assert.deepEqual(audit.tail(3).filter((row) => row.kind === 'approval').map((row) => row.toolName), ['pwsh', 'write'])
+})
+
+test('approvals.clear is attributed like a decision, so an unattributed clear is not a person', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ru-audit-clear2-'))
+  const audit = new AuditLog({ env: { DSH_HOME: dir } })
+  audit.record({ kind: 'approval', by: 'timeout', toolName: 'write' })
+  const { route } = makeRoute({ audit })
+
+  // No `via` and no Origin: a script, and it must not be recorded as a human click. This is the
+  // same discriminator the decision buttons use, for the same reason (F19/F22).
+  await callRoute(route, 'POST', JSON.stringify({ action: 'approvals.clear' }))
+  assert.equal(audit.tail(1)[0].by, 'api')
+})
+
+test('a build with no audit trail refuses to clear rather than reporting a false success', async () => {
+  const route = makeSettingsRoute({ peers: new Map(), registry: makeRegistry([]), cache: { size: 0, misses: 0 } })
+  const { status, body } = await callRoute(route, 'POST', JSON.stringify({ action: 'approvals.clear', via: 'page' }))
+  assert.equal(status, 503)
+  assert.equal(body.ok, false)
+})
+
+// ---------------------------------------------------------------------------
+// bilingual copy
+//
+// The operator asked whether both languages are actually maintained. The mechanism (ctx.locale with
+// a zh and an en dictionary) was already in place, but "there is a second dictionary" is not the
+// claim worth testing -- "every key exists in both, with the same placeholders" is. A key present
+// only in `zh` renders as a raw key string the moment the UI is switched to English, which is how
+// a missing translation shows up in front of a user.
+// ---------------------------------------------------------------------------
+
+test('every user-facing string exists in BOTH languages, with matching placeholders', () => {
+  const { dictionaries } = loadClient()
+  assert.equal(dictionaries.length, 1, 'one namespace, registered once')
+  const [{ dicts }] = dictionaries
+  // The registration passes the languages BY NAME (`ctx.locale.register(NS, { zh, en })`), which is
+  // the documented shape; the keys are the language tags, not an ordered pair.
+  const { zh, en } = dicts
+  assert.ok(zh !== null && typeof zh === 'object', 'a zh dictionary')
+  assert.ok(en !== null && typeof en === 'object', 'an en dictionary')
+
+  const zk = Object.keys(zh).sort()
+  const ek = Object.keys(en).sort()
+  const missingInEn = zk.filter((key) => !(key in en))
+  const missingInZh = ek.filter((key) => !(key in zh))
+  assert.deepEqual(missingInEn, [], `keys with no English text: ${missingInEn.join(', ')}`)
+  assert.deepEqual(missingInZh, [], `keys with no Chinese text: ${missingInZh.join(', ')}`)
+
+  // A placeholder that exists in one language and not the other silently drops a value, or prints
+  // a literal `{p}` -- and it fails only in the language the developer is not reading.
+  const holes = (text) => [...String(text).matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort()
+  for (const key of zk) {
+    assert.deepEqual(holes(en[key]), holes(zh[key]), `placeholder mismatch in "${key}"`)
+  }
+
+  // No empty strings: `t()` would render a blank where a word belongs.
+  for (const key of zk) {
+    assert.notEqual(String(zh[key]).trim(), '', `empty Chinese text for "${key}"`)
+    assert.notEqual(String(en[key]).trim(), '', `empty English text for "${key}"`)
+  }
+})
+
+test('the two dictionaries are not the same language wearing two names', () => {
+  // A copy-paste that left the Chinese text in `en` would pass every parity check above and still
+  // show Chinese to an English reader, so the one property that catches it is asserted directly.
+  const { dictionaries } = loadClient()
+  const { zh, en } = dictionaries[0].dicts
+  const cjk = /[\u4e00-\u9fff]/
+  // Declared exceptions, not a tolerance: these carry no prose, so there is nothing to translate.
+  // `dshpair1.…` is the pairing-string FORMAT, and a localized copy of it would be a bug (it is
+  // pasted into a machine). Any new identical string has to be added here deliberately.
+  const LITERALS = new Set(['fieldPairingPlaceholder'])
+  const identical = Object.keys(zh).filter((key) => zh[key] === en[key] && !LITERALS.has(key))
+  assert.deepEqual(identical, [], `key(s) with identical text in both languages: ${identical.join(', ')}`)
+  for (const key of LITERALS) {
+    assert.ok(key in zh && key in en, `the declared literal "${key}" must still exist in both`)
+  }
+  assert.ok(Object.values(zh).filter((text) => cjk.test(String(text))).length > 50,
+    'the Chinese dictionary is genuinely Chinese')
+  assert.deepEqual(Object.entries(en).filter(([, text]) => cjk.test(String(text))).map(([key]) => key), [],
+    'no Chinese characters left in the English dictionary')
 })
 
 test('interrupt cancels every in-flight task and reports per-task failures', async () => {

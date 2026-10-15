@@ -34,6 +34,16 @@ const MEMORY_LIMIT = 200
  */
 const MISSED_BY = new Set(['timeout', 'disposed', 'no-answerer'])
 
+/**
+ * The row that moves the operator-facing view's starting point.
+ *
+ * WHY A WATERMARK AND NOT A DELETE: this file is the evidence trail for "who approved what".
+ * Erasing the misses would make the trail lie about what happened, and the operator's own request
+ * to clear a list is not a reason to destroy a record of an unattended refusal. Appending a row
+ * keeps both facts -- every miss, and the fact that the view was cleared, when, and by which route.
+ */
+const CLEARED_KIND = 'approvals-cleared'
+
 /** @param {Record<string, string | undefined>} [env] */
 export function auditPath(env = process.env) {
   return join(resolveDshHome(env), 'storages', 'dsh-plugin-remote-use', 'audit.jsonl')
@@ -54,7 +64,29 @@ export class AuditLog {
     /** @type {object[]} newest last */
     this.rows = []
     this.lastError = ''
+    /**
+     * WHERE THE VISIBLE VIEW STARTS: the index of the newest clear watermark in `rows`, or -1 when
+     * no clear has happened (everything visible).
+     *
+     * BY POSITION, NOT BY TIMESTAMP. The first implementation compared ISO timestamps, and the test
+     * for "a miss recorded after the clear is shown again" failed: `at` has millisecond resolution,
+     * so a row written in the same millisecond as the watermark compared as `<=` and vanished. Index
+     * order is the file's real order, exact at any speed.
+     */
+    this.clearedIndex = -1
+    /** The watermark's timestamp, for display only. */
+    this.clearedAt = ''
     this.#loadTail()
+  }
+
+  /** Point the view at whatever the newest watermark in memory says (-1 = none). */
+  #adoptWatermark() {
+    let index = -1
+    for (let i = this.rows.length - 1; i >= 0; i -= 1) {
+      if (this.rows[i]?.kind === CLEARED_KIND) { index = i; break }
+    }
+    this.clearedIndex = index
+    this.clearedAt = index === -1 || typeof this.rows[index]?.at !== 'string' ? '' : this.rows[index].at
   }
 
   /** Read recent rows so the page has history across a restart. */
@@ -73,6 +105,7 @@ export class AuditLog {
         } catch { /* a torn or partial line is skipped, never fatal */ }
       }
       if (this.rows.length > MEMORY_LIMIT) this.rows.splice(0, this.rows.length - MEMORY_LIMIT)
+      this.#adoptWatermark()
     } catch (error) {
       this.lastError = `could not read ${this.file}: ${error instanceof Error ? error.message : String(error)}`
       this.log('warn', this.lastError)
@@ -87,7 +120,14 @@ export class AuditLog {
   record(row) {
     const entry = { at: new Date(this.now()).toISOString(), ...row }
     this.rows.push(entry)
-    if (this.rows.length > MEMORY_LIMIT) this.rows.splice(0, this.rows.length - MEMORY_LIMIT)
+    if (this.rows.length > MEMORY_LIMIT) {
+      const dropped = this.rows.length - MEMORY_LIMIT
+      this.rows.splice(0, dropped)
+      // Keep the watermark pointing at its OWN row after a trim. Dropping the watermark's row means
+      // every row before it went too, so everything left is after the clear: -1 (all visible) is
+      // then the correct answer, not a stale index into a shifted array.
+      this.clearedIndex = Math.max(-1, this.clearedIndex - dropped)
+    }
     try {
       mkdirSync(dirname(this.file), { recursive: true })
       appendFileSync(this.file, `${JSON.stringify(entry)}\n`, 'utf8')
@@ -123,15 +163,39 @@ export class AuditLog {
     return this.missedAll().slice(0, Math.max(0, limit))
   }
 
-  /** Every miss still in memory, newest first. */
+  /** Every miss still in the operator-facing view, newest first. */
   missedAll() {
-    return this.rows
+    return this.#visible()
       .filter((row) => row?.kind === 'approval' && MISSED_BY.has(String(row.by ?? '')))
       .reverse()
   }
 
   get missedCount() {
-    return this.rows.reduce((n, row) => (row?.kind === 'approval' && MISSED_BY.has(String(row.by ?? '')) ? n + 1 : n), 0)
+    return this.#visible().reduce((n, row) => (row?.kind === 'approval' && MISSED_BY.has(String(row.by ?? '')) ? n + 1 : n), 0)
+  }
+
+  /**
+   * Rows at or after the last clear watermark -- what the operator-facing views show.
+   */
+  #visible() {
+    return this.rows.slice(this.clearedIndex + 1)
+  }
+
+  /**
+   * Move the view's starting point past everything recorded so far.
+   *
+   * NOTHING IS DELETED -- see `CLEARED_KIND`. The caller gets the number of misses the views will
+   * stop showing, so the page can say what it did instead of looking like it did nothing.
+   *
+   * @param {string} [by] provenance of the click ('page' for a person, 'api' otherwise)
+   * @returns {number} misses the views stop showing
+   */
+  clear(by = 'api') {
+    const cleared = this.missedCount
+    this.record({ kind: CLEARED_KIND, by })
+    this.clearedIndex = this.rows.length - 1
+    this.clearedAt = typeof this.rows[this.clearedIndex]?.at === 'string' ? this.rows[this.clearedIndex].at : ''
+    return cleared
   }
 
   get size() {

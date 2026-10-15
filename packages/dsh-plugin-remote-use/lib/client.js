@@ -124,7 +124,7 @@ window.__ModuleLoader__.load({
       approvalsNote: '审阅引擎无法自行裁定的请求会停在这里等待，而不是直接失败；超过下面的时限仍未处理则按拒绝处理 —— 所以"放行"永远是一个明确的动作。',
       approvalsBudget: '每个请求最多等待 {s} 秒',
       approvalsMissed: '有 {n} 件请求因无人应答被拒',
-      approvalsMissedNote: '这些请求等过、但没人来得及处理，于是按拒绝处理了。列在这里是为了让"错过"事后也看得见 —— 它们不会自己消失。',
+      approvalsMissedNote: '这些请求等过、但没人来得及处理，于是按拒绝处理了。列在这里是为了让"错过"事后也看得见 —— 要收起这个列表请用下面的清空；文件里的记录不会消失。',
       colSettled: '处理时间',
       // 工作现场里的三处审批面（会话头按钮 / 输入框上方 / 右侧面板）
       approvalsPanel: '审批',
@@ -138,6 +138,10 @@ window.__ModuleLoader__.load({
       approvalsPanelMissed: '无人应答而被拒（{n}）',
       approvalsPanelNoMissed: '没有错过的请求。',
       approvalsPanelAlso: '记录同时写在 {p}',
+      btnClearMissed: '清空错过记录',
+      btnClearing: '正在清空…',
+      clearedMissed: '已清空 {n} 件',
+      clearMissedNote: '只清空这里的显示；记录文件是追加写入的，原始条目仍在，并会多出一条「已清空」。',
       approvalsLeft: '剩 {s} 秒',
       approvalsPanelPendingTitle: '等你批准',
       approvalsPanelMissedTitle: '无人应答而被拒',
@@ -329,7 +333,7 @@ window.__ModuleLoader__.load({
       approvalsNote: 'The review engine refuses anything it cannot justify on its own. Those requests wait here instead of failing, until the budget expires \u2014 and expiry is a refusal, so allowing one is always an explicit act.',
       approvalsBudget: 'Each waits up to {s}s',
       approvalsMissed: '{n} request(s) were refused because nobody answered',
-      approvalsMissedNote: 'These waited and nobody got to them, so they were refused. They are listed here so a miss stays visible after the fact \u2014 they do not disappear on their own.',
+      approvalsMissedNote: 'These waited and nobody got to them, so they were refused. Listed so a miss stays visible after the fact; Clear below hides the list, and the record in the file stays.',
       colSettled: 'Settled',
       // The three approval surfaces that live where the work happens.
       approvalsPanel: 'Approvals',
@@ -343,6 +347,10 @@ window.__ModuleLoader__.load({
       approvalsPanelMissed: 'Refused because nobody answered ({n})',
       approvalsPanelNoMissed: 'Nothing was missed.',
       approvalsPanelAlso: 'The record is also written to {p}',
+      btnClearMissed: 'Clear missed',
+      btnClearing: 'Clearing\u2026',
+      clearedMissed: 'Cleared {n}',
+      clearMissedNote: 'Hides this list only. The file is append-only: the rows stay, and a "cleared" entry is added.',
       approvalsLeft: '{s}s left',
       approvalsPanelPendingTitle: 'Waiting for you',
       approvalsPanelMissedTitle: 'Refused unanswered',
@@ -474,7 +482,9 @@ window.__ModuleLoader__.load({
       // the ONE loud element on the thing that is actually blocking a worker. Every colour below is
       // a `--dsw-alias-*` token, so a skin swap restyles this with everything else, and a saturated
       // accent appears only while something waits.
-      '.ru-dock{display:flex;flex-direction:column;gap:8px;margin:8px 0 0}',
+      // The strip above the input bar: full width of the composer, so it is a column, and the only
+      // outer spacing it needs is a gap before the input box below it (F28).
+      '.ru-dock{display:flex;flex-direction:column;gap:8px;margin:0 0 8px}',
       '.ru-dock-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;padding:10px 12px 10px 15px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);animation:ru-in 140ms ease-out}',
       '.ru-dock-row::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--dsw-alias-state-business-primary)}',
       '.ru-dock-main{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}',
@@ -482,6 +492,7 @@ window.__ModuleLoader__.load({
       '.ru-dock-actions{grid-column:1 / -1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}',
       '.ru-tier{display:inline-flex;align-items:center;flex:0 0 auto;padding:1px 7px;border-radius:999px;font-size:11px;font-family:ui-monospace,Consolas,monospace;white-space:nowrap;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent);color:var(--dsw-alias-state-business-primary)}',
       '.ru-count{font-size:11px;font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-secondary)}',
+      '.ru-clear{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:8px 0 2px}',
       '.ru-tool{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);font-family:ui-monospace,Consolas,monospace}',
       '.ru-hdrbtn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer}',
       '.ru-hdrbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
@@ -1124,8 +1135,9 @@ window.__ModuleLoader__.load({
         }
       }, [call])
 
-      React.useEffect(() => { void refresh() }, [refresh])
+      const clearState = useClear(call, refresh)
 
+      React.useEffect(() => { void refresh() }, [refresh])
       // THE PAGE NEVER USED TO REFRESH ITSELF. Measured 2026-10-14: six approval requests expired
       // unanswered and the operator had never seen a prompt -- the snapshot was read on mount and
       // after their own actions, so a request that arrived while this page sat open stayed
@@ -1598,6 +1610,7 @@ window.__ModuleLoader__.load({
                       }, t('btnDeny')),
                       h('span', { className: 'ru-dim' }, `${t('colWaited')} ${Math.round(Number(row.ageMs ?? 0) / 1000)}s`)))
                 })),
+              missedCount === 0 ? null : clearControls(t, clearState),
               missedBlock)),
 
         h('div', { className: 'ru-group' },
@@ -1685,7 +1698,7 @@ window.__ModuleLoader__.load({
 
     /** The shared poller behind every approval surface. @param {{ get: Function }} io */
     function createApprovalFeed(io, intervalMs = 2500) {
-      let state = { ready: false, available: false, pending: [], missed: [], missedCount: 0, timeoutMs: 0, error: '' }
+      let state = { ready: false, available: false, pending: [], missed: [], missedCount: 0, timeoutMs: 0, auditPath: '', error: '' }
       const listeners = new Set()
       let timer
       const publish = () => { for (const listener of [...listeners]) listener(state) }
@@ -1700,6 +1713,10 @@ window.__ModuleLoader__.load({
             missed: Array.isArray(approvals.missed) ? approvals.missed : [],
             missedCount: Number(approvals.missedCount ?? 0),
             timeoutMs: Number(approvals.timeoutMs ?? 0),
+            // Read from the SAME snapshot the counts come from. The pane used to take this as an
+            // owner prop, and the framework never passed one, so "the record is also at <path>"
+            // was dead text on the one surface that shows it (F30).
+            auditPath: typeof data?.audit?.path === 'string' ? data.audit.path : '',
             error: '',
           }
         } catch (error) {
@@ -1730,10 +1747,21 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Read the feed as component state. */
-    function useApprovals(feed) {
+    /**
+     * Read the feed as component state.
+     *
+     * `enabled = false` releases the subscription instead of reading it, which matters because the
+     * feed's timer is refcounted: a pane body that is mounted but NOT visible (a background Session,
+     * or a collapsed column) would otherwise be the one subscriber holding a poll open for a surface
+     * nobody is looking at. The pane passes `tab.visible` here.
+     */
+    function useApprovals(feed, enabled = true) {
       const [state, setState] = React.useState(feed.current())
-      React.useEffect(() => feed.subscribe(setState), [feed])
+      React.useEffect(() => {
+        if (enabled === false) return undefined
+        setState(feed.current())
+        return feed.subscribe(setState)
+      }, [feed, enabled])
       return state
     }
 
@@ -1757,6 +1785,40 @@ window.__ModuleLoader__.load({
         }
       }, [feed, post])
       return { busyId, error, decide }
+    }
+
+    /**
+     * Clear the operator-facing record of missed requests.
+     *
+     * WHAT THIS DOES NOT DO, deliberately: delete rows from the trail. The file is append-only
+     * evidence, and the one thing an audit trail must never do is quietly lose the record of
+     * something that happened. Clearing appends a watermark row instead -- so the miss list resets
+     * to empty while the file keeps every row AND keeps the fact that the operator cleared the
+     * view, and by which route. Rows are never removed; only the view's starting point moves.
+     *
+     * @param {(action: string, payload?: object) => Promise<object>} post
+     * @param {() => Promise<unknown>} refresh re-read whatever snapshot this surface renders
+     */
+    function useClear(post, refresh) {
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState('')
+      const [done, setDone] = React.useState('')
+      const clear = React.useCallback(async () => {
+        setBusy(true)
+        setError('')
+        setDone('')
+        try {
+          // Same provenance claim as the decision buttons: this is a person pressing a button.
+          const data = await post('approvals.clear', { via: 'page' })
+          setDone(String(data?.cleared ?? 0))
+        } catch (failure) {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        } finally {
+          setBusy(false)
+          await refresh()
+        }
+      }, [post, refresh])
+      return { busy, error, done, clear }
     }
 
     /** The tier being ASKED for: the request first, the inferred minimum only as a fallback. */
@@ -1810,6 +1872,24 @@ window.__ModuleLoader__.load({
           onClick: () => void onDecide(id, 'deny'),
         }, t('btnDenyShort')),
       ]
+    }
+
+    /**
+     * The "clear the missed list" control, shared by the pane and the Settings page.
+     *
+     * The note is not decoration: without it the button reads as "delete the record", and the
+     * operator would reasonably expect the file to shrink. It does not -- see `useClear`.
+     */
+    function clearControls(t, clearState) {
+      const { busy, error, done, clear } = clearState
+      return h('div', { className: 'ru-clear' },
+        h('button', {
+          type: 'button', className: 'ru-btn', disabled: busy,
+          onClick: () => void clear(),
+        }, busy ? t('btnClearing') : t('btnClearMissed')),
+        h('span', { className: 'ru-note dim' }, t('clearMissedNote')),
+        done === '' ? null : h('span', { className: 'ru-note' }, fmt(t('clearedMissed'), { n: done })),
+        error === '' ? null : h('span', { className: 'ru-note warn' }, error))
     }
 
     /**
@@ -1880,11 +1960,29 @@ window.__ModuleLoader__.load({
       }, ...children)
     }
 
-    /** The right pane: what waits now, and what was missed before. */
+    /**
+     * The right pane: what waits now, and what was missed before.
+     *
+     * The body reads its own occurrence through the framework-injected `useTabInfo()` -- the
+     * documented face for a pane body, which delivers `{ sidebar, panel, tab }`. Only `tab.visible`
+     * is used here, and for a real reason: `tab.visible` is false for a background Session or a
+     * collapsed column, and the feed's poll is refcounted, so an invisible pane must not subscribe.
+     */
     function ApprovalsTab(props) {
-      const { t, feed, post, auditPath } = props
-      const state = useApprovals(feed)
+      const { t, feed, post, useTabInfo } = props
+      // The documented face for a pane body: it delivers `{ sidebar, panel, tab }`. REQUIRED, and a
+      // missing one is thrown rather than tolerated -- a shell that does not inject it cannot render
+      // this body, and the renderer's own entry boundary turns that into one dead pane instead of a
+      // dead application. Degrading silently here would be worse: the visibility gate below would
+      // stop working with nothing on screen to say so (F25).
+      if (typeof useTabInfo !== 'function') {
+        throw new Error('remote-use: the approvals pane body needs the framework-injected useTabInfo')
+      }
+      const { tab } = useTabInfo()
+      const visible = tab === undefined || tab.visible !== false
+      const state = useApprovals(feed, visible)
       const { busyId, error, decide } = useDecide(feed, post)
+      const clearState = useClear(post, feed.refresh)
       const pendingBlock = state.pending.length === 0
         ? h('p', { className: 'ru-empty' }, t('approvalsPanelEmpty'))
         : h('div', null, ...approvalRows({ t, pending: state.pending, busyId, onDecide: decide, timeoutMs: state.timeoutMs }))
@@ -1894,10 +1992,10 @@ window.__ModuleLoader__.load({
       const missedBlock = state.missed.length === 0
         ? h('p', { className: 'ru-empty' }, t('approvalsPanelNoMissed'))
         : h('div', null, ...missedRows)
-      const auditNote = auditPath === undefined || auditPath === ''
+      const auditNote = state.auditPath === ''
         ? null
-        : h('p', { className: 'ru-why', style: { paddingTop: '12px' } }, fmt(t('approvalsPanelAlso'), { p: String(auditPath) }))
-      return h('div', { className: 'ru-panel' },
+        : h('p', { className: 'ru-why', style: { paddingTop: '12px' } }, fmt(t('approvalsPanelAlso'), { p: String(state.auditPath) }))
+      return h('div', { className: 'ru-panel', 'data-ru-tab': tab?.id === undefined ? '' : String(tab.id) },
         h('div', { className: 'ru-panel-head' },
           h('h3', { className: 'ru-panel-title' }, t('approvalsPanelPendingTitle')),
           h('span', { className: 'ru-count' }, String(state.pending.length))),
@@ -1907,6 +2005,7 @@ window.__ModuleLoader__.load({
           h('h3', { className: 'ru-panel-title' }, t('approvalsPanelMissedTitle')),
           h('span', { className: 'ru-count' }, String(state.missedCount))),
         missedBlock,
+        state.missedCount === 0 ? null : clearControls(t, clearState),
         auditNote)
     }
 
@@ -1985,10 +2084,28 @@ window.__ModuleLoader__.load({
         })
       }
 
-      registerSlot('conversation.composer.dock', {
-        name: 'conversation.composer.dock',
+      // THE SEAT, and why it is this one (measured 2026-10-15, not guessed).
+      //
+      // `conversation.input.dock` is a `list` slot rendered as a FULL-WIDTH row directly above the
+      // input bar, and it is the seat DSH's own first-party strips use for exactly this shape:
+      // `todo` (order 0), `goal` (order 10), the queued-message dock `queue` (order 20). The input
+      // bar itself is the next sibling, so `order: 30` puts this strip immediately above it.
+      //
+      // The previous seat was `conversation.composer.dock`, which is NOT a strip position: it
+      // renders inside the composer's STATUS line, the same flex row as the context meter and the
+      // activity readout. A `list` entry there is one more inline item, so its position drifted with
+      // the row's width and it inherited the status line's typography -- the operator saw it sitting
+      // between "cache hit" and "context share", then saw its reason wrapped one word per line (F28).
+      //
+      // `conversation.composer` (the `chain` seat DSH's own approval prompt uses) was the other
+      // candidate and is WRONG here: its owner renders it with `overlay: true`, and an elected chain
+      // entry is drawn with the fallback set to `display: none` -- that fallback IS the composer bar,
+      // so electing there would hide the input box for as long as a remote request waits.
+      registerSlot('conversation.input.dock', {
+        name: 'conversation.input.dock',
         // A `list` slot is keyed by id; without one the real service throws (PITFALLS F24).
         id: 'remote-use-approvals',
+        order: 30,
         locale: NS,
       }, (props) => h(ApprovalsDock, { ...props, feed, post: postRoute }))
 
@@ -1996,52 +2113,28 @@ window.__ModuleLoader__.load({
         name: 'conversation.session.header.actions',
         id: 'remote-use-approvals',
         locale: NS,
-      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: () => openApprovalsPane(props?.sessionId) }))
+      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: () => openApprovalsPane() }))
 
       // The panel is optional on purpose. `sidebarRightTabs`/`sidebarRight` are first-party
       // services; on a shell that lacks them the dock and the header button still work, so a
       // missing pane must not take the rest of the plugin down with it. Neither is listed in
       // `inject`: requiring them would stop `apply` from running at all on such a shell.
       //
-      // `openResource` calls an internal `require()` that THROWS when the controller has no adopted
-      // session at the moment of the click -- which is why the first click on the header button did
-      // nothing at all, and logged nothing we could see. `openResourceIn(sessionId, …)` is the
-      // non-throwing path, and the header slot hands us the session id.
-      function openApprovalsPane(sessionId) {
+      // `openResource(address)` is the documented navigation controller -- "every way into the
+      // column calls one of them". It replaced `openResourceIn`, which the docs mark as NOT part of
+      // the public face (F27). The temporary probe that reported this click's internals to the audit
+      // trail has been removed now that the public path is confirmed working; the reasoning it
+      // produced is recorded in docs/PITFALLS.md rather than kept in the shipping path.
+      function openApprovalsPane() {
         const controller = ctx.get('sidebarRight')
-        const address = `${APPROVALS_RESOURCE}/current`
-        // MEASURE, DO NOT GUESS AGAIN. Two attempts at this call have failed in the real shell
-        // (`openResource`, then `openResourceIn`) while every unit test passed, and the browser
-        // console is not reachable from the master. So the handler now reports exactly what it saw:
-        // whether the service exists, which methods it has, what sessionId the slot handed us, and
-        // the error text if the call threw. The master reads it from the audit trail.
-        const report = {
-          source: 'header',
-          sessionId: sessionId === undefined || sessionId === null ? null : String(sessionId),
-          hasController: controller !== undefined && controller !== null,
-          controllerType: typeof controller,
-          methods: ['openResource', 'openResourceIn', 'openTab', 'openTabIn']
-            .filter((name) => typeof controller?.[name] === 'function'),
-          address,
-          used: 'none',
-          threw: '',
-        }
+        if (controller === undefined || controller === null) return
         try {
-          // THE PUBLIC CONTROLLER, per the docs: "`openResource(address, options?)` and
-          // `openTab(kind, options?)` are the navigation controller, and every way into the column
-          // calls one of them". `openResourceIn` is documented as NOT part of that face -- it is the
-          // Tab domain's internal path -- so the previous attempt used a private door (F27).
-          if (report.methods.includes('openResource')) {
-            controller.openResource(address)
-            report.used = 'openResource'
-          } else if (report.methods.includes('openResourceIn') && report.sessionId !== null && report.sessionId !== '') {
-            controller.openResourceIn(report.sessionId, address)
-            report.used = 'openResourceIn'
-          }
+          controller.openResource(`${APPROVALS_RESOURCE}/current`)
         } catch (error) {
-          report.threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+          // Reported, never swallowed: a silent no-op is what made the first failed click
+          // undiagnosable (F25).
+          console.warn('[remote-use] could not open the approvals pane:', error)
         }
-        try { void postRoute('diagnostics.paneProbe', { report }) } catch { /* the click must never fail on its own probe */ }
       }
       const sidebarRightTabs = ctx.get('sidebarRightTabs')
       if (sidebarRightTabs !== undefined) {

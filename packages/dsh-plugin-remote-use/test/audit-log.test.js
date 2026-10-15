@@ -157,3 +157,105 @@ test('a missing file is the normal starting state', () => {
     assert.deepEqual(log.tail(), [])
   })
 })
+
+// ---------------------------------------------------------------------------
+// clearing the missed list
+//
+// The operator asked for this because a count of past misses stayed on screen forever and read as
+// a live problem. The tempting implementation -- delete the rows -- turns the evidence trail into
+// something that can be made to say whatever the last person to click wanted, so the tests below
+// pin BOTH halves of the chosen design: the views reset, and the file does not lose anything.
+// ---------------------------------------------------------------------------
+
+test('clear() empties the miss views and REMOVES NOTHING from the trail', () => {
+  withHome((env, dir) => {
+    const log = new AuditLog({ env })
+    log.record({ ...ROW, by: 'timeout', n: 1 })
+    log.record({ ...ROW, by: 'page', n: 2, optionId: 'allow-once' })
+    log.record({ ...ROW, by: 'disposed', n: 3 })
+    assert.equal(log.missedCount, 2)
+
+    assert.equal(log.clear('page'), 2, 'the caller learns how many it stopped showing')
+    assert.deepEqual(log.missed(), [], 'the view is empty')
+    assert.equal(log.missedCount, 0)
+
+    // The half that matters most: every original row is still on disk, untouched.
+    const lines = readFileSync(join(dir, 'storages', 'dsh-plugin-remote-use', 'audit.jsonl'), 'utf8')
+      .split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
+    assert.deepEqual(lines.map((r) => r.n ?? null), [1, 2, 3, null], 'the three rows survive plus the watermark')
+    const watermark = lines[3]
+    assert.equal(watermark.kind, 'approvals-cleared')
+    assert.equal(watermark.by, 'page', 'the clear itself is attributed to whoever clicked')
+    assert.equal(log.tail(1)[0].kind, 'approvals-cleared', 'and it is visible in the raw trail view')
+  })
+})
+
+test('a miss that arrives AFTER the clear is shown again', () => {
+  // The watermark is a starting point, not a mute switch: the operator cleared what they had seen,
+  // and a request that expires next week is a new fact they must not be shielded from.
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    log.record({ ...ROW, by: 'timeout', n: 1 })
+    log.clear('api')
+    log.record({ ...ROW, by: 'timeout', n: 2 })
+    assert.deepEqual(log.missed().map((r) => r.n), [2])
+    assert.equal(log.missedCount, 1)
+  })
+})
+
+test('the cleared state survives a restart, so the count does not come back', () => {
+  // Without this the list would reappear on every DSH restart, which is exactly the "it never goes
+  // away" complaint the clear exists to answer.
+  withHome((env) => {
+    const first = new AuditLog({ env })
+    first.record({ ...ROW, by: 'timeout', n: 1 })
+    first.record({ ...ROW, by: 'timeout', n: 2 })
+    first.clear('page')
+
+    const reopened = new AuditLog({ env })
+    assert.equal(reopened.clearedAt, first.clearedAt, 'the watermark is read back from the file')
+    assert.equal(reopened.missedCount, 0)
+    assert.deepEqual(reopened.missed(), [])
+  })
+})
+
+test('clearing with nothing missed is harmless and still records the action', () => {
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    assert.equal(log.clear('page'), 0)
+    assert.equal(log.missedCount, 0)
+    assert.equal(log.size, 1)
+  })
+})
+
+test('clearing does not touch what was DECIDED, only what was missed', () => {
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    log.record({ ...ROW, by: 'page', n: 1, optionId: 'allow-once' })
+    log.record({ ...ROW, by: 'timeout', n: 2 })
+    assert.equal(log.clear('page'), 1)
+    assert.equal(log.missedCount, 0)
+    assert.equal(log.tail(2)[0].kind, 'approvals-cleared')
+    assert.equal(log.size, 3, 'a decided row and the cleared miss are both still in memory and on disk')
+  })
+})
+
+test('the watermark keeps pointing at its own row when the in-memory window is trimmed', () => {
+  // The watermark is an INDEX, so the bounded window's trim has to shift it. Getting this wrong is
+  // silent: the count would be taken from the wrong starting point and would drift as the window
+  // moved, which is worse than being obviously broken. 200 rows is MEMORY_LIMIT.
+  withHome((env) => {
+    const log = new AuditLog({ env })
+    for (let i = 0; i < 190; i += 1) log.record({ ...ROW, by: 'timeout', n: i })
+    assert.equal(log.missedCount, 190)
+    log.clear('page')
+    assert.equal(log.missedCount, 0)
+
+    // Push the watermark's own row out of the window, then add one fresh miss.
+    for (let i = 0; i < 260; i += 1) log.record({ ...ROW, by: 'api', n: 1000 + i })
+    assert.ok(log.size <= 200, 'the window stays bounded')
+    log.record({ ...ROW, by: 'timeout', n: 9999 })
+    assert.deepEqual(log.missed().map((r) => r.n), [9999], 'only the miss after the clear counts')
+    assert.equal(log.missedCount, 1)
+  })
+})

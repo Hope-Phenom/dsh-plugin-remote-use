@@ -1612,15 +1612,15 @@ export function makeSettingsRoute(deps) {
             return send(200, { ok: true, workerRole: armingStatus(), error: result?.ok === false ? String(result.error ?? '') : '' })
           }
 
-          case 'diagnostics.paneProbe': {
-            // TEMPORARY (0.2.8). The right-pane opener has failed twice on the real shell while the
-            // unit tests passed, and the master cannot reach the browser console -- so the click
-            // handler reports what it actually saw and this records it in the append-only trail,
-            // where the master can read it. An audit row, not a guess.
-            const report = body?.report !== null && typeof body?.report === 'object' ? body.report : {}
-            log.info(`pane probe: ${JSON.stringify(report).slice(0, 400)}`)
-            if (audit !== undefined) audit.record({ kind: 'pane-probe', ...report })
-            return send(200, { ok: true })
+          case 'approvals.clear': {
+            // Clearing the VIEW, never the trail: the audit file is append-only evidence, so this
+            // records a watermark row and the reads start after it. The trail therefore keeps every
+            // miss AND keeps the fact that somebody cleared the list -- which is itself worth
+            // auditing, because it is the one action that makes past refusals stop being visible.
+            if (audit === undefined) return send(503, { ok: false, error: 'this build has no audit trail' })
+            const cleared = audit.clear(requestProvenance(req, body))
+            log.info(`approval misses cleared from the page (${cleared})`)
+            return send(200, { ok: true, cleared, missedCount: audit.missedCount, at: audit.clearedAt })
           }
 
           case 'approvals.decide': {
