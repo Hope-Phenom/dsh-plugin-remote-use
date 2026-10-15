@@ -108,6 +108,13 @@ shows the **audit trail**, edits the delegation policy, and can **arm this machi
   not warned about
 - **Escalation is never auto-approved** — `needsHuman` / `danger-full-access` go to a human queue, and
   a timeout counts as a refusal
+- **The session's own sandbox level is a deployment setting, and it defaults to `danger-full-access`** —
+  set it on the machine acting as the worker (**Settings → Remote work nodes → the sandbox level for this
+  machine's remote sessions**), and it is written into the launch spec when the worker role is armed. It is
+  a deployment value, not a per-task negotiation, for a measured reason: a GUI process that cannot start
+  under a restricted token fails **silently** (the command returns success; only a desktop dialog is left),
+  so that failure can never reach the approval queue. Set `workspace-write` for a worker that only runs
+  confined work. The master sees the level the node actually reports.
 - **Credentials never reach the browser** — the page only ever gets a mask
 - The node must be **genuinely logged in to a desktop**: input injection does not work on a locked screen
 

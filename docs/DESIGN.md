@@ -1359,20 +1359,27 @@ per-call 审批已经够用。**不做**"逐节点档位开关 / 运行时下发
 - per-call 提权**养不活** GUI 进程（F33：放行一结束窗口就被回收），而 GUI 任务天然多步。
   所以对 GUI 工作，per-call 审批**不是"更细的授权"，而是一个用不上的机制**。
 
-**怎么设（DSH 自带的机制，零插件改动）**
+**怎么设：它是本机的一个设置项（0.2.15 起），不是一个要手改的文件**
 
-```powershell
-node slave/make-launch-spec.mjs --permission-mode danger-full-access --out agent-spec.json
-```
+设置页 →「审批与连接」→ **本机远程会话的沙箱档位**（`workerSessionMode`，**默认 `danger-full-access`**）。
+它在**布防**时写进启动规格，所以「要求的档位」与「写进规格的档位」出自同一个来源。改完对**下一次布防**
+生效；若要立刻生效，重新布防/重启本机 DSH 即可（**不需要重新配对**：凭据跨重启保留，
+`worker-arming.js:110,140`）。
 
-**一个命令行参数，加一处 profile 配套**（配套见下）：`make-launch-spec.mjs:30,61` 把它写进启动规格的
-`env.DSH_PERMISSION_MODE`，
-中继在 spawn 子 DSH 时合并 `LAUNCH.env`（`relay.mjs:593`），而 `dsh-base` 用这个变量决定
-**沙箱档位与审批策略**（`dsh-base/cordis.patch.yml:232,248`）。**中继本身一行都不用改。**
-新建会话会把该部署默认值钉进会话（`dsh-permission-presets/lib/index.js:377-383`）。
+**为什么不是"手改某个 spec 文件"**（这一条是实测教训，见 PITFALLS F38）：插件布防时写的是**一份临时规格**
+（`%TEMP%\dsh-plugin-remote-use\acp-spec-<pid>-<port>.json`，**每次布防重写**），而中继只在**启动时**读它
+一次。于是"我改的那个 spec 文件里写着全权"与"会话跑在 workspace-write"可以**同时为真**持续几小时，
+两边看起来都正常 —— 所以档位必须由**生成规格的那个程序**自己带上，而不是由人去改它生成的产物。
 
-这就是本节一度打算用"新 RPC + 主机侧设置项 + 审计 + 界面"去实现的东西 —— 而它其实是一个生成
-启动规格时的命令行参数。**在给一个能力造控制面板之前，先问它是不是一个部署常量。**
+**链路**（插件不改沙箱，只是把值送到位）：设置 → `resolveAcpLaunchSpec({ profile, permissionMode })`
+（`lib/index.js:344`，**这个参数在此之前从未被传过**）→ 规格的 `env.DSH_PERMISSION_MODE` → 中继 spawn 子
+DSH 时合并 `LAUNCH.env`（`relay.mjs`）→ `dsh-base` 用它决定**沙箱档位与审批策略**
+（`dsh-base/cordis.patch.yml:232,248`）。新建会话会把该部署默认值钉进会话
+（`dsh-permission-presets/lib/index.js:377-383`）。
+
+> **手工路径仍然存在，但它只适用于"自己手管中继"的部署**：`slave/make-launch-spec.mjs --permission-mode
+> <模式> --out agent-spec.json` 生成同一份规格，并把下面那道"档位 × profile"的门跑一遍。
+> **在插件布防的部署里不要用它** —— 那份规格会被临时规格覆盖，改了也不生效。
 
 **可选但推荐的配套：让 DSH 的组合保持自洽**
 
@@ -1442,6 +1449,19 @@ profile 里那一条要**镜像 `dsh-base` 自己的表达式**，而不是写�
 
 **它仍然是"部署值"，不是"运行时值"**：设置只在**布防/启动中继**时被读一次，改动对**下一次布防**生效。
 这也正是我们当初删掉"运行时授权"那条路之后，剩下唯一正确的落点。
+
+**✅ 2026-10-15 真机收官（0.2.15，两端均已安装并重启）**
+
+| 检查 | 结果 |
+|---|---|
+| 从机 agent 自报的运行档位 | `danger-full-access`（"does not restrict file modifications"） |
+| 主机侧看到的值 | 快照里 `sessionMode = danger-full-access`、`sessionModeFrom = spec` —— 档位**来自启动规格**，正是我们写进去的那份 |
+| GUI 程序 | `explorer.exe <目录>` → 出现**真实文件夹窗口** `InnoSetup-5.5.4 - 文件资源管理器`（类名 `CabinetWClass`） |
+| **调用结束后** | **窗口仍在**（主机侧数分钟后自行截图确认；F33 记录的"放行一结束窗口就被回收"**不再出现**） |
+
+这就是这一整条线的目标态：**GUI 工作真的在从机上跑起来了，而且不依赖任何逐次审批。**
+顺带验证了生效路径：重启从机 DSH 时，插件用**存下来的同一个 token** 恢复布防
+（`worker-arming.js:110,140`）→ 重新生成规格 → 新默认档位落进规格，**全程无需重新配对**。
 
 ### 8.7 数据不出局域网
 
