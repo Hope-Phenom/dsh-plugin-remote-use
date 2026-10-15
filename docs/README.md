@@ -8,7 +8,7 @@
 |---|---|---|
 | 装它、用它、排障 | [../README.md](../README.md) | 上手 |
 | 知道**为什么这么设计**、当时放弃了什么、哪一轮推翻了哪个结论 | [DESIGN.md](DESIGN.md) | ~4000 行，按轮次记录 |
-| 避开**已经踩过的坑**（每条都附当时的原始输出与**发现方式**） | [PITFALLS.md](PITFALLS.md) | ~3700 行，A–G 七类，69 条 |
+| 避开**已经踩过的坑**（每条都附当时的原始输出与**发现方式**） | [PITFALLS.md](PITFALLS.md) | ~3700 行，A–G 七类，70 条 |
 | 查**上游契约**：provider 接缝、ACP 用法、`ctx.tools.register` 的真实形状、Cordis 补丁语义 | [INTERFACES.md](INTERFACES.md) | 契约 |
 | 跑**测试**：单元 / 冒烟 / 真机，以及每条守卫的理由 | [TESTING.md](TESTING.md) | 操作 |
 | 看**当初的调研原文**（结论可能已被后续推翻） | [research/](research/) | 归档 |
