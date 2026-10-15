@@ -2007,15 +2007,34 @@ window.__ModuleLoader__.load({
       function openApprovalsPane(sessionId) {
         const controller = ctx.get('sidebarRight')
         const address = `${APPROVALS_RESOURCE}/current`
+        // MEASURE, DO NOT GUESS AGAIN. Two attempts at this call have failed in the real shell
+        // (`openResource`, then `openResourceIn`) while every unit test passed, and the browser
+        // console is not reachable from the master. So the handler now reports exactly what it saw:
+        // whether the service exists, which methods it has, what sessionId the slot handed us, and
+        // the error text if the call threw. The master reads it from the audit trail.
+        const report = {
+          source: 'header',
+          sessionId: sessionId === undefined || sessionId === null ? null : String(sessionId),
+          hasController: controller !== undefined && controller !== null,
+          controllerType: typeof controller,
+          methods: ['openResource', 'openResourceIn', 'openTab', 'openTabIn']
+            .filter((name) => typeof controller?.[name] === 'function'),
+          address,
+          used: 'none',
+          threw: '',
+        }
         try {
-          if (sessionId !== undefined && sessionId !== '' && typeof controller?.openResourceIn === 'function') {
-            controller.openResourceIn(sessionId, address)
-          } else {
-            controller?.openResource?.(address)
+          if (report.sessionId !== null && report.sessionId !== '' && report.methods.includes('openResourceIn')) {
+            controller.openResourceIn(report.sessionId, address)
+            report.used = 'openResourceIn'
+          } else if (report.methods.includes('openResource')) {
+            controller.openResource(address)
+            report.used = 'openResource'
           }
         } catch (error) {
-          console.warn('[remote-use] could not open the approvals pane:', error)
+          report.threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
         }
+        try { void postRoute('diagnostics.paneProbe', { report }) } catch { /* the click must never fail on its own probe */ }
       }
       const sidebarRightTabs = ctx.get('sidebarRightTabs')
       if (sidebarRightTabs !== undefined) {
