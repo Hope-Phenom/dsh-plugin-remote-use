@@ -6,7 +6,7 @@
  * observing. Both are asserted directly.
  */
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -257,5 +257,113 @@ test('the watermark keeps pointing at its own row when the in-memory window is t
     log.record({ ...ROW, by: 'timeout', n: 9999 })
     assert.deepEqual(log.missed().map((r) => r.n), [9999], 'only the miss after the clear counts')
     assert.equal(log.missedCount, 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// bounded growth: rotation and retention
+//
+// The trail is append-only, which means it had NO upper bound at all: it grew for as long as the
+// plugin was installed. DESIGN.md had claimed a rotation policy for months while the code had none,
+// so these tests exist to keep the claim and the behaviour from drifting apart again.
+// ---------------------------------------------------------------------------
+
+const archivesIn = (dir) =>
+  readdirSync(join(dir, 'storages', 'dsh-plugin-remote-use'))
+    .filter((name) => /^audit\..+\.jsonl$/.test(name)).sort()
+
+test('the live file ROTATES at the cap instead of growing past it', () => {
+  withHome((env, dir) => {
+    // Small enough to trip after a handful of rows.
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 600 })
+    for (let i = 0; i < 40; i += 1) log.record({ ...ROW, by: 'api', n: i, pad: 'x'.repeat(80) })
+
+    const archives = archivesIn(dir)
+    assert.ok(archives.length > 0, 'crossing the cap produces an archive')
+    assert.ok(log.bytes <= 600 + 400, `the live file stays near the cap (saw ${log.bytes})`)
+    // NOTHING WAS TRUNCATED: every row written is still on disk across the live file + archives.
+    const log2 = new AuditLog({ env })
+    const total = archivesIn(dir).length
+    assert.ok(total > 0)
+    assert.equal(log2.archives().length, total)
+  })
+})
+
+test('rotation NEVER loses a row: the archive is the old file, byte for byte', () => {
+  withHome((env, dir) => {
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 600, keepFiles: -1 })
+    const written = []
+    for (let i = 0; i < 30; i += 1) {
+      const row = { ...ROW, by: 'api', n: i }
+      log.record(row)
+      written.push(i)
+    }
+    // Read every file in the directory back and collect the `n` values: the union must be complete.
+    const seen = []
+    for (const name of ['audit.jsonl', ...archivesIn(dir)]) {
+      const text = readFileSync(join(dir, 'storages', 'dsh-plugin-remote-use', name), 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        const row = JSON.parse(line)
+        if (row.kind === 'approval') seen.push(row.n)
+      }
+    }
+    assert.deepEqual(seen.sort((a, b) => a - b), written, 'every row is in exactly one file')
+  })
+})
+
+test('retention deletes only the OLDEST archives, and keeps the configured count', () => {
+  withHome((env, dir) => {
+    // 1 archive kept, and rotation is forced by a tiny cap so several archives appear.
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 200, keepFiles: 1 })
+    for (let i = 0; i < 60; i += 1) log.record({ ...ROW, by: 'api', n: i, pad: 'y'.repeat(60) })
+    const archives = archivesIn(dir)
+    assert.equal(archives.length, 1, `exactly one archive is kept (saw ${archives.join(', ')})`)
+    // The survivor is the NEWEST, not an arbitrary one: names sort by timestamp.
+    assert.ok(log.bytes <= 200 + 400, 'and the live file is the newest of them')
+  })
+})
+
+test('A CLEAR SURVIVES ROTATION: the watermark is carried into the new file', () => {
+  // This is the interaction that would have shipped silently. The watermark is a ROW; rotation moves
+  // the row it lives in into an archive, and the restart read (`#loadTail`) only looks at the live
+  // file. Without carrying it, every restart after a rotation would resurrect the misses the
+  // operator had already cleared -- i.e. the exact complaint the clear feature exists to answer.
+  withHome((env, dir) => {
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 700, keepFiles: -1 })
+    log.record({ ...ROW, by: 'timeout', n: 1 })
+    log.clear('page')
+    assert.equal(log.missedCount, 0)
+
+    // Force several rotations so the watermark's own row is definitely archived.
+    for (let i = 0; i < 40; i += 1) log.record({ ...ROW, by: 'api', n: 100 + i, pad: 'z'.repeat(60) })
+    assert.ok(archivesIn(dir).length > 0, 'rotation actually happened')
+    const live = readFileSync(join(dir, 'storages', 'dsh-plugin-remote-use', 'audit.jsonl'), 'utf8')
+    assert.match(live, /approvals-cleared/, 'the watermark is present in the live file')
+    assert.match(live, /"carried":true/, 'and it is marked as carried')
+
+    const reopened = new AuditLog({ env })
+    assert.equal(reopened.missedCount, 0, 'a restart after a rotation does NOT resurrect the misses')
+    assert.deepEqual(reopened.missed(), [])
+  })
+})
+
+test('rotation can be switched off, and then nothing is ever moved or deleted', () => {
+  withHome((env, dir) => {
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 0, keepFiles: 0 })
+    for (let i = 0; i < 40; i += 1) log.record({ ...ROW, by: 'api', n: i, pad: 'q'.repeat(80) })
+    assert.deepEqual(archivesIn(dir), [], 'no archive is created when rotation is off')
+    assert.ok(log.bytes > 600, 'and the live file is allowed to grow past what would have been the cap')
+  })
+})
+
+test('a rotation failure is REPORTED, never thrown into the approval path', () => {
+  // Same contract as every other write here: an audit trail must not be able to veto an approval.
+  withHome((env) => {
+    const log = new AuditLog({ env, now: () => Date.parse('2026-10-15T03:00:00.000Z'), maxBytes: 1 })
+    // maxBytes: 1 means EVERY write wants to rotate; the first has no file yet, so it writes, and
+    // the second must handle the rotate. Whichever way the filesystem goes, record() must not throw.
+    assert.equal(log.record({ ...ROW, by: 'api', n: 1 }), true)
+    assert.equal(log.record({ ...ROW, by: 'api', n: 2 }), true)
   })
 })

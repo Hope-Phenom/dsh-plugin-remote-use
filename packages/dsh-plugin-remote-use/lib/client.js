@@ -112,6 +112,12 @@ window.__ModuleLoader__.load({
       fieldSessions: '本机会话状态',
       fieldKeepShots: '每个工作节点保留的截图数',
       fieldKeepShotsHint: '保留最新的若干张。全分辨率截图约 9.5 MB，这一项决定了长时间 GUI 验证会占用多少磁盘。填负数表示全部保留。',
+      fieldAuditMaxBytes: '审计文件轮转阈值（字节）',
+      fieldAuditMaxBytesHint: '审计是追加式文件，本身没有停止点。达到该大小就改名归档并另起一个，绝不截断正在写的文件。填 0 或负数表示不轮转（无限增长）。',
+      fieldAuditKeepFiles: '保留的审计归档数',
+      fieldAuditKeepFilesHint: '超出这个数量的最旧归档会被删除 —— 这是本项目里唯一会删掉审计记录的动作。填负数表示全部保留。',
+      auditUsage: '当前 {size}；单文件上限 {max}；保留归档 {keep} 个（现有 {n} 个）',
+      auditUnbounded: '不限',
       fieldPolicy: '委派策略文案',
       fieldPolicyHint: '在会话启用远程工作期间注入，用来告诉模型何时该把工作交给工作节点。清空表示不注入；无论哪种情况工具仍然受开关约束。',
       sessionsOn: '当前有 {n} 个会话启用了远程工作',
@@ -321,6 +327,12 @@ window.__ModuleLoader__.load({
       fieldSessions: 'Local sessions',
       fieldKeepShots: 'Screenshots kept per worker',
       fieldKeepShotsHint: 'Newest first. A full-resolution capture is roughly 9.5 MB, so this bounds what a long GUI run costs on disk. Negative keeps everything.',
+      fieldAuditMaxBytes: 'Audit rotation threshold (bytes)',
+      fieldAuditMaxBytesHint: 'The trail is append-only, so it has no stopping point of its own. At this size it is renamed to an archive and a fresh file starts -- the live file is never truncated. 0 or negative disables rotation (unbounded growth).',
+      fieldAuditKeepFiles: 'Audit archives kept',
+      fieldAuditKeepFilesHint: 'The oldest archives beyond this are deleted -- the only action in this project that removes audit records. Negative keeps every archive.',
+      auditUsage: 'Now {size}; {max} per file; keeping {keep} archive(s), {n} present',
+      auditUnbounded: 'unbounded',
       fieldPolicy: 'Delegation policy',
       fieldPolicyHint: 'Injected while a session has remote work switched on. It is what tells the model when to hand work to a worker. Clear it to inject nothing; the tools stay gated either way.',
       sessionsOn: '{n} session(s) have remote work on',
@@ -572,6 +584,23 @@ window.__ModuleLoader__.load({
       return String(template).replace(/\{(\w+)\}/g, (whole, key) => (
         Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : whole
       ))
+    }
+
+    /**
+     * A byte count a person can read at a glance.
+     *
+     * Binary units on purpose: the caps are configured in bytes and the comparison the operator is
+     * making is against those caps, so 8 MiB must not print as "8.4 MB" and look like it overran.
+     */
+    function formatBytes(value) {
+      const bytes = Number(value)
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0'
+      const units = ['B', 'KiB', 'MiB', 'GiB']
+      let n = bytes
+      let unit = 0
+      while (n >= 1024 && unit < units.length - 1) { n /= 1024; unit += 1 }
+      // One decimal only where it adds information: "0.4 KiB" is noise, "12.5 MiB" is not.
+      return `${unit === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)} ${units[unit]}`
     }
 
     /**
@@ -858,6 +887,8 @@ window.__ModuleLoader__.load({
         approvalTimeoutMs: settings.approvalTimeoutMs ?? 180000,
         heartbeatMs: settings.heartbeatMs ?? 15000,
         keepShots: settings.keepShots ?? 20,
+        auditMaxBytes: settings.auditMaxBytes ?? 8388608,
+        auditKeepFiles: settings.auditKeepFiles ?? 5,
         delegationPolicy: settings.delegationPolicy ?? '',
       })
       const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.value }))
@@ -881,6 +912,11 @@ window.__ModuleLoader__.load({
         // between a session-long GUI run costing hundreds of megabytes and costing a bounded
         // amount. Negative disables pruning, for an operator who archives them elsewhere.
         number('keepShots', 'fieldKeepShots', 'fieldKeepShotsHint', -1),
+        // The audit trail is append-only, so it has no natural stopping point: without a cap it
+        // grows for as long as the plugin is installed. These two are what bound it. Negative
+        // disables the bound, for an operator who archives the trail elsewhere.
+        number('auditMaxBytes', 'fieldAuditMaxBytes', 'fieldAuditMaxBytesHint', -1),
+        number('auditKeepFiles', 'fieldAuditKeepFiles', 'fieldAuditKeepFilesHint', -1),
         h('label', { className: 'ru-field' },
           h('span', { className: 'ru-field-label' }, t('fieldPolicy')),
           h('textarea', {
@@ -898,6 +934,8 @@ window.__ModuleLoader__.load({
               approvalTimeoutMs: Number(form.approvalTimeoutMs) || 180000,
               heartbeatMs: Number(form.heartbeatMs) || 0,
               keepShots: Number.isFinite(Number(form.keepShots)) ? Number(form.keepShots) : 20,
+              auditMaxBytes: Number.isFinite(Number(form.auditMaxBytes)) ? Number(form.auditMaxBytes) : 8388608,
+              auditKeepFiles: Number.isFinite(Number(form.auditKeepFiles)) ? Number(form.auditKeepFiles) : 5,
               // An empty string is a real choice -- it switches the injected prompt off while
               // leaving the tools gated -- so it is sent as-is rather than coerced.
               delegationPolicy: String(form.delegationPolicy),
@@ -1619,6 +1657,14 @@ window.__ModuleLoader__.load({
             ? h('p', { className: 'ru-note dim' }, t('auditNote', { p: '\u2014' }))
             : h('div', null,
               h('p', { className: 'ru-note dim' }, fmt(t('auditNote'), { p: String(audit.path ?? '') })),
+              // Where the trail stands against its cap. A limit the operator cannot see is
+              // indistinguishable from no limit, which is how this one went unnoticed for so long.
+              h('p', { className: 'ru-note dim' }, fmt(t('auditUsage'), {
+                size: formatBytes(audit.bytes),
+                max: Number(audit.maxBytes) > 0 ? formatBytes(audit.maxBytes) : t('auditUnbounded'),
+                keep: Number(audit.keepFiles) < 0 ? t('auditUnbounded') : String(audit.keepFiles ?? 0),
+                n: String(Array.isArray(audit.archives) ? audit.archives.length : 0),
+              })),
               audit.error === '' ? null : h('p', { className: 'ru-note warn' }, String(audit.error)),
               recentAudit.length === 0
                 ? h('p', { className: 'ru-note' }, t('auditNone'))

@@ -197,6 +197,19 @@ export const Config = Schema !== null
      */
     keepShots: Schema.number().default(20),
     /**
+     * Rotate the audit trail once the live file reaches this many bytes.
+     *
+     * The trail is append-only, so nothing stops it growing; without a cap it grows for as long as
+     * the plugin is installed. At the measured ~670 bytes a row this is years of ordinary use.
+     * Set 0 (or negative) to disable rotation and keep everything.
+     */
+    auditMaxBytes: Schema.number().default(8 * 1024 * 1024),
+    /**
+     * How many rotated audit files to keep beside the live one. The oldest beyond this is deleted.
+     * Negative keeps every archive (bounded growth is then the operator's business, not ours).
+     */
+    auditKeepFiles: Schema.number().default(5),
+    /**
      * The division-of-labour policy injected while a session has remote work switched on.
      * Empty string disables the injection entirely (the tools are still gated).
      */
@@ -215,6 +228,8 @@ export const Config = Schema !== null
     reportBudgetMs: 4_000,
     selfcheckBudgetMs: 25_000,
     keepShots: 20,
+    auditMaxBytes: 8 * 1024 * 1024,
+    auditKeepFiles: 5,
     delegationPolicy: DEFAULT_DELEGATION_POLICY,
     _defaults: WORKER_DEFAULTS,
   }
@@ -264,7 +279,13 @@ export function apply(ctx, config) {
    * afresh for each worker would not be a trail. Both outlive `reconfigure`, which only ever
    * diffs connections.
    */
-  const audit = new AuditLog({ log: (level, message) => log[level](message) })
+  const audit = new AuditLog({
+    log: (level, message) => log[level](message),
+    // Bounded on purpose: an append-only file has no natural stopping point, so an uncapped trail
+    // grows for as long as the plugin is installed (see `auditMaxBytes`).
+    maxBytes: cfg.auditMaxBytes,
+    keepFiles: cfg.auditKeepFiles,
+  })
   const queue = new ApprovalQueue({
     // Settle just before the bridge's own timeout, so the outcome the queue records is the
     // one the worker actually received. If the queue were the slower of the two, the bridge
@@ -813,6 +834,10 @@ export function normalizeConfig(config) {
     // NOT clamped at 0: a negative value is the documented way to disable pruning, and each
     // capture may free tens of megabytes.
     keepShots: Number.isFinite(config?.keepShots) ? Number(config.keepShots) : 20,
+    // Not clamped at 0 for the same reason as `keepShots`: 0 or negative is the documented way to
+    // say "do not rotate / keep every archive", which is a choice, not an invalid value.
+    auditMaxBytes: Number.isFinite(config?.auditMaxBytes) ? Number(config.auditMaxBytes) : 8 * 1024 * 1024,
+    auditKeepFiles: Number.isFinite(config?.auditKeepFiles) ? Number(config.auditKeepFiles) : 5,
     // `undefined` means "not configured" and takes the default; an explicit empty string is
     // the operator switching the injection OFF, which must survive. `??` would be wrong here
     // in the other direction; the check is deliberately about the type.
@@ -1309,6 +1334,8 @@ export function makeSettingsRoute(deps) {
       approvalTimeoutMs: settings.approvalTimeoutMs,
       heartbeatMs: settings.heartbeatMs,
       keepShots: settings.keepShots,
+      auditMaxBytes: settings.auditMaxBytes,
+      auditKeepFiles: settings.auditKeepFiles,
       // The delegation policy is editable from the page because getting the wording right is
       // an operator judgement rather than a code change: it is the text that tells the model
       // when to hand work to a worker at all. An empty string is a MEANINGFUL value (inject
@@ -1397,8 +1424,19 @@ export function makeSettingsRoute(deps) {
                 timeoutMs: queue.timeoutMs,
               },
           audit: audit === undefined
-            ? { available: false, path: '', error: '', recent: [] }
-            : { available: true, path: audit.file, error: audit.lastError, recent: audit.tail(20) },
+            ? { available: false, path: '', error: '', recent: [], bytes: 0, maxBytes: 0, keepFiles: 0, archives: [] }
+            // The caps travel with the snapshot so the page can SHOW that growth is bounded and
+            // where it stands. A limit nobody can see is indistinguishable from no limit.
+            : {
+                available: true,
+                path: audit.file,
+                error: audit.lastError,
+                recent: audit.tail(20),
+                bytes: audit.bytes,
+                maxBytes: audit.maxBytes,
+                keepFiles: audit.keepFiles,
+                archives: audit.archives(),
+              },
         }
       }
 
@@ -1567,6 +1605,8 @@ export function makeSettingsRoute(deps) {
             if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
             if (Number.isFinite(incoming.heartbeatMs)) next.heartbeatMs = Number(incoming.heartbeatMs)
             if (Number.isFinite(incoming.keepShots)) next.keepShots = Number(incoming.keepShots)
+            if (Number.isFinite(incoming.auditMaxBytes)) next.auditMaxBytes = Number(incoming.auditMaxBytes)
+            if (Number.isFinite(incoming.auditKeepFiles)) next.auditKeepFiles = Number(incoming.auditKeepFiles)
             // An empty string is a real choice here: it switches the prompt injection off while
             // leaving the tools gated. `??` would drop it, so the check is about the type.
             if (typeof incoming.delegationPolicy === 'string') next.delegationPolicy = incoming.delegationPolicy
