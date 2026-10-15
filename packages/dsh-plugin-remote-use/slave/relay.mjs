@@ -9,6 +9,11 @@
  *   ws client <--text frames (NDJSON)--> relay --+--> dsh-remote/*   (handled here)
  *                                                +--> everything else --> dsh --profile acp
  *
+ * The `dsh-remote/*` methods are `ping`, `selfcheck`, `pairing`, `screenshot` and `shotcache`.
+ * `shotcache` is the odd one out: it is the only method that both reports AND deletes (the
+ * worker's own captured PNGs), which is why its rules live in `prune-shots.mjs` with their own
+ * tests rather than inline here.
+ *
  * WHY THE RELAY OWNS SELF-CHECK: the readiness report has session-level checks
  * (`S7` unlocked, `S8` live input injection) that only mean anything in an
  * INTERACTIVE session -- in the services session `EnumDisplayDevices` returns nothing
@@ -24,7 +29,7 @@
  *   node relay.mjs --port 7331 --token <secret> --cmd-file <agent-spec.json>
  *                  [--selfcheck-script selfcheck.ps1] [--selfcheck-cache-ms 30000]
  *                  [--screenshot-script screenshot.ps1] [--shot-dir <dir>]
- *                  [--keep-shots <n>]
+ *                  [--keep-shots <n>] [--keep-shot-bytes <n>]
  *                  [--allow-no-auth] [--verbose]
  */
 import { spawn } from 'node:child_process'
@@ -36,7 +41,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 // Sibling file, not a package: it ships next to this one so a worker needs no install step.
-import { RELAY_SHOT_PATTERN, pruneShots } from './prune-shots.mjs'
+import { RELAY_SHOT_PATTERN, pruneShots, shotUsage } from './prune-shots.mjs'
 import { encodePairing } from './pairing.mjs'
 import { bestAddress } from './net-address.mjs'
 import { effectiveSessionMode } from './permission-pairing.mjs'
@@ -74,6 +79,18 @@ const SCREENSHOT_REPORT = join(dirname(SCREENSHOT_SCRIPT), 'screenshot-report.tx
  * host is the thing that went away. A negative value disables pruning.
  */
 const KEEP_SHOTS = Number(arg('keep-shots', '20'))
+
+/**
+ * Byte ceiling for those captures, enforced oldest-first after the count budget.
+ *
+ * WHY THIS EXISTS ON TOP OF THE COUNT: a count bounds FILES, not DISK. The same worker that
+ * reached 56.9 MB across six captures had a count budget of 20, which reads as "under control"
+ * while the directory it describes is 190 MB. 0 means "no byte budget", and that is the default
+ * deliberately: a relay upgraded by a master that knows nothing about this flag must keep
+ * behaving exactly as it did. A non-finite or negative value is also "no budget" -- never
+ * "delete everything" (see prune-shots.mjs).
+ */
+const KEEP_SHOT_BYTES = Number(arg('keep-shot-bytes', '0'))
 
 /**
  * The address to advertise in a pairing string.
@@ -286,7 +303,24 @@ async function handleLocalRpc(msg) {
 
   switch (msg.method) {
     case `${PLUGIN_PREFIX}ping`:
-      return reply({ pong: true, at: new Date().toISOString(), pid: process.pid })
+      // The heartbeat reply is deliberately I/O-free. The master pings every 15 s, and a
+      // directory scan on every one of those is pure waste -- the shot cache changes only when
+      // someone captures or cleans up. `cache: true` is the master saying it is about to draw
+      // or resize the cache, which is the only moment the scan buys anything.
+      return reply({
+        pong: true,
+        at: new Date().toISOString(),
+        pid: process.pid,
+        ...(msg.params?.cache === true
+          ? {
+              shotCache: {
+                ...shotUsage(SHOT_DIR, RELAY_SHOT_PATTERN),
+                keepShots: KEEP_SHOTS,
+                maxBytes: KEEP_SHOT_BYTES,
+              },
+            }
+          : {}),
+      })
 
     case `${PLUGIN_PREFIX}selfcheck`: {
       const maxAgeMs = Number.isFinite(msg.params?.maxAgeMs) ? Number(msg.params.maxAgeMs) : SELFCHECK_CACHE_MS
@@ -328,6 +362,58 @@ async function handleLocalRpc(msg) {
         })
       } catch (e) {
         return fail(-32603, `screenshot failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
+    case `${PLUGIN_PREFIX}shotcache`: {
+      // The master's view of -- and lever on -- this worker's screenshot cache. The numbers are a
+      // handful of integers and travel over the JSON-RPC channel the plugin already owns, so this
+      // needs no new endpoint and no second thing to keep authenticated.
+      try {
+        const params = msg.params ?? {}
+        // The ceiling travels WITH the call rather than being stored: the master is the side that
+        // knows the budget it wants now, and a relay that remembered the last one would keep
+        // enforcing a value an operator has already changed. Anything unusable falls back to the
+        // command line, so this also works against a worker started with the flag.
+        const maxBytes = Number.isFinite(params.maxBytes) ? Number(params.maxBytes) : KEEP_SHOT_BYTES
+        let usage
+        let pruned
+        if (params.clear === true) {
+          // "Enforce the budget" and "clear the cache" are two different operations and only the
+          // first is automatic. `maxBytes: 0` cannot express the second -- it means "no budget" --
+          // so clearing gets its own flag, and it wins if a caller sends both.
+          pruned = clearShots()
+        } else if (params.prune === true) {
+          pruned = pruneOldShots(maxBytes)
+        } else {
+          // Report only: nothing was asked for, so nothing was removed and `kept` describes what
+          // is on disk (a 0 there would read as "the cache is empty", the opposite of the case an
+          // operator opens this screen for). `overBudgetBytes` still tells the truth, which is
+          // what shows the master that a `prune: true` would reclaim something.
+          usage = shotUsage(SHOT_DIR, RELAY_SHOT_PATTERN)
+          pruned = {
+            removed: 0,
+            kept: usage.files,
+            freedBytes: 0,
+            overBudgetBytes: maxBytes > 0 ? Math.max(0, usage.bytes - maxBytes) : 0,
+          }
+        }
+        // Measured AFTER any deletion (or reused from the report-only branch above), so what comes
+        // back describes the state the master will actually find.
+        usage ??= shotUsage(SHOT_DIR, RELAY_SHOT_PATTERN)
+        return reply({
+          ok: true,
+          dir: SHOT_DIR,
+          files: usage.files,
+          bytes: usage.bytes,
+          newestAt: usage.newestAt,
+          oldestAt: usage.oldestAt,
+          keepShots: KEEP_SHOTS,
+          maxBytes,
+          pruned,
+        })
+      } catch (e) {
+        return fail(-32603, `shot cache failed: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
 
@@ -466,17 +552,37 @@ async function captureScreenshot() {
 }
 
 /**
- * Delete all but the newest `KEEP_SHOTS` captures this relay wrote.
+ * Delete captures this relay wrote until they fit the count and byte budgets.
  *
  * The rules live in `prune-shots.mjs`, which exists as its own file so they can be tested:
  * this relay is a long-lived script with no harness of its own. The `--shot-dir` is
  * configurable, so being explicit about which filenames may be deleted is what keeps a
  * mistyped path from becoming data loss.
  *
- * @returns {{removed: number, kept: number, freedBytes: number}}
+ * Both budgets are applied in one call, count first: the count is what the operator asked to
+ * keep, and the byte ceiling trims further into it only when it has to. The newest capture is
+ * never removed, even when it alone is over the ceiling, because the master is about to download
+ * exactly that file (see `captureScreenshot`).
+ *
+ * @param {number} [maxBytes] byte ceiling; <= 0 means only the count budget applies
+ * @returns {{removed: number, kept: number, freedBytes: number, overBudgetBytes: number}}
  */
-function pruneOldShots() {
-  return pruneShots(SHOT_DIR, KEEP_SHOTS, RELAY_SHOT_PATTERN)
+function pruneOldShots(maxBytes = KEEP_SHOT_BYTES) {
+  return pruneShots(SHOT_DIR, KEEP_SHOTS, RELAY_SHOT_PATTERN, { maxBytes })
+}
+
+/**
+ * Delete EVERY capture this relay wrote.
+ *
+ * This is the master's explicit "clear the cache" action: unlike `pruneOldShots` it keeps
+ * nothing, including the newest file. `keep: 0` is what the count pass calls "keep none", so the
+ * deletion goes through the one path that is already tested for pattern safety and for never
+ * throwing -- a second delete loop for the same job is how the two drift apart.
+ *
+ * @returns {{removed: number, kept: number, freedBytes: number, overBudgetBytes: number}}
+ */
+function clearShots() {
+  return pruneShots(SHOT_DIR, 0, RELAY_SHOT_PATTERN, {})
 }
 
 // ---------------------------------------------------------------------------

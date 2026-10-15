@@ -47,6 +47,15 @@ export class RelaySupervisor {
     // How many captures the worker keeps. Read at start time rather than captured once, so a
     // change on the settings page applies to the next arming instead of the next DSH restart.
     this.keepShots = deps.keepShots ?? (() => 20)
+    // The worker's byte ceiling for its own captures. 0 means no ceiling, which is the shipped
+    // default: the count above already bounds ordinary use, and a byte ceiling that appeared on
+    // upgrade would start deleting captures the operator never agreed to lose.
+    //
+    // This is the worker's DEFAULT, not the whole story: the page can tighten it live over the
+    // `dsh-remote/shotcache` RPC without re-arming. Passing it here anyway matters because the
+    // capture path prunes BEFORE each capture, so without a CLI default a worker whose master is
+    // offline would grow unbounded between the page's visits.
+    this.shotCacheBytes = deps.shotCacheBytes ?? (() => 0)
     // A per-installation directory under the OS temp root, NOT the package. A capture is a
     // transient full-resolution PNG that is pruned on a budget, so temp is where it belongs;
     // what matters is that it is outside the plugin.
@@ -121,6 +130,10 @@ export class RelaySupervisor {
       // every one of them, and the page's setting would only govern the HOST side -- the
       // larger of the two accumulations would be the one the operator could not control.
       '--keep-shots', String(this.keepShots()),
+      // The byte ceiling, beside the count. Both are passed because they bound different things:
+      // the count bounds how many captures exist, the byte budget bounds what they occupy, and a
+      // worker left running a long GUI loop needs the second one to stay inside a disk budget.
+      '--keep-shot-bytes', String(this.shotCacheBytes()),
       // Where the captures go. WITHOUT THIS the relay uses `join(HERE, 'shots')` -- HERE being the
       // relay script's own directory, i.e. the plugin's INSTALLATION. On a `link:` install that is
       // the operator's source checkout, and on a real install it is a directory the plugin has no

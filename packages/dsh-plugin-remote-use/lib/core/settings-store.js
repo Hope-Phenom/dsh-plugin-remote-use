@@ -36,6 +36,10 @@ export const MANAGED_KEYS = [
   // managed here would be dropped on the next read -- the quiet way a setting seems to work
   // once and then reverts.
   'keepShots',
+  // The byte ceiling that sits beside `keepShots`. Added here in the same change that added the
+  // control, because the note below records what happens when it is not: the key round-trips
+  // through disk and then reverts on the next read.
+  'shotCacheBytes',
   // Added with the audit-retention controls. These were LEFT OUT here when they shipped, so both
   // silently reverted: saved to disk, dropped by the merge, and shown as the default again on the
   // next read. Found 2026-10-15 while adding the third of them, by a guard that now checks the whole

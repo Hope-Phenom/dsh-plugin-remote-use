@@ -89,6 +89,11 @@ test('the worker keeps the same number of screenshots the page is set to', () =>
     const args = calls[0].args
     assert.equal(args.includes('--keep-shots'), true)
     assert.equal(args[args.indexOf('--keep-shots') + 1], '20', 'the default when nothing is configured')
+    // The byte ceiling ships as 0, and 0 must mean "no ceiling" on the worker exactly as it does
+    // on the host. If the relay ever read 0 as "keep nothing", this default would wipe a worker's
+    // cache on the first capture after an upgrade -- so the default is asserted, not assumed.
+    assert.equal(args.includes('--keep-shot-bytes'), true, 'the byte ceiling must reach the relay')
+    assert.equal(args[args.indexOf('--keep-shot-bytes') + 1], '0', 'the default is no byte ceiling')
   } finally {
     supervisor.stop()
     rmSync(dir, { recursive: true, force: true })
@@ -101,13 +106,18 @@ test('the retention is read when the listener starts, not when the supervisor wa
   const { supervisor, calls, dir } = makeSupervisor()
   let keep = 5
   supervisor.keepShots = () => keep
+  let cacheBytes = 1024 * 1024
+  supervisor.shotCacheBytes = () => cacheBytes
   try {
     supervisor.start('192.168.1.100', 7331, 'tok')
     assert.equal(calls[0].args[calls[0].args.indexOf('--keep-shots') + 1], '5')
+    assert.equal(calls[0].args[calls[0].args.indexOf('--keep-shot-bytes') + 1], String(1024 * 1024))
     supervisor.stop()
     keep = 2
+    cacheBytes = 0
     supervisor.start('192.168.1.100', 7331, 'tok')
     assert.equal(calls[1].args[calls[1].args.indexOf('--keep-shots') + 1], '2', 'the second arming must see the new value')
+    assert.equal(calls[1].args[calls[1].args.indexOf('--keep-shot-bytes') + 1], '0', 'and so must the byte ceiling')
   } finally {
     supervisor.stop()
     rmSync(dir, { recursive: true, force: true })

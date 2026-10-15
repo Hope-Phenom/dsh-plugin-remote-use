@@ -472,6 +472,75 @@ test('keepShots may be NEGATIVE, which is how an operator disables pruning', asy
   })
 })
 
+test('the page can read and write shotCacheBytes, and it survives the round trip', async () => {
+  // The byte ceiling sits beside `keepShots` as the other half of the disk bound, and it was added
+  // to FOUR places at once -- the schema, the save route, `MANAGED_KEYS` and `currentSettings()`. That
+  // is the shape that has silently reverted twice in this plugin's history (see the audit-retention
+  // note below): saving works, the value is written to disk, and the next read shows the default. The
+  // generic guard at the bottom of this file checks the whole exposed set; this pins the key itself so
+  // a failure names it, and the explicit `MANAGED_KEYS` assertion keeps that dependency visible.
+  assert.ok(MANAGED_KEYS.includes('shotCacheBytes'), 'an unmanaged key saves once and then reverts')
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const before = await get(h.routes[0])
+    assert.equal(typeof before.body.settings.shotCacheBytes, 'number', 'the page must be able to render it at all')
+
+    const saved = await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: 512 * 1024 * 1024 } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.shotCacheBytes, 512 * 1024 * 1024)
+
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.shotCacheBytes, 512 * 1024 * 1024, 'it must persist, not read back as the default')
+  })
+})
+
+test('shotCacheBytes of 0 means "no byte ceiling", and clearing it back to 0 must stick', async () => {
+  await withEnv(async () => {
+    const h = mountWithGate()
+    // Save a real ceiling FIRST. Setting 0 on a clean store would prove nothing: the shipped default
+    // is already 0, so a falsy check (`if (incoming.shotCacheBytes)`) would pass that version of the
+    // test and still be wrong. The regression being guarded is the transition BACK to 0, where a
+    // falsy guard keeps the old ceiling -- so the operator's "no limit" silently keeps pruning.
+    await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: 4096 } })
+    assert.equal((await get(h.routes[0])).body.settings.shotCacheBytes, 4096)
+
+    const saved = await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: 0 } })
+    assert.equal(saved.body.settings.shotCacheBytes, 0)
+    // Through the file, which is the only reason a page control exists.
+    assert.equal((await get(h.routes[0])).body.settings.shotCacheBytes, 0, '0 is a value, not "absent"')
+  })
+})
+
+test('a NEGATIVE shotCacheBytes survives, because it is the documented "no ceiling" spelling', async () => {
+  // `keepShots` reads negative as "disable pruning"; the byte budget reads 0 AND negative as "no
+  // byte budget" (see `pruneShots`). The value must round-trip as itself rather than being clamped:
+  // a store that rewrote -1 to 0 would look identical on the page while silently replacing what the
+  // operator typed, and the same clamp in the other direction would create a floor that deletes.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: -1 } })
+    assert.equal(saved.body.settings.shotCacheBytes, -1)
+    assert.equal((await get(h.routes[0])).body.settings.shotCacheBytes, -1)
+  })
+})
+
+test('a non-numeric shotCacheBytes is ignored, and does not corrupt the settings saved beside it', async () => {
+  // The route takes a raw NUMBER of bytes; the page parses `512MB` before it sends. A string that
+  // slips in must not reach the file as `NaN` and must not take the rest of the payload with it --
+  // the form saves several keys in one request, so dropping all of them would read as the page
+  // losing edits. The stored ceiling is left exactly as it was.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: 4096 } })
+
+    const saved = await post(h.routes[0], 'settings.save', { settings: { shotCacheBytes: '512MB', keepShots: 7 } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.keepShots, 7, 'the usable key beside it must still be applied')
+    assert.equal(saved.body.settings.shotCacheBytes, 4096, 'the unusable value must leave the stored one alone')
+    assert.equal((await get(h.routes[0])).body.settings.shotCacheBytes, 4096)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // the session mode this machine arms its own remote sessions with
 // ---------------------------------------------------------------------------

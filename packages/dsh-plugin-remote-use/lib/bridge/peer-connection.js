@@ -26,7 +26,7 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { DEFAULT_KEEP_SHOTS, pruneShots } from '../core/shot-gc.js'
+import { DEFAULT_KEEP_SHOTS, DEFAULT_SHOT_CACHE_BYTES, clearShots, pruneShots, scanShotUsage } from '../core/shot-gc.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -74,6 +74,7 @@ export class PeerConnection {
    * @param {string} [opts.httpBase]   relay HTTP origin, for binary endpoints
    * @param {string} [opts.token]      bearer for those endpoints
    * @param {string} [opts.shotDir]    where downloaded screenshots are written
+   * @param {number} [opts.shotCacheBytes] byte ceiling for those downloads; <= 0 disables it
    * @param {typeof fetch} [opts.fetchImpl]
    * @param {number} [opts.heartbeatMs] liveness probe interval; 0 disables it
    * @param {number} [opts.heartbeatTimeoutMs]
@@ -88,6 +89,14 @@ export class PeerConnection {
     this.shotDir = opts.shotDir ?? defaultShotDir()
     /** How many of this worker's screenshots to keep on disk. See core/shot-gc.js. */
     this.keepShots = Number.isFinite(opts.keepShots) ? Number(opts.keepShots) : DEFAULT_KEEP_SHOTS
+    /**
+     * Byte ceiling for this worker's HOST-side downloads. <= 0 (the default) means the count
+     * budget is the only bound, which is what an install upgrading into this feature expects: a
+     * byte budget that appeared on its own would start deleting captures nobody agreed to lose.
+     */
+    this.shotCacheBytes = Number.isFinite(opts.shotCacheBytes)
+      ? Number(opts.shotCacheBytes)
+      : DEFAULT_SHOT_CACHE_BYTES
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
     this.heartbeatMs = Number.isFinite(opts.heartbeatMs) ? Math.max(0, Number(opts.heartbeatMs)) : DEFAULT_HEARTBEAT_MS
     this.heartbeatTimeoutMs = Number.isFinite(opts.heartbeatTimeoutMs)
@@ -279,7 +288,7 @@ export class PeerConnection {
     // afternoon of GUI verification fills a disk. This runs AFTER the file is safely written
     // and never throws: failing to delete an older capture must not fail this one. The outcome
     // is reported so the page can show that space was reclaimed.
-    const pruned = pruneShots(this.shotDir, this.peerId, this.keepShots)
+    const pruned = pruneShots(this.shotDir, this.peerId, this.keepShots, { maxBytes: this.shotCacheBytes })
 
     const num = (name) => {
       const v = Number(res.headers.get(name))
@@ -296,6 +305,110 @@ export class PeerConnection {
       // Reported rather than silent: an operator who wonders where the disk went should be
       // able to see that the plugin is reclaiming its own files, and how many it kept.
       pruned,
+    }
+  }
+
+  /**
+   * What this worker's screenshots occupy on the HOST, plus what the budget says it should.
+   *
+   * Kept separate from the relay call below because the two answer different questions: this one
+   * describes the copies the page and the model actually read, and the relay's describes the
+   * copies sitting on the worker. Both are worth showing -- an operator clearing 218 MB of host
+   * cache and finding the worker still full would rightly call the button a lie.
+   *
+   * @param {{ maxBytes?: number }} [opts]
+   */
+  hostShotCache(opts = {}) {
+    const usage = scanShotUsage(this.shotDir, this.peerId)
+    return {
+      ...usage,
+      dir: this.shotDir,
+      keep: this.keepShots,
+      maxBytes: Number.isFinite(opts.maxBytes) ? Number(opts.maxBytes) : this.shotCacheBytes,
+    }
+  }
+
+  /** Apply the budgets now and report what was reclaimed. Never throws. */
+  pruneHostShotCache(opts = {}) {
+    const maxBytes = Number.isFinite(opts.maxBytes) ? Number(opts.maxBytes) : this.shotCacheBytes
+    const pruned = pruneShots(this.shotDir, this.peerId, this.keepShots, { maxBytes })
+    return { ...pruned, dir: this.shotDir, maxBytes }
+  }
+
+  /** Delete this worker's host-side downloads. Never throws. */
+  clearHostShotCache() {
+    const cleared = clearShots(this.shotDir, this.peerId)
+    return { ...cleared, dir: this.shotDir }
+  }
+
+  /**
+   * Whether the worker's relay can answer the cache RPC at all.
+   *
+   * WHY A GETTER RATHER THAN LETTING THE CALLER TEST THE METHOD: the same fact -- "this worker
+   * cannot report its cache" -- has to be read the same way by the page's snapshot and by the
+   * page's Clear button. When the two decided differently (the snapshot treated it as an optional
+   * capability and reported `null`, while the action path called the method blindly and turned the
+   * TypeError into a 502) a worker whose relay predates this feature looked healthy on load and
+   * broken when the operator clicked. One question, one answer.
+   *
+   * A relay that is older than this feature is a HEALTHY worker with a missing report, not a
+   * failure: the link works, the captures work, only the enquiry is unavailable.
+   */
+  get supportsWorkerShotCache() {
+    return this.connected && typeof this.bridge?.callPlugin === 'function'
+  }
+
+  /**
+   * Ask the worker what ITS screenshot directory occupies, and optionally make it clean up.
+   *
+   * WHY IT GOES OVER THE RELAY RATHER THAN HTTP: the numbers are a handful of integers and they
+   * ride the JSON-RPC channel the plugin already owns, so this needs no new endpoint, no new
+   * authorization path, and no second thing to keep authenticated.
+   *
+   * A worker running a relay older than this feature answers "unknown method" -- which is NOT an
+   * error worth showing as a failure, because the link is fine and only the report is missing.
+   * The two cases are distinguished by `supported`, so the page can say "the worker does not
+   * report its cache" instead of reddening a healthy card. `ensure()` is deliberately skipped for
+   * the report path by the caller so a page load never waits on a connect it did not need.
+   *
+   * @param {{ maxBytes?: number, prune?: boolean, clear?: boolean }} [opts]
+   * @returns {Promise<{ supported: boolean, error: string, files: number, bytes: number,
+   *                     newestAt: number, oldestAt: number, keep: number, maxBytes: number,
+   *                     dir: string, pruned: object | null }>}
+   */
+  async workerShotCache(opts = {}) {
+    const unsupported = {
+      supported: false, error: '', files: 0, bytes: 0, newestAt: 0, oldestAt: 0,
+      keep: 0, maxBytes: 0, dir: '', pruned: null,
+    }
+    if (!this.connected || typeof this.bridge?.callPlugin !== 'function') {
+      return { ...unsupported, error: 'not connected' }
+    }
+    const params = {}
+    if (Number.isFinite(opts.maxBytes)) params.maxBytes = Number(opts.maxBytes)
+    if (opts.prune === true) params.prune = true
+    if (opts.clear === true) params.clear = true
+    try {
+      const result = await this.bridge.callPlugin('dsh-remote/shotcache', params)
+      return {
+        supported: true,
+        error: '',
+        files: Number(result?.files ?? 0),
+        bytes: Number(result?.bytes ?? 0),
+        newestAt: Number(result?.newestAt ?? 0),
+        oldestAt: Number(result?.oldestAt ?? 0),
+        keep: Number(result?.keepShots ?? 0),
+        maxBytes: Number(result?.maxBytes ?? 0),
+        dir: String(result?.dir ?? ''),
+        pruned: result?.pruned ?? null,
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // -32601 is JSON-RPC "method not found": an older worker, not a broken one.
+      const unknownMethod = /-32601|unknown plugin method|method not found/i.test(message)
+      // An unknown method is a property of the worker, not of the link, so the link is kept.
+      if (!unknownMethod) await this.#invalidateIfTransportError(error)
+      return { ...unsupported, error: unknownMethod ? '' : message }
     }
   }
 

@@ -197,6 +197,21 @@ export const Config = Schema !== null
      */
     keepShots: Schema.number().default(20),
     /**
+     * Byte ceiling for the screenshots this HOST keeps per worker, and for the ones the worker
+     * keeps in its own shot directory.
+     *
+     * WHY A SECOND BUDGET: the count above bounds the NUMBER of captures, not the disk they take.
+     * Measured 2026-10-15: the host's screenshot directory had reached 218 MB over 30 captures
+     * while `keepShots` was 20 -- the setting looked like a disk bound and was not one. The
+     * operator's actual question is "how much space is this using", so the answer needs a byte
+     * number. Both budgets apply; whichever bites first wins.
+     *
+     * 0 (the default) means NO byte budget, deliberately: an install that upgrades into a byte
+     * ceiling would start deleting captures the operator never agreed to lose. Negative is
+     * treated the same as 0, so a typo can never widen deletion.
+     */
+    shotCacheBytes: Schema.number().default(0),
+    /**
      * The sandbox mode THIS machine's remote sessions run under, written into the launch spec when
      * the worker role is armed.
      *
@@ -245,6 +260,9 @@ export const Config = Schema !== null
     reportBudgetMs: 4_000,
     selfcheckBudgetMs: 25_000,
     keepShots: 20,
+    // No byte budget by default -- see the schema note: a ceiling that appeared on upgrade would
+    // delete captures nobody agreed to lose.
+    shotCacheBytes: 0,
     // The deployment default for a remote session, and the reason is in the schema above: the GUI
     // failure it prevents is silent, so it cannot be left to a per-call decision.
     workerSessionMode: 'danger-full-access',
@@ -341,6 +359,11 @@ export function apply(ctx, config) {
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
     // Read at start time, so a change on the settings page governs the next arming.
     keepShots: () => cfg.keepShots,
+    // The byte budget travels too, so the WORKER's own shot directory is bounded the same way the
+    // host's is. Without this the page's threshold would govern only the host's copies, and the
+    // larger accumulation -- the one on the worker, which nothing else ever swept -- would be the
+    // one the operator could not control. That asymmetry is exactly what the 218 MB incident was.
+    shotCacheBytes: () => cfg.shotCacheBytes,
     launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp', permissionMode: cfg.workerSessionMode }),
   })
   const arming = new WorkerArming({
@@ -405,6 +428,10 @@ export function apply(ctx, config) {
       // failing the next one. 0 disables probing.
       heartbeatMs: cfg.heartbeatMs,
       keepShots: cfg.keepShots,
+      // The host-side byte ceiling. Captured at construction like `keepShots`, which is why
+      // `policyStamp` includes it: a connection that kept the old ceiling would enforce a budget
+      // the page no longer shows.
+      shotCacheBytes: cfg.shotCacheBytes,
       createBridge: () => new AcpBridge({
         url: worker.url,
         token: worker.token,
@@ -591,6 +618,10 @@ export function apply(ctx, config) {
       approvalTimeoutMs: cfg.approvalTimeoutMs,
       heartbeatMs: cfg.heartbeatMs,
       keepShots: cfg.keepShots,
+      // Sits beside `keepShots` because they are the two halves of one bound. This is the line the
+      // generic guard exists for: it was briefly missing here while present in the schema, the save
+      // route and `publicSettings`, which is exactly the shape that saves correctly and reverts.
+      shotCacheBytes: cfg.shotCacheBytes,
       // MUST be listed here. A key the route can SAVE but this function omits is written to
       // disk and then read back as `undefined`, so the page shows the default again -- the
       // setting appears to work once and silently revert. Caught by the round-trip test.
@@ -616,7 +647,10 @@ export function apply(ctx, config) {
    * Omitting one here means the page accepts the edit and nothing happens until a restart.
    */
   function policyStamp(settings) {
-    return `${settings.requiredTier}|${settings.approvalTimeoutMs}|${settings.heartbeatMs}|${settings.keepShots}`
+    // `keepShots` and `shotCacheBytes` are in the stamp even though the page's threshold controls
+    // apply live: a rebuild is harmless here and it keeps "the page accepted the edit" and "the
+    // running connections agree" from being able to drift apart.
+    return `${settings.requiredTier}|${settings.approvalTimeoutMs}|${settings.heartbeatMs}|${settings.keepShots}|${settings.shotCacheBytes}`
   }
 
   /**
@@ -861,6 +895,10 @@ export function normalizeConfig(config) {
     // NOT clamped at 0: a negative value is the documented way to disable pruning, and each
     // capture may free tens of megabytes.
     keepShots: Number.isFinite(config?.keepShots) ? Number(config.keepShots) : 20,
+    // 0/negative is "no byte budget", the same documented direction as `keepShots`: the value is
+    // NOT clamped, because clamping a negative to 0 would silently create a floor that deletes
+    // everything down to nothing, which is the opposite of what a negative means everywhere else.
+    shotCacheBytes: Number.isFinite(config?.shotCacheBytes) ? Number(config.shotCacheBytes) : 0,
     // NOT validated here: an unknown mode must fail when the launch spec is BUILT, loudly, rather
     // than be coerced to a default here. Coercing is the dangerous direction -- the default is the
     // unrestricted mode, so a typo would silently grant the widest access instead of none.
@@ -1367,6 +1405,9 @@ export function makeSettingsRoute(deps) {
       approvalTimeoutMs: settings.approvalTimeoutMs,
       heartbeatMs: settings.heartbeatMs,
       keepShots: settings.keepShots,
+      // Shown next to `keepShots` so the page can render both halves of the bound. 0/negative
+      // means "no byte ceiling" and must reach the page as the number, not as `false`.
+      shotCacheBytes: settings.shotCacheBytes,
       // The mode this machine will arm its own remote sessions with. Shown on the page because
       // "which permission level is this worker actually deployed at" was, until now, answerable
       // only by reading a spec file that the running relay may never have read.
@@ -1405,6 +1446,29 @@ export function makeSettingsRoute(deps) {
       const snapshot = async () => {
         const workers = []
         for (const peer of peers.values()) {
+          // Started BEFORE the readiness probe, not after: the probe can spend seconds waiting on
+          // a slow worker, and the cache report is a local directory listing plus (at most) one
+          // small RPC. Overlapping them keeps a page load from paying for both in series.
+          //
+          // Wrapped in an async IIFE that resolves to null on ANY failure, rather than
+          // `method(...).catch(...)`: a connection that does not implement the method at all throws
+          // synchronously, before a `.catch` could ever be attached, and that synchronously-thrown
+          // TypeError used to abort the whole snapshot -- one worker without the capability took
+          // the entire page down. The capability is genuinely optional (a bridge stub, or a
+          // connection built before this feature existed), so it is treated as optional here.
+          //
+          // The capability is asked of the CONNECTION, the same way the `cache` action asks it, so
+          // the page cannot show a worker as unable to report and then let a button on that same
+          // card try anyway.
+          const workerCachePromise = (async () => {
+            try {
+              if (peer.connection?.supportsWorkerShotCache !== true) return null
+              return await peer.connection.workerShotCache({ maxBytes: Number(currentSettings().shotCacheBytes ?? 0) })
+            } catch {
+              return null
+            }
+          })()
+
           let report = null
           let error = ''
           try {
@@ -1430,6 +1494,19 @@ export function makeSettingsRoute(deps) {
             // "not connected" failure looks like a worker fault, which is how the missing
             // connect() stayed invisible until a real profile load.
             connection: peer.connection?.stats,
+            // Both halves of "where did the disk go". `hostCache` is a local scan and always
+            // available; `workerCache` needs the worker to be up AND running a relay that knows
+            // the `dsh-remote/shotcache` RPC, so it is reported as unavailable rather than as a
+            // zero -- a zero would read as "the worker holds nothing", which is the opposite of
+            // the case an operator needs to see when the worker is simply too old to say.
+            //
+            // Both are probed for the method rather than called blindly: this is a capability that
+            // a connection may genuinely lack (a stub, or one built before the feature), and an
+            // optional capability that throws when absent turns one worker into a broken page.
+            hostCache: typeof peer.connection?.hostShotCache === 'function'
+              ? peer.connection.hostShotCache()
+              : null,
+            workerCache: await workerCachePromise,
           })
         }
         return {
@@ -1541,6 +1618,73 @@ export function makeSettingsRoute(deps) {
             return send(200, { ok: true, peerId: peer.peerId, connected: peer.connection.connected })
           }
 
+          case 'cache': {
+            // Cache housekeeping for ONE worker, host side and worker side in one action, because
+            // the operator's mental model is "this worker's screenshots" rather than "a directory
+            // on this machine plus a directory on that machine". Reporting and acting are the same
+            // call: `scope` picks which side, `op` picks report/clear.
+            const peer = peerOr(body?.peerId)
+            if (peer === undefined) return
+            const scope = String(body?.scope ?? '') === 'worker' ? 'worker' : 'host'
+            // An explicit budget from the page wins; otherwise the saved setting.
+            //
+            // WHY `Number.isFinite` AND NOT A TRUTHINESS TEST: 0 is a MEANINGFUL budget -- it is
+            // how both the page and the CLI spell "no byte ceiling" -- so a truthiness check would
+            // turn "no ceiling" into "use the saved ceiling", and the operator could never clear a
+            // limit from the page. Note the flip side, deliberately accepted: `Number('')` and
+            // `Number(null)` are both 0, so a request carrying an empty value also means "no
+            // ceiling". The page never sends either (a blank field is sent as an explicit 0), and
+            // "no ceiling" is the safe reading of an empty value, so this is the intended
+            // behaviour rather than an accident to route around.
+            const requested = Number(body?.maxBytes)
+            const maxBytes = Number.isFinite(requested) ? requested : Number(currentSettings().shotCacheBytes ?? 0)
+            const clear = String(body?.op ?? '') === 'clear'
+
+            if (scope === 'host') {
+              const hostCache = clear
+                ? peer.connection.clearHostShotCache()
+                : peer.connection.pruneHostShotCache({ maxBytes })
+              return send(200, {
+                ok: true,
+                peerId: peer.peerId,
+                scope,
+                cleared: clear,
+                supported: true,
+                bytes: clear ? hostCache.bytes : peer.connection.hostShotCache({ maxBytes }).bytes,
+                result: hostCache,
+                hostCache: peer.connection.hostShotCache({ maxBytes }),
+              })
+            }
+
+            // Worker side. A worker whose relay predates this RPC answers `supported: false`
+            // rather than failing: the link is healthy and only the report is missing, so
+            // treating it as an error would send the operator to debug a working connection.
+            //
+            // The capability is asked of the CONNECTION rather than probed here, so this path and
+            // the GET snapshot cannot disagree about whether a given worker can report. Before
+            // that, the snapshot reported `null` for such a worker while this path called the
+            // method blindly, turned the TypeError into a 502, and made a healthy worker look
+            // broken the moment someone pressed Clear.
+            const workerCache = peer.connection.supportsWorkerShotCache === true
+              ? await peer.connection.workerShotCache({ maxBytes, prune: !clear, clear })
+              : { supported: false, error: '', files: 0, bytes: 0, newestAt: 0, oldestAt: 0, keep: 0, maxBytes, dir: '', pruned: null }
+            // The HOST half of this reply is always real: it is this machine's own directory, and it
+            // was just read. Only the WORKER half can be "cannot report", so the page is never told
+            // that this machine is unable to describe its own disk.
+            if (workerCache.supported !== true && workerCache.error !== '') {
+              return send(502, { ok: false, error: workerCache.error, peerId: peer.peerId, scope, supported: false })
+            }
+            return send(200, {
+              ok: true,
+              peerId: peer.peerId,
+              scope,
+              cleared: clear,
+              supported: true,
+              workerSupported: workerCache.supported,
+              workerCache,
+            })
+          }
+
           case 'interrupt': {
             // Emergency stop. `peerId` narrows it to one worker; omitting it stops every
             // in-flight task, which is the button a page needs when something has gone
@@ -1642,6 +1786,11 @@ export function makeSettingsRoute(deps) {
             if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
             if (Number.isFinite(incoming.heartbeatMs)) next.heartbeatMs = Number(incoming.heartbeatMs)
             if (Number.isFinite(incoming.keepShots)) next.keepShots = Number(incoming.keepShots)
+            // Accepted as a raw number of BYTES. The page parses `512MB`-style text before it
+            // sends, so an unusable string is refused at the field rather than silently becoming
+            // 0 here -- and 0 is a meaningful value ("no ceiling"), which is why it is not used
+            // as the error signal.
+            if (Number.isFinite(incoming.shotCacheBytes)) next.shotCacheBytes = Number(incoming.shotCacheBytes)
             // An unknown mode is accepted here and refused when the spec is built -- see the schema.
             if (typeof incoming.workerSessionMode === 'string' && incoming.workerSessionMode !== '') {
               next.workerSessionMode = incoming.workerSessionMode

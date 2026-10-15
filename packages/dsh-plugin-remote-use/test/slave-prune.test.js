@@ -69,7 +69,14 @@ test('a non-finite or negative budget disables pruning instead of wiping the dir
 })
 
 test('a missing directory is the first-run case, and an unusable call is a no-op', () => {
-  assert.deepEqual(pruneShots(join(tmpdir(), 'relay-shots-none-xyz'), 5, RELAY_SHOT_PATTERN), { removed: 0, kept: 0, freedBytes: 0 })
+  // Compared field by field rather than with a whole-object deepEqual: the return shape is allowed
+  // to grow (it grew `overBudgetBytes` when the byte ceiling landed), and an assertion that pins
+  // every key makes the shape, not the behaviour, the thing under test -- it once forced the
+  // production code to gate a field on `arguments.length` to stay green.
+  const missing = pruneShots(join(tmpdir(), 'relay-shots-none-xyz'), 5, RELAY_SHOT_PATTERN)
+  assert.equal(missing.removed, 0)
+  assert.equal(missing.kept, 0)
+  assert.equal(missing.freedBytes, 0)
   // A bad pattern must not fall back to deleting everything.
   withDir((dir) => {
     seed(dir, 3)

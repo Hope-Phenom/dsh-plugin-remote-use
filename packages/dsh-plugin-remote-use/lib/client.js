@@ -264,6 +264,27 @@ window.__ModuleLoader__.load({
       fieldReportBudgetHint: '页面加载时等待就绪报告的上限；超时则只显示连接状态。',
       groupSource: '配置来源',
       sourceText: '工作节点由本页管理并写入 {file}；该文件存在时，profile 补丁中的同名配置不再生效。',
+      // --- 截图缓存 ---
+      groupCache: '截图缓存',
+      cacheLimitText: '上限 {size}',
+      cacheNoLimit: '未设上限（仅受张数限制）',
+      labelCacheHost: '主机缓存',
+      labelCacheWorker: '从机缓存',
+      cacheNone: '暂无',
+      cacheUnsupported: '该从机的 relay 不支持缓存上报',
+      cacheUnreachable: '从机离线，无法读取',
+      cacheFiles: '{n} 张',
+      cacheOver: '超出 {size}',
+      fieldShotCache: '截图缓存上限',
+      fieldShotCacheHint: '留空或 0 表示不设上限。可写 512MB、1.5GB 或字节数。超限时自动删除最旧的；最新一张始终保留——主机正在读取的那张若被删掉，截图工具就会"报成功但没有文件"。',
+      btnCacheApply: '应用上限',
+      btnCacheClear: '清空缓存',
+      cacheSaveFailed: '上限无法识别：请填 512MB、1.5GB 这样的值，或 0 表示不设上限。',
+      cacheCleared: '已清空 {scope}：删除 {n} 个文件，释放 {size}',
+      cacheClearNothing: '{scope} 没有可清理的文件',
+      cachePruned: '{scope} 已按上限清理：删除 {n} 个，释放 {size}',
+      cacheWithinBudget: '{scope} 在限额内，无需清理',
+      cacheFilesCleared: '{n} 个文件',
     }
 
     const en = {
@@ -476,6 +497,27 @@ window.__ModuleLoader__.load({
       fieldReportBudgetHint: 'How long a page load waits for a readiness report before showing link state alone.',
       groupSource: 'Configuration source',
       sourceText: 'Workers are managed here and written to {file}. Once that file exists, same-named keys in the profile patch no longer apply.',
+      // --- screenshot cache ---
+      groupCache: 'Screenshot cache',
+      cacheLimitText: 'limit {size}',
+      cacheNoLimit: 'no byte limit (count only)',
+      labelCacheHost: 'Host cache',
+      labelCacheWorker: 'Worker cache',
+      cacheNone: 'nothing yet',
+      cacheUnsupported: 'this worker\'s relay does not report its cache',
+      cacheUnreachable: 'worker offline, cannot read',
+      cacheFiles: '{n} file(s)',
+      cacheOver: 'over by {size}',
+      fieldShotCache: 'Screenshot cache limit',
+      fieldShotCacheHint: 'Blank or 0 means no limit. Accepts 512MB, 1.5GB, or a byte count. Past the limit the oldest are deleted automatically; the newest is always kept \u2014 deleting the capture the host is reading would leave the screenshot tool reporting success with no file to show.',
+      btnCacheApply: 'Apply limit',
+      btnCacheClear: 'Clear cache',
+      cacheSaveFailed: 'That limit is not readable \u2014 use a value like 512MB, 1.5GB, or 0 for no limit.',
+      cacheCleared: 'Cleared {scope}: {n} file(s), {size} freed',
+      cacheClearNothing: '{scope} had nothing to clear',
+      cachePruned: '{scope} pruned to the limit: {n} file(s), {size} freed',
+      cacheWithinBudget: '{scope} is within the limit; nothing to prune',
+      cacheFilesCleared: '{n} file(s)',
     }
 
     const CSS = [
@@ -593,6 +635,13 @@ window.__ModuleLoader__.load({
       '.ru-textarea{font-family:ui-monospace,Consolas,monospace;line-height:1.5;resize:vertical}',
       '.ru-input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color);outline-offset:1px}',
       '.ru-source{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6;word-break:break-all}',
+      // The screenshot-cache block on a worker card. A separate bordered area rather than more
+      // rows in the card's key/value grid: those rows describe the LINK, and mixing "is it
+      // reachable" with "how much disk is it using" made the cache numbers read as status.
+      '.ru-cache{margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-secondary);border-radius:6px}',
+      '.ru-cache-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}',
+      '.ru-cache-side{display:flex;flex-direction:column;gap:1px}',
+      '.ru-cache-side .ru-k{font-size:11px}',
     ].join('')
 
     /** Fill `{name}` placeholders. Kept local so the page does not depend on a t() option API. */
@@ -679,7 +728,151 @@ window.__ModuleLoader__.load({
       return 'unchecked'
     }
 
+    /**
+     * Render a byte budget for the input field: whole MB when it lines up, bare bytes otherwise.
+     *
+     * WHY NOT ALWAYS BYTES: the field is a human's, and `2147483648` is not a number anyone
+     * reasons about. WHY NOT ALWAYS MB: a budget of 0 (no ceiling) and a budget of 500 KB (an
+     * odd but legal value, e.g. set for a test) must not both render as `0 MB`.
+     */
+    function budgetText(bytes) {
+      const n = Math.floor(Number(bytes))
+      if (!Number.isFinite(n) || n <= 0) return '0'
+      return n % (1024 * 1024) === 0 ? `${n / (1024 * 1024)}MB` : String(n)
+    }
+
+    /**
+     * Parse the operator's budget text into bytes. Accepts `512MB`, `1.5 GB`, `2048`, `0`.
+     * @returns {number | undefined} undefined for anything unusable, so the field can refuse
+     *   rather than silently applying a guess -- an off-by-a-million typo here either deletes
+     *   nothing or deletes everything, and both look like the control being broken.
+     */
+    function parseBudgetText(text) {
+      if (typeof text === 'number') return Number.isFinite(text) ? Math.floor(text) : undefined
+      if (typeof text !== 'string') return undefined
+      const raw = text.trim()
+      if (raw === '') return undefined
+      const m = /^(-?\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/i.exec(raw)
+      if (m === null) return undefined
+      const value = Number(m[1])
+      if (!Number.isFinite(value)) return undefined
+      const unit = (m[2] ?? '').toLowerCase()
+      const scale = unit === '' || unit === 'b' ? 1 : unit === 'kb' ? 1024 : unit === 'mb' ? 1024 * 1024 : 1024 * 1024 * 1024
+      return Math.floor(value * scale)
+    }
+
     const TERMINAL_STATES = ['completed', 'error', 'aborted', 'cancelled']
+
+    /**
+     * One worker's screenshot cache: what it occupies on each side, and the controls.
+     *
+     * WHY IT LIVES ON THE WORKER CARD rather than in the global settings: the accumulation is
+     * PER WORKER on both sides -- the host keeps one directory of `<peerId>-<stamp>.png` per
+     * worker, and each worker keeps its own -- so a single global "clear cache" button could not
+     * say which worker it would empty. The threshold itself is global (one setting governs every
+     * worker), which is why the input writes through to the settings route rather than being a
+     * per-worker value; that split is stated in the hint so the control is not a surprise.
+     *
+     * BOTH SIDES ARE SHOWN because the operator's question is "where did my disk go", and either
+     * side could be the answer. Showing only the host's would have made the 218 MB incident look
+     * like a worker problem, and showing only the worker's would have hidden the larger half.
+     */
+    function CachePanel(props) {
+      const { t, row, maxBytes, onCache } = props
+      const host = row.hostCache ?? null
+      const worker = row.workerCache ?? null
+      const [budget, setBudget] = React.useState(budgetText(maxBytes))
+      const [busy, setBusy] = React.useState('')
+      const [msg, setMsg] = React.useState('')
+
+      // Follow the saved setting when it changes underneath us -- e.g. another tab saves, or the
+      // snapshot lands after the first render. Without this the field would keep showing the
+      // value the page first painted, and the next Apply would write that stale one back.
+      React.useEffect(() => { setBudget(budgetText(maxBytes)) }, [maxBytes])
+
+      const run = async (scope, op) => {
+        const parsed = parseBudgetText(budget)
+        // A blank field means "no limit", which is a real choice and not an error. Anything else
+        // that does not parse is refused here, at the field, rather than being sent as a guess.
+        const chosen = budget.trim() === '' ? 0 : parsed
+        if (chosen === undefined) {
+          setMsg(t('cacheSaveFailed'))
+          return
+        }
+        setBusy(`${scope}:${op}`)
+        setMsg('')
+        try {
+          // `maxBytes` doubles as "save this budget": the host writes it to the settings file when
+          // it differs, so Apply and Clear are the same call with a different `op`.
+          const data = await onCache(scope, op, chosen)
+          setMsg(String(data?.message ?? ''))
+        } catch (error) {
+          setMsg(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const side = (labelKey, info, unsupportedKey) => {
+        const known = info !== null && info !== undefined
+        const bytes = Number(info?.bytes ?? 0)
+        const files = Number(info?.files ?? 0)
+        const over = Number(info?.overBudgetBytes ?? 0)
+        const detail = !known
+          ? t(unsupportedKey)
+          : `${formatBytes(bytes)} \u00b7 ${fmt(t('cacheFiles'), { n: files })}${over > 0 ? ` \u00b7 ${fmt(t('cacheOver'), { size: formatBytes(over) })}` : ''}`
+        return h('div', { className: 'ru-cache-side', key: labelKey },
+          h('span', { className: 'ru-k' }, t(labelKey)),
+          h('span', {
+            className: `ru-v${!known || over > 0 ? ' ru-dim' : ''}`,
+            // The worker's own directory is shown with its full path in the title: two machines
+            // both have a "shots" directory, and the path is what tells them apart.
+          }, detail),
+          known && info.dir !== undefined && info.dir !== '' ? h('span', { className: 'ru-note dim' }, String(info.dir)) : null)
+      }
+
+      return h('div', { className: 'ru-cache' },
+        h('div', { className: 'ru-cache-head' },
+          h('span', { className: 'ru-name' }, t('groupCache')),
+          h('span', {
+            className: 'ru-note',
+          }, maxBytes > 0 ? fmt(t('cacheLimitText'), { size: formatBytes(maxBytes) }) : t('cacheNoLimit'))),
+        h('div', { className: 'ru-kv' },
+          side('labelCacheHost', host, 'cacheNone'),
+          side('labelCacheWorker', worker?.supported === true ? worker : null,
+            worker !== null && worker !== undefined && worker.error !== '' ? 'cacheUnreachable' : 'cacheUnsupported')),
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldShotCache')),
+          h('input', {
+            className: 'ru-input',
+            type: 'text',
+            value: budget,
+            placeholder: '512MB',
+            onChange: (event) => setBudget(event.target.value),
+          }),
+          h('span', { className: 'ru-field-hint' }, t('fieldShotCacheHint'))),
+        h('div', { className: 'ru-actions' },
+          h('button', {
+            type: 'button', className: 'ru-btn', disabled: busy !== '',
+            onClick: () => void run('host', 'prune'),
+          }, busy === 'host:prune' ? t('busy') : fmt(t('btnCacheApply'), { scope: t('labelCacheHost') })),
+          h('button', {
+            type: 'button', className: 'ru-btn', disabled: busy !== '',
+            onClick: () => void run('host', 'clear'),
+          }, busy === 'host:clear' ? t('busy') : fmt(t('btnCacheClear'), { scope: t('labelCacheHost') })),
+          // The worker buttons are offered even when the relay cannot report: a relay that cannot
+          // report also cannot prune, so the buttons would fail -- but they fail with a message
+          // that says so, which is more useful than a disabled button with no explanation.
+          h('button', {
+            type: 'button', className: 'ru-btn', disabled: busy !== '',
+            onClick: () => void run('worker', 'prune'),
+          }, busy === 'worker:prune' ? t('busy') : fmt(t('btnCacheApply'), { scope: t('labelCacheWorker') })),
+          h('button', {
+            type: 'button', className: 'ru-btn danger', disabled: busy !== '',
+            onClick: () => void run('worker', 'clear'),
+          }, busy === 'worker:clear' ? t('busy') : fmt(t('btnCacheClear'), { scope: t('labelCacheWorker') }))),
+        msg === '' ? null : h('p', { className: 'ru-note' }, msg))
+    }
 
     /**
      * How often the settings page re-reads the snapshot while it is visible.
@@ -692,7 +885,7 @@ window.__ModuleLoader__.load({
     const APPROVAL_POLL_MS = 2500
 
     function WorkerCard(props) {
-      const { t, row, busy, onAction, onEdit, onDelete } = props
+      const { t, row, busy, onAction, onEdit, onDelete, onCache, cacheMaxBytes } = props
       const [showChecks, setShowChecks] = React.useState(false)
       const report = row.report
       const conn = row.connection
@@ -780,6 +973,9 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ru-card' },
         h('div', { className: 'ru-card-head' }, head),
         h('div', { className: 'ru-kv' }, kv),
+        // The cache block sits directly under the facts about the worker and above the check
+        // table: it is about this worker, and the check table is the long, rarely-needed part.
+        h(CachePanel, { t, row, maxBytes: cacheMaxBytes, onCache }),
         // A missing report is stated as its own fact. The previous revision let it fall
         // through to a generic empty state, which reads as "nothing here" rather than
         // "the probe did not complete".
@@ -1420,7 +1616,49 @@ window.__ModuleLoader__.load({
         }
       }, [call, refresh, t])
 
-      const onStopAll = React.useCallback(async () => {        setBusy('stop')
+      /**
+       * Cache housekeeping for one worker, and the one place the cached byte budget can be set.
+       *
+       * WHY THIS WRITES THE SETTING FROM A PER-WORKER BUTTON: the threshold is global (one value
+       * governs every worker, on both the host and the worker side) while the buttons are per
+       * worker, because that is where the usage is shown. So an Apply from any card writes the
+       * shared setting -- and the page says so in the field hint rather than leaving the operator
+       * to discover that setting a limit on one worker changed all of them.
+       *
+       * The save is sent only when the value actually changed: an Apply that re-sends the same
+       * number would rewrite the settings file and, worse, trip the policy stamp that rebuilds
+       * every worker on every card.
+       */
+      const onCache = React.useCallback(async (peerId, scope, op, maxBytes) => {
+        const saved = Number(snapshot?.settings?.shotCacheBytes ?? 0)
+        const body = { peerId, scope, op, maxBytes }
+        const data = await call('cache', body)
+        let message = ''
+        const written = Number.isFinite(data?.result?.removed) ? Number(data.result.removed) : 0
+        const freed = formatBytes(Number(data?.result?.freedBytes ?? 0))
+        const sideName = scope === 'worker' ? t('labelCacheWorker') : t('labelCacheHost')
+        if (op === 'clear') {
+          message = written === 0
+            ? fmt(t('cacheClearNothing'), { scope: sideName })
+            : fmt(t('cacheCleared'), { scope: sideName, n: written, size: freed })
+        } else if (data?.supported === false) {
+          message = t('cacheUnsupported')
+        } else if (written === 0) {
+          message = fmt(t('cacheWithinBudget'), { scope: sideName })
+        } else {
+          message = fmt(t('cachePruned'), { scope: sideName, n: written, size: freed })
+        }
+        // Persist the threshold when it is new. This reuses the settings route so the value lands
+        // in the same file, with the same precedence, as every other setting.
+        if (maxBytes !== saved) {
+          await call('settings.save', { settings: { shotCacheBytes: maxBytes } })
+        }
+        await refresh()
+        return { ...data, message }
+      }, [call, refresh, snapshot, t])
+
+      const onStopAll = React.useCallback(async () => {
+        setBusy('stop')
         setStatus({ kind: 'idle', text: '' })
         try {
           const data = await call('interrupt', {})
@@ -1558,6 +1796,10 @@ window.__ModuleLoader__.load({
                   isNew: false,
                 }),
                 onDelete: (r) => void deleteWorker(r),
+                onCache: (scope, op, maxBytes) => onCache(row.peerId, scope, op, maxBytes),
+                // The saved ceiling, so the field opens on what is actually in force rather than
+                // on the schema default. The snapshot's settings block is the post-merge truth.
+                cacheMaxBytes: Number(snapshot?.settings?.shotCacheBytes ?? 0),
               }))),
 
           // The add/edit form sits with the list it edits, so there is no second place to

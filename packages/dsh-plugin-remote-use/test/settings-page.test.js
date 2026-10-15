@@ -1151,6 +1151,17 @@ function makeTranslator() {
       auditBy: 'AUDIT-BY-{by}', auditByHuman: 'AUDIT-BY-HUMAN',
       auditByEngine: 'AUDIT-BY-ENGINE', auditByTimeout: 'AUDIT-BY-TIMEOUT',
       auditByDisposed: 'AUDIT-BY-DISPOSED', auditByPage: 'AUDIT-BY-PAGE', auditByApi: 'AUDIT-BY-API',
+      // The screenshot-cache block on a worker card. The scope is substituted into the button
+      // labels, which is how the tests find the four buttons without depending on their order.
+      groupCache: 'GROUP-CACHE', cacheLimitText: 'LIMIT {size}', cacheNoLimit: 'NO-LIMIT',
+      labelCacheHost: 'HOST', labelCacheWorker: 'WORKER', cacheNone: 'CACHE-NONE',
+      cacheUnsupported: 'CACHE-UNSUPPORTED', cacheUnreachable: 'CACHE-UNREACHABLE',
+      cacheFiles: 'FILES-{n}', cacheOver: 'OVER-{size}', fieldShotCache: 'F-SHOT-CACHE',
+      fieldShotCacheHint: 'F-SHOT-CACHE-HINT', btnCacheApply: 'CACHE-APPLY-{scope}',
+      btnCacheClear: 'CACHE-CLEAR-{scope}', cacheSaveFailed: 'CACHE-SAVE-FAILED',
+      cacheCleared: 'CACHE-CLEARED-{scope}-{n}-{size}', cacheClearNothing: 'CACHE-CLEAR-NOTHING-{scope}',
+      cachePruned: 'CACHE-PRUNED-{scope}-{n}-{size}', cacheWithinBudget: 'CACHE-WITHIN-{scope}',
+      cacheFilesCleared: 'CACHE-FILES-{n}',
     }
     const template = table[key] ?? key
     return values === undefined ? template : String(template).replace(/\{(\w+)\}/g, (w, k) => (k in values ? values[k] : w))
@@ -1408,6 +1419,354 @@ test('Edit still opens a usable form when the worker is missing from the configu
 })
 
 // ---------------------------------------------------------------------------
+// the screenshot-cache control on the worker card
+//
+// WHY THIS IS DRIVEN RATHER THAN READ: `budgetText` and `parseBudgetText` are closure-local, so the
+// only way to reach them is the control the operator uses -- which is also the only way to know the
+// control is wired to them. It matters because those two functions decide what a DESTRUCTIVE button
+// applies: a parse that reads 512 MB as 512 bytes deletes nothing, and one that reads a gap as a
+// number deletes the lot, and both look like the button being broken.
+//
+// The React stub does not re-render, so a keystroke is applied the way the stub models state: the
+// setter records the value and the test re-renders with that value as the seed. `renderEditing`
+// already uses the seeding half of this; the recording half is what makes a typed value reachable.
+// ---------------------------------------------------------------------------
+
+/** The cache field's input, found by the placeholder the field ships with. */
+function findCacheInput(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const child of node) findCacheInput(child, out); return out }
+  if (node.type === 'input' && node.props?.placeholder === '512MB') out.push(node)
+  if (Array.isArray(node.children)) for (const child of node.children) findCacheInput(child, out)
+  return out
+}
+
+/** One worker row as the route produces it, with both cache halves. */
+function cacheRow(overrides = {}) {
+  return {
+    peerId: 'w1',
+    name: 'w1',
+    cwd: 'C:\\work',
+    error: '',
+    activeTasks: 0,
+    report: { worker: 'W1', sessionSegment: 'ok', verdict: 'ready', blockingFailures: 0, warnings: 0, unchecked: 0, checks: [] },
+    connection: { connected: true, connects: 1 },
+    hostCache: null,
+    workerCache: null,
+    ...overrides,
+  }
+}
+
+/**
+ * Render the section with one worker and, optionally, a value typed into the cache field.
+ * `settings.shotCacheBytes` is the SAVED ceiling the field opens on -- the post-merge truth.
+ */
+function renderCache({ shotCacheBytes = 0, budget = undefined, row = {} } = {}) {
+  const { registered, react } = loadClient()
+  const Section = sectionOf(registered).component
+  const snapshot = {
+    ok: true,
+    workers: [cacheRow(row)],
+    tasks: [],
+    settingsFile: 'C:\\dsh\\settings.json',
+    settings: {
+      workers: [], requiredTier: 'workspace-write', approvalTimeoutMs: 90000, heartbeatMs: 15000,
+      keepShots: 20, shotCacheBytes, sessionsEnabled: 0, enableCommand: '/remote-use on',
+    },
+  }
+  const render = () => {
+    react.__state.index = 0
+    react.__state.kinds = []
+    react.__state.seeds[0] = snapshot
+    return expand(Section({ t: makeTranslator() }), react)
+  }
+  let tree = render()
+  if (budget !== undefined) {
+    const [input] = findCacheInput(tree)
+    assert.ok(input !== undefined, 'the cache field must render, or the typed value is never covered')
+    input.props.onChange({ target: { value: budget } })
+    // Which hook index is the field's own state: the setter that recorded this exact text.
+    const index = react.__state.calls.findIndex((calls) => Array.isArray(calls) && calls.includes(budget))
+    assert.ok(index >= 0, 'the field did not record the typed value, so this harness is out of step with it')
+    react.__state.seeds[index] = budget
+    tree = render()
+  }
+  return { tree, react }
+}
+
+/** Record every request the page makes, and answer each one with `reply`. */
+function captureFetch(reply = () => ({ ok: true, result: { removed: 0, freedBytes: 0 }, supported: true })) {
+  const calls = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init = {}) => {
+    const entry = {
+      url: String(url),
+      method: String(init.method ?? 'GET'),
+      body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+    }
+    calls.push(entry)
+    return { status: 200, ok: true, json: async () => reply(entry) }
+  }
+  return {
+    calls,
+    posts: () => calls.filter((call) => call.method === 'POST').map((call) => call.body),
+    restore: () => { globalThis.fetch = real },
+  }
+}
+
+/** Fire a button and let its async chain settle. Microtasks drain at every macrotask boundary. */
+async function clickAndSettle(handler) {
+  handler()
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
+/** Click one cache button by its translated label and return the recorded POST bodies. */
+async function applyCache(tree, label) {
+  const [button] = findButton(tree, label)
+  assert.ok(button !== undefined, `the card must render a "${label}" button`)
+  const fetch = captureFetch()
+  try {
+    await clickAndSettle(button.props.onClick)
+  } finally {
+    fetch.restore()
+  }
+  return fetch.posts()
+}
+
+test('the worker card renders the screenshot-cache field and BOTH halves of the usage', () => {
+  const { tree } = renderCache({
+    shotCacheBytes: 512 * 1024 * 1024,
+    row: {
+      hostCache: {
+        files: 2, bytes: 20 * 1024 * 1024, newestAt: 5, oldestAt: 1, error: '',
+        dir: 'C:\\Temp\\dsh-remote-screenshots', keep: 20, maxBytes: 512 * 1024 * 1024,
+      },
+      workerCache: {
+        supported: true, error: '', files: 1, bytes: 9_500_000, newestAt: 9, oldestAt: 9,
+        keep: 20, maxBytes: 512 * 1024 * 1024, dir: 'C:\\work\\.dsh-shots', pruned: null,
+      },
+    },
+  })
+
+  const text = textOf(tree).join(' ')
+  assert.match(text, /F-SHOT-CACHE/, 'the threshold field must be on the card')
+  assert.match(text, /F-SHOT-CACHE-HINT/, 'the field must say what it does')
+  assert.match(text, /HOST/)
+  assert.match(text, /WORKER/)
+  // Both halves in units a person reads. Either side can be the larger one, which is why showing
+  // only one of them would have made the 218 MB incident look like the other machine's problem.
+  // Binary units (`MiB`) on purpose: the number is compared against a byte cap, so 20 MiB must not
+  // print as "21 MB" and look like it overran.
+  assert.match(text, /20\.0 MiB/)
+  assert.match(text, /9\.1 MiB/)
+  assert.match(text, /LIMIT 512 MiB/)
+
+  const [input] = findCacheInput(tree)
+  assert.ok(input !== undefined)
+  // A whole-MB budget opens as MB: `536870912` is not a number an operator reasons about.
+  assert.equal(input.props.value, '512MB')
+})
+
+test('the host-cache line shows the seeded byte figure and the file count', () => {
+  // The operator opens this panel to answer "where did the disk go", so the numbers ARE the feature.
+  // A line that renders "0" from a populated cache, or swaps the figure for the count, would leave
+  // them unable to tell a full cache from an empty one.
+  const { tree } = renderCache({
+    row: {
+      hostCache: {
+        files: 2, bytes: 2097152, newestAt: 5, oldestAt: 1, error: '',
+        dir: 'C:\\Temp\\dsh-remote-screenshots', keep: 20, maxBytes: 0,
+      },
+    },
+  })
+  const text = textOf(tree).join(' ')
+
+  // Binary units, because the figure is compared against a byte cap: 2 MiB must not print as 2.1 MB.
+  assert.match(text, /2\.0 MiB/)
+  // The translator in this harness renders markers, so the COUNT is asserted as its marker and the
+  // real sentence is checked against the shipped dictionary -- the two cannot drift apart unnoticed.
+  assert.match(text, /FILES-2/, 'the file count must be shown beside the bytes')
+  const { dictionaries } = loadClient()
+  assert.equal(dictionaries[0].dicts.en.cacheFiles, '{n} file(s)')
+  // The directory is named too: two machines both have a shots folder, and the path is what tells
+  // the host's copy from the worker's.
+  assert.match(text, /C:\\Temp\\dsh-remote-screenshots/)
+  // A zero ceiling must read as "no byte limit", not as the number 0.
+  assert.match(text, /NO-LIMIT/)
+})
+
+test('a worker whose relay cannot report its cache reads as "not reported", NOT as a failure', () => {
+  // A worker running a relay older than this feature is HEALTHY: the link is up and the agent may be
+  // mid-task. Only the report is missing. Rendering that as a fault sends the operator to debug a
+  // working connection -- and rendering it by calling a method that does not exist would throw and
+  // blank the page, which is the failure this whole optional-capability path exists to avoid.
+  for (const workerCache of [null, undefined, { supported: false, error: '' }]) {
+    const { tree } = renderCache({ row: { workerCache } })
+    const text = textOf(tree).join(' ')
+    assert.match(text, /CACHE-UNSUPPORTED/,
+      `workerCache=${JSON.stringify(workerCache)} must say the cache is not reported`)
+    // The rest of the card must still be there: the row is a healthy worker with one missing fact.
+    assert.match(text, /w1/, 'the card must still render the worker itself')
+    // The HOST side is always knowable -- it is a local directory scan -- so an empty host cache is
+    // "nothing yet" rather than "not reported". Collapsing the two would make the page say a worker
+    // cannot report when the truth is that this machine has taken no screenshots.
+    assert.match(text, /CACHE-NONE/)
+  }
+  const { dictionaries } = loadClient()
+  assert.match(dictionaries[0].dicts.en.cacheUnsupported, /does not report its cache/)
+
+  // The other missing-report case is a worker that is simply OFFLINE: the connection says so, and
+  // "cannot read it right now" is a different sentence from "this relay cannot report it".
+  const offline = textOf(renderCache({ row: { workerCache: { supported: false, error: 'not connected' } } }).tree).join(' ')
+  assert.match(offline, /CACHE-UNREACHABLE/)
+})
+
+/**
+ * Pull ONE closure-local function out of the shipped bundle source and make it callable.
+ *
+ * WHY BOTH THIS AND THE CLICK PATH BELOW: the click tests prove the WIRING (the field's text
+ * reaches the request as bytes) but they can only observe one number at a time and a refusal is
+ * silent there. This exercises the two functions directly for the units, the odd values and the
+ * refusal cases, with the failing value named in the message. They are pure and closure-free, so
+ * the extraction is not a stand-in for the code: the shipped text is what runs, and a rename or a
+ * reshape fails the assertion loudly rather than silently passing.
+ */
+function clientFunction(name, params) {
+  const source = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
+  const match = new RegExp(`function ${name}\\(${params}\\) \\{([\\s\\S]*?)\\n    \\}`, 'u').exec(source)
+  assert.ok(match !== null, `lib/client.js must still define function ${name}(${params})`)
+  // eslint-disable-next-line no-new-func -- a pure, closure-free function exercised in isolation
+  return new Function(...params.split(',').map((part) => part.trim()), match[1])
+}
+
+test('the budget parser and renderer produce the right bytes for the units an operator types', () => {
+  const parseBudgetText = clientFunction('parseBudgetText', 'text')
+  const budgetText = clientFunction('budgetText', 'bytes')
+
+  // Binary megabytes, and a bare number is BYTES -- the field says so, and 512 typed without a unit
+  // must not be read as 512 MB: that is the off-by-a-million typo that deletes everything.
+  assert.equal(parseBudgetText('512MB'), 536870912)
+  assert.equal(parseBudgetText('1.5GB'), 1610612736)
+  assert.equal(parseBudgetText('256 mb'), 268435456)
+  assert.equal(parseBudgetText('2048'), 2048)
+  // 0 is a MEANINGFUL value ("no ceiling"). It must parse as 0 and never as `undefined`, or the
+  // field would refuse the operator's way of switching the ceiling off.
+  assert.equal(parseBudgetText('0'), 0)
+  assert.equal(parseBudgetText('-1'), -1)
+  // Unusable input must be distinguishable from 0, which is why the answer is `undefined`: the
+  // field refuses it, while a 0 that reached the route would read as "no limit" and delete nothing.
+  for (const bad of ['', '   ', 'lots', '12XB', 'MB', '1.2.3', null, undefined, {}]) {
+    assert.equal(parseBudgetText(bad), undefined, `${String(bad)} must not parse`)
+  }
+
+  // Rendering: whole MB when it lines up, bytes otherwise. A legal 500 KiB budget must not render as
+  // `0MB` and then be applied as 0 -- that is the case the two-branch implementation exists for.
+  assert.equal(budgetText(536870912), '512MB')
+  assert.equal(budgetText(0), '0')
+  assert.equal(budgetText(-1), '0')
+  assert.equal(budgetText(500 * 1024), '512000')
+
+  // The round trip the field performs on every Apply: bytes -> text -> bytes.
+  for (const bytes of [1024 * 1024, 512 * 1024 * 1024, 2048 * 1024 * 1024]) {
+    assert.equal(parseBudgetText(budgetText(bytes)), bytes, `${bytes} must survive the round trip`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// REGRESSION: the cache buttons must REACH the route
+//
+// These four buttons were dead on arrival: `onCache: (scope, op, maxBytes) => onCache(r.peerId, ...)`
+// closed over an identifier that did not exist -- the map parameter is `row` (line 1784), and
+// `onEdit`/`onDelete` bind their own `(r)` parameter, which is why the copy-paste read correctly.
+// Every button threw `ReferenceError: r is not defined` inside `CachePanel.run()`, no request was
+// ever made, and the operator was shown the exception text in place of a result.
+//
+// Nothing below is a source guard: the click is fired and the requests the page makes are recorded,
+// so the wiring is what is under test. `applyCache` names the button by its translated label, which
+// is why the tests cannot accidentally pass by clicking the wrong control.
+// ---------------------------------------------------------------------------
+
+test('the cache buttons reach the route, and ask for the scope and the operation they name', async () => {
+  const { tree } = renderCache({ shotCacheBytes: 0, budget: '512MB' })
+  const missing = 'the click never produced a request: the button did not reach the route'
+
+  const host = await applyCache(tree, 'CACHE-APPLY-HOST')
+  const hostCall = host.find((body) => body.action === 'cache')
+  assert.ok(hostCall !== undefined, `host Apply: ${missing}`)
+  assert.equal(hostCall.scope, 'host')
+  assert.equal(hostCall.op, 'prune')
+  assert.equal(hostCall.maxBytes, 512 * 1024 * 1024, 'the parsed field value must travel with the call')
+
+  // The four buttons are one call with two parameters; swapping them would either leave files on the
+  // worker while the page said they were gone, or delete them on an Apply.
+  const worker = await applyCache(tree, 'CACHE-APPLY-WORKER')
+  assert.equal(worker.find((body) => body.action === 'cache')?.scope, 'worker', `worker Apply: ${missing}`)
+
+  const cleared = await applyCache(tree, 'CACHE-CLEAR-HOST')
+  assert.equal(cleared.find((body) => body.action === 'cache')?.op, 'clear', `host Clear: ${missing}`)
+})
+
+test('what the operator types reaches the route as bytes, units and all', async () => {
+  // End to end, through the field and the button: this is the wiring the parse tests above cannot
+  // see. A parser that is right and a field that sends its raw text would pass those and fail here.
+  const cases = [
+    ['512MB', 512 * 1024 * 1024],
+    ['1.5GB', 1610612736],
+    ['256 mb', 268435456],
+    ['2048', 2048],
+    ['0', 0],
+  ]
+  for (const [typed, expected] of cases) {
+    const { tree } = renderCache({ budget: typed })
+    const call = (await applyCache(tree, 'CACHE-APPLY-HOST')).find((body) => body.action === 'cache')
+    assert.ok(call !== undefined, `"${typed}": the Apply button must reach the route`)
+    assert.equal(call.maxBytes, expected, `"${typed}" must be applied as ${expected} bytes`)
+  }
+})
+
+test('a NEW threshold is saved through the settings route, and an UNCHANGED one is NOT re-saved', async () => {
+  // The threshold is GLOBAL while the buttons are per worker, so an Apply from any card writes the
+  // shared setting: the first call does the work and the second is what makes the value survive the
+  // next page load. A redundant save is not merely wasteful -- `shotCacheBytes` is part of the host's
+  // policy stamp, so re-sending the same number REBUILDS every worker, dropping every card's
+  // connection and its remembered approvals because someone pressed Apply twice.
+  const missing = 'the click produced no request at all: the button did not reach the route (see the REGRESSION note above)'
+
+  const changed = await applyCache(renderCache({ shotCacheBytes: 0, budget: '512MB' }).tree, 'CACHE-APPLY-HOST')
+  assert.ok(changed.some((body) => body.action === 'cache'), `changed limit: ${missing}`)
+  assert.deepEqual(changed.map((body) => body.action), ['cache', 'settings.save'])
+  assert.equal(changed[1].settings.shotCacheBytes, 512 * 1024 * 1024)
+
+  const same = await applyCache(renderCache({ shotCacheBytes: 512 * 1024 * 1024, budget: '512MB' }).tree, 'CACHE-APPLY-HOST')
+  assert.ok(same.some((body) => body.action === 'cache'), `unchanged limit: ${missing}`)
+  assert.deepEqual(same.map((body) => body.action), ['cache'], 'an unchanged limit must not be written again')
+})
+
+test('an EMPTY field is accepted as "no limit" rather than refused', async () => {
+  // Blanking the field is the operator's way to REMOVE a ceiling, so the blank branch is decided
+  // before the call: it must not be treated as unreadable. This asserts the two consequences that
+  // are observable without the route -- no refusal message, and the control proceeds to work.
+  const { tree, react } = renderCache({ shotCacheBytes: 512 * 1024 * 1024, budget: '' })
+  await applyCache(tree, 'CACHE-APPLY-HOST')
+
+  const saw = (value) => react.__state.calls.some((calls) => Array.isArray(calls) && calls.includes(value))
+  assert.equal(saw('CACHE-SAVE-FAILED'), false, 'a blank field is "no limit", not an unreadable value')
+  assert.equal(saw('host:prune'), true, 'the control must carry on and do the work the blank limit asks for')
+})
+
+test('garbage in the field is refused AT THE FIELD, and nothing is sent', async () => {
+  // Sending a guess would either delete nothing or delete everything and would look like the host
+  // misbehaving. The refusal has to happen here, which is also why the route accepts a raw number.
+  const { tree, react } = renderCache({ shotCacheBytes: 512 * 1024 * 1024, budget: 'lots' })
+  const posts = await applyCache(tree, 'CACHE-APPLY-HOST')
+
+  assert.deepEqual(posts, [], 'an unreadable limit must not reach the route at all')
+  assert.equal(react.__state.calls.some((calls) => Array.isArray(calls) && calls.includes('CACHE-SAVE-FAILED')), true,
+    'the field must say why it refused, not stay silent')
+})
+
+// ---------------------------------------------------------------------------
 // host half: the data route
 // ---------------------------------------------------------------------------
 
@@ -1535,6 +1894,84 @@ test('GET survives a worker that cannot be reached', async () => {
   assert.equal(body.ok, true)
   assert.equal(body.workers[0].report, null)
   assert.match(body.workers[0].error, /connection closed/)
+})
+
+// ---------------------------------------------------------------------------
+// the screenshot cache, as the page first sees it
+//
+// The cache is reported per worker on every page load, and the two halves answer different
+// questions: `hostCache` is a local directory scan, `workerCache` needs the worker to be up AND
+// running a relay that knows the `dsh-remote/shotcache` RPC. A page load must not depend on either
+// being available -- see the regression below, which is exactly how this shipped wrong once.
+// ---------------------------------------------------------------------------
+
+test('GET reports BOTH halves of every worker\'s screenshot cache', async () => {
+  const sawOpts = []
+  const connection = {
+    connected: true,
+    stats: { connected: true, connects: 1 },
+    // The capability the snapshot and the action route both consult. A real `PeerConnection`
+    // derives this from whether it has a live bridge; the stub states it outright, which is also
+    // what makes this test's intent legible: THIS worker can report its cache.
+    supportsWorkerShotCache: true,
+    hostShotCache: () => ({
+      files: 2, bytes: 2048, newestAt: 5, oldestAt: 1, error: '', dir: 'C:\\Temp\\dsh-remote-screenshots', keep: 20, maxBytes: 4096,
+    }),
+    async workerShotCache(opts) {
+      sawOpts.push(opts)
+      return {
+        supported: true, error: '', files: 1, bytes: 1024, newestAt: 9, oldestAt: 9,
+        keep: 20, maxBytes: 4096, dir: 'C:\\work\\.dsh-shots', pruned: null,
+      }
+    },
+  }
+  const peers = new Map([['w1', makePeer({ connection })]])
+  const route = makeSettingsRoute({
+    peers,
+    registry: makeRegistry([]),
+    cache: { size: 0, misses: 0 },
+    currentSettings: () => ({ workers: [], shotCacheBytes: 4096 }),
+  })
+
+  const { status, body } = await callRoute(route, 'GET')
+
+  assert.equal(status, 200)
+  // The host half is what the page and the model actually read, and it is knowable without the
+  // worker; it must be present even on the first paint.
+  assert.equal(body.workers[0].hostCache.bytes, 2048)
+  assert.equal(body.workers[0].hostCache.files, 2)
+  assert.equal(body.workers[0].hostCache.dir, 'C:\\Temp\\dsh-remote-screenshots')
+  // The worker half is the copy an operator cannot see from here, so it is reported separately
+  // rather than folded into the host's numbers.
+  assert.equal(body.workers[0].workerCache.supported, true)
+  assert.equal(body.workers[0].workerCache.bytes, 1024)
+  assert.equal(body.workers[0].workerCache.dir, 'C:\\work\\.dsh-shots')
+  // The SAVED ceiling travels with the request, so the worker can report whether it is over a
+  // budget this machine just set. A hardcoded 0 here would make every worker look unbounded.
+  assert.deepEqual(sawOpts, [{ maxBytes: 4096 }])
+})
+
+test('GET survives a connection with NO cache methods at all (this took the whole page down)', async () => {
+  // REGRESSION, reported: `peer.connection.workerShotCache(...)` was called unconditionally. On a
+  // connection that does not implement it -- a stub, or one built before this feature existed --
+  // the call throws SYNCHRONOUSLY, so `.catch()` never got a chance to attach and the TypeError
+  // aborted the whole snapshot. One worker without an OPTIONAL capability therefore left the page
+  // with no data at all, including every other worker's.
+  //
+  // The default `makePeer` connection has neither method, so this asserts the fix: the capability
+  // is probed, and its absence is reported as `null` -- not as a zeroed object, which would read
+  // as "this worker holds nothing" and is the opposite of "this worker cannot say".
+  const { route } = makeRoute()
+  const { status, body } = await callRoute(route, 'GET')
+
+  assert.equal(status, 200)
+  assert.equal(body.ok, true)
+  assert.equal(body.workers.length, 1)
+  assert.equal(body.workers[0].hostCache, null)
+  assert.equal(body.workers[0].workerCache, null)
+  // The rest of the row must still be filled in: the page's whole purpose is the readiness report.
+  assert.equal(body.workers[0].report.verdict, 'ready')
+  assert.equal(body.workers[0].connection.connected, true)
 })
 
 test('selfcheck forces a fresh probe rather than reusing the cached report', async () => {
