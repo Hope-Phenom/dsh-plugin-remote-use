@@ -560,6 +560,22 @@ test('the icon is well-formed XML, because the browser decodes it as an <img>', 
  * registered. `apply` is where registration happens, so a caller that skipped it would see
  * an empty list and draw the wrong conclusion about the plugin.
  */
+/**
+ * The kinds of the slots this plugin uses, as DSH declares them.
+ *
+ * Read from `dsh-client-ui-conversation`, `dsh-client-ui-sidebar-right` and `dsh-client-ui-sidebar`:
+ * `conversation.composer.dock` is `list`, `conversation.session.header.actions` is `list`,
+ * `sidebar.right.pane.tab` and `.title` are `keyed`, `settings.section` is `single`. Keeping this
+ * table here is what lets the stub enforce the same requirement the real service does.
+ */
+const SLOT_SPECS = {
+  'conversation.composer.dock': 'list',
+  'conversation.session.header.actions': 'list',
+  'sidebar.right.pane.tab': 'keyed',
+  'sidebar.right.pane.tab.title': 'keyed',
+  'settings.section': 'single',
+}
+
 function loadClient(patch = {}) {
   const source = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
   let definition
@@ -590,9 +606,30 @@ function loadClient(patch = {}) {
     },
     // Cordis runs an effect body immediately, so mirroring that keeps the test honest.
     effect: (fn) => fn(),
+    // `ctx.get(name)` is how a plugin reaches a service it did NOT declare in `inject`; the real
+    // context has it (first-party code uses `ctx.get('inputTriggers')`), so the stub must too.
+    get: (name) => (name in patch ? patch[name] : undefined),
     slots: {
       inject: (_slot, fn) => fn(),
-      register: (decl, component) => { registered.push({ decl, component }) },
+      // THE STUB ENFORCES THE REAL CONTRACT. It used to accept any declaration, and that leniency
+      // hid a defect that took the whole app down: DSH's slots service THROWS for a `list` slot
+      // registered without `id` ("list slot ... requires options.id", dsh-client-ui-slots), and
+      // `apply()` throwing means the plugin's client bundle never loads -- the window does not
+      // start. A stub that accepts more than reality proves nothing about registration.
+      register: (decl, component) => {
+        const spec = SLOT_SPECS[decl?.name]
+        if (spec === undefined) throw new Error(`slot "${decl?.name}" is not declared (a parent entry's children table must declare it)`)
+        if (spec === 'single' && registered.some((entry) => entry.decl?.name === decl.name)) {
+          throw new Error(`single slot "${decl.name}" already has a registration`)
+        }
+        if (spec === 'keyed' && decl.key === undefined) throw new Error(`keyed slot "${decl.name}" requires options.key`)
+        if (spec === 'list' && decl.id === undefined) throw new Error(`list slot "${decl.name}" requires options.id`)
+        if (registered.some((entry) => entry.decl?.name === decl.name
+          && ((spec === 'keyed' && entry.decl.key === decl.key) || (spec === 'list' && entry.decl.id === decl.id)))) {
+          throw new Error(`slot "${decl.name}" already has an entry for ${spec === 'keyed' ? 'key' : 'id'} "${spec === 'keyed' ? decl.key : decl.id}"`)
+        }
+        registered.push({ decl, component })
+      },
     },
     // `patch` exists for the OPTIONAL services: the right pane's tab type is only registered when
     // the shell provides `sidebarRightTabs`, and a test has to be able to stand that shell up.

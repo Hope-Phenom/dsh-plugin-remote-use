@@ -1845,15 +1845,42 @@ window.__ModuleLoader__.load({
       const feed = createApprovalFeed({ get: getSnapshot })
       ctx.effect(() => () => feed.dispose(), 'dsh-plugin-remote-use: approval feed')
 
-      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-        name: 'conversation.composer.dock',
-        locale: NS,
-      }, (props) => h(ApprovalsDock, { ...props, feed, post: postRoute })))
+      /**
+       * Register into a slot, and never let one registration take the application down.
+       *
+       * WHY THE try/catch IS NOT PARANOIA: `slots.register` THROWS on a contract violation -- a
+       * `list` slot without `id`, a `keyed` slot without `key`, a name no parent declared -- and an
+       * `apply()` that throws means this plugin's client bundle never loads. Measured 2026-10-14:
+       * the DSH window on the worker would not start at all, because two registrations below were
+       * missing `id` and the test stub had been accepting them. A surface that cannot be placed
+       * must cost the operator that surface, not the application.
+       *
+       * @param {string} slot
+       * @param {object} decl
+       * @param {Function} component
+       */
+      const registerSlot = (slot, decl, component) => {
+        ctx.slots.inject(slot, () => {
+          try {
+            ctx.slots.register(decl, component)
+          } catch (error) {
+            console.warn(`[remote-use] could not register into "${slot}":`, error)
+          }
+        })
+      }
 
-      ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-        name: 'conversation.session.header.actions',
+      registerSlot('conversation.composer.dock', {
+        name: 'conversation.composer.dock',
+        // A `list` slot is keyed by id; without one the real service throws (PITFALLS F24).
+        id: 'remote-use-approvals',
         locale: NS,
-      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: openApprovalsPane })))
+      }, (props) => h(ApprovalsDock, { ...props, feed, post: postRoute }))
+
+      registerSlot('conversation.session.header.actions', {
+        name: 'conversation.session.header.actions',
+        id: 'remote-use-approvals',
+        locale: NS,
+      }, (props) => h(ApprovalsHeaderButton, { ...props, feed, openPanel: openApprovalsPane }))
 
       // The panel is optional on purpose. `sidebarRightTabs`/`sidebarRight` are first-party
       // services; on a shell that lacks them the dock and the header button still work, so a
@@ -1861,13 +1888,14 @@ window.__ModuleLoader__.load({
       // `inject`: requiring them would stop `apply` from running at all on such a shell.
       function openApprovalsPane() {
         try {
-          ctx.sidebarRight?.openResource?.(`${APPROVALS_RESOURCE}/current`)
+          ctx.get('sidebarRight')?.openResource?.(`${APPROVALS_RESOURCE}/current`)
         } catch (error) {
           console.warn('[remote-use] could not open the approvals pane:', error)
         }
       }
-      if (ctx.sidebarRightTabs !== undefined) {
-        ctx.effect(() => ctx.sidebarRightTabs.register({
+      const sidebarRightTabs = ctx.get('sidebarRightTabs')
+      if (sidebarRightTabs !== undefined) {
+        ctx.effect(() => sidebarRightTabs.register({
           id: APPROVALS_TAB_ID,
           kind: 'remote-use-approvals',
           patterns: [`${APPROVALS_RESOURCE}/**`],
@@ -1876,19 +1904,19 @@ window.__ModuleLoader__.load({
           canOpen: (address) => String(address).startsWith(APPROVALS_RESOURCE),
           title: () => t('approvalsPanel'),
         }), 'dsh-plugin-remote-use: approvals tab type')
-        ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+        registerSlot('sidebar.right.pane.tab', {
           name: 'sidebar.right.pane.tab',
           key: APPROVALS_TAB_ID,
           locale: NS,
-        }, (props) => h(ApprovalsTab, { ...props, feed, post: postRoute })))
-        ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+        }, (props) => h(ApprovalsTab, { ...props, feed, post: postRoute }))
+        registerSlot('sidebar.right.pane.tab.title', {
           name: 'sidebar.right.pane.tab.title',
           key: APPROVALS_TAB_ID,
           locale: NS,
-        }, () => h('span', null, t('approvalsPanel'))))
+        }, () => h('span', null, t('approvalsPanel')))
       }
 
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
+      registerSlot('settings.section', {
         name: 'settings.section',
         // A slot/ledger id, and deliberately SHORT. Only the registration id at the top of this file
         // must equal the package name; section ids are conventionally short in DSH's own first-party
@@ -1899,7 +1927,7 @@ window.__ModuleLoader__.load({
         order: 45,
         label: () => t('nav'),
         locale: NS,
-      }, RemoteUseSection))
+      }, RemoteUseSection)
     }
 
     return { inject, apply }
