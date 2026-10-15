@@ -28,6 +28,15 @@ import { REMOTE_TOOL_NAMES } from '../lib/index.js'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SLAVE = join(PKG_ROOT, 'slave')
+/**
+ * The shipped worker-profile snippet, named ONCE.
+ *
+ * Three places have to agree that this file exists -- `package.json` `files`, the deployment
+ * script's `$files`, and the required-file list below -- and the point of those three is to catch
+ * each other out. Spelling the name once here keeps a rename from silently leaving one of them
+ * asserting a file that no longer exists.
+ */
+const SNIPPET = 'slave/acp-profile-approval.patch.yml'
 
 function listFiles(dir) {
   const out = []
@@ -54,7 +63,7 @@ test('no shipped script hardcodes a particular user profile path', () => {
   // worker whose user is someone else's. The `sheng` case is the bug this guards.
   const offenders = []
   for (const file of listFiles(SLAVE)) {
-    if (!/\.(ps1|mjs|js|json)$/u.test(file)) continue
+    if (!/\.(ps1|mjs|js|json|yml)$/u.test(file)) continue
     const text = readFileSync(file, 'utf8')
     for (const match of text.matchAll(HARDCODED_PROFILE)) {
       const user = match[0].slice('C:\\Users\\'.length, -1).toLowerCase()
@@ -90,7 +99,10 @@ function shippedTextFiles() {
   for (const root of roots) if (existsSync(root)) out.push(...listFiles(root))
   out.push(join(PKG_ROOT, 'cordis.patch.yml'), join(PKG_ROOT, 'package.json'), join(PKG_ROOT, 'README.md'))
   for (const name of readdirSync(SLAVE)) {
-    if (/\.(mjs|ps1)$/u.test(name)) out.push(join(SLAVE, name))
+    // `yml` is here because a shipped worker-profile snippet is prose, and a comment ships: leaving
+    // it out of this allow-list would put a whole class of published bytes beyond the disclosure
+    // guard below, which would then stay green while the thing it exists to prevent went out.
+    if (/\.(mjs|ps1|yml)$/u.test(name)) out.push(join(SLAVE, name))
   }
   return out.filter((f) => existsSync(f) && statSync(f).isFile())
 }
@@ -230,8 +242,13 @@ test('the published tarball does not carry this machine\'s generated artifacts',
 
   assert.ok(paths.length > 0, 'the packer reported no files at all')
   // The pieces a worker actually needs must be there -- otherwise this test would "pass" by
-  // shipping nothing.
-  for (const required of ['slave/relay.mjs', 'slave/selfcheck.ps1', 'slave/screenshot.ps1', 'lib/index.js', 'lib/client.js']) {
+  // shipping nothing. The profile snippet is on this list because it is the file that keeps a
+  // session-mode grant from making the worker unreachable (F34), and `files` enumerates by
+  // extension: a new extension silently ships nothing, and only this list notices.
+  for (const required of [
+    'slave/relay.mjs', 'slave/selfcheck.ps1', 'slave/screenshot.ps1',
+    SNIPPET, 'lib/index.js', 'lib/client.js',
+  ]) {
     assert.ok(paths.includes(required), `${required} is missing from the tarball`)
   }
   // ...and nothing that is about THIS machine may be.
@@ -283,6 +300,33 @@ test('the PACKED tarball can actually run the worker relay', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('the worker profile snippet keeps the preset pairing coherent, and reaches the worker', () => {
+  // PITFALLS F34: `dsh-base` pairs the full-access sandbox with approval `never`, and the
+  // `permission` row's preset table has no entry for (danger-full-access, ask) while its
+  // `defaultPreset` is unset. A profile patch that hard-codes `policy: ask` therefore composes a
+  // combination that matches NO preset -- which can stop that service loading, so the ACP process
+  // never comes up and the worker is simply gone. The snippet's whole job is not to do that.
+  //
+  // Read the BODY, not the file: the snippet's comments quote the `policy: ask` form it replaces, so
+  // the raw text matches whatever the real entry happens to say -- the same mistake the sibling
+  // guard records for `cordis.patch.yml`.
+  const body = patchBody(join(SLAVE, 'acp-profile-approval.patch.yml'))
+
+  // ONE assertion over the real entry, and deliberately not three. It has to MIRROR dsh-base's
+  // expression rather than pin a value, and this regex rejects the broken forms too (`policy: ask`,
+  // a pinned `never`); a second assertion after a failing first never runs, so splitting it would
+  // buy nothing while making the failure message depend on assertion order.
+  assert.match(body,
+    /^[ \t]*policy:[ \t]*!!js[^\n]*DSH_PERMISSION_MODE[^\n]*danger-full-access[^\n]*'never'[^\n]*'ask'/mu,
+    'the approval policy must be derived from the same variable the mode is, reproducing dsh-base\'s pairing')
+
+  // And it has to reach the worker. That it SHIPS is proved against the real tarball by the packer
+  // test above; what no other test covers is the deployment script, which copies by explicit name.
+  const deploy = readFileSync(join(PKG_ROOT, '..', '..', 'tools', 'deploy-slave.ps1'), 'utf8')
+  assert.ok(deploy.includes(SNIPPET.split('/')[1]),
+    'the deployment script copies by explicit name, so the snippet must be listed in its $files')
 })
 
 test('the deployment script copies everything the relay imports, and proves it runs', () => {
@@ -374,14 +418,18 @@ test('the display check blocks on the origin, and merely reports whether the pri
 // ---------------------------------------------------------------------------
 
 /**
- * The bundled patch with its comments removed.
+ * A loader patch file with its comments removed.
  *
- * The comments deliberately quote the broken form (the comment about the disproved per-worker tool
- * row names `dsh-tool-subagent`), so scanning the raw text finds those instead of the real entries.
- * The first version of these guards did exactly that and failed for the wrong reason.
+ * The comments deliberately quote the broken forms (the comment about the disproved per-worker tool
+ * row names `dsh-tool-subagent`; the worker profile snippet quotes the `policy: ask` it replaces),
+ * so scanning the raw text finds those instead of the real entries. The first version of these
+ * guards did exactly that and failed for the wrong reason.
+ *
+ * Takes the file so every patch-shaped artifact can use it: a second copy of this filter is how one
+ * of them ends up scanning the wrong thing.
  */
-function patchBody() {
-  return readFileSync(join(PKG_ROOT, 'cordis.patch.yml'), 'utf8')
+function patchBody(file = join(PKG_ROOT, 'cordis.patch.yml')) {
+  return readFileSync(file, 'utf8')
     .split('\n')
     .filter((line) => !/^\s*#/u.test(line))
     .join('\n')

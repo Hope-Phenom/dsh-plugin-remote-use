@@ -1,6 +1,6 @@
 {
   "name": "@hope_phenom/dsh-plugin-remote-use",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "Delegate DSH tasks to a paired LAN worker and drive it like a subagent (ACP over WebSocket).",
   "license": "MIT",
   "author": "Hope.Phenom <hope.phenom@foxmail.com>",
@@ -41,6 +41,7 @@
     "README.zh.md",
     "slave/*.mjs",
     "slave/*.ps1",
+    "slave/acp-profile-approval.patch.yml",
     "slave/node_modules"
   ],
   "scripts": {

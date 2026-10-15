@@ -1,0 +1,54 @@
+# Worker-side ACP profile patch: the approval row, made safe for a full-access deployment.
+#
+# WHERE THIS GOES: `%DSH_HOME%\profiles\acp\cordis.patch.yml` on the worker, as the entry for the
+# `approval` row. The rest of that file is machine-specific (model pin, sandbox mediator paths) and
+# is not reproduced here -- only the one entry that decides whether full access is SAFE to set.
+#
+# WHEN YOU NEED IT: when this worker's launch spec is generated with
+#   node make-launch-spec.mjs --permission-mode danger-full-access
+# i.e. when the machine is a DEDICATED GUI worker. That is the intended setup for GUI automation
+# (see DESIGN section 8.6.3 and PITFALLS F33): a per-call escalation cannot host a multi-step GUI
+# session, so the permission level is a property of the deployment, not of each task.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS (PITFALLS F34 -- read it before changing this)
+#
+# `dsh-base` derives BOTH the sandbox mode and the approval policy from ONE environment variable:
+#
+#   cordis.patch.yml:232   sandbox-policy.mode  = process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
+#   cordis.patch.yml:248   approval.policy      = (that value === 'danger-full-access') ? 'never' : 'ask'
+#
+# So DSH pairs "full-access sandbox" with "approval: never" -- that pairing IS the `danger-full-access`
+# PRESET. The `permission` row (`@deepseek-ai/dsh-permission-presets`) is composed with a fixed table:
+#
+#   read-only           -> sandbox: read-only,          approval: ask
+#   workspace-write     -> sandbox: workspace-write,    approval: ask
+#   danger-full-access  -> sandbox: danger-full-access, approval: never
+#
+# and NO `defaultPreset`. Its schema says `defaultPreset` is "required when composition defaults match
+# no preset".
+#
+# A worker profile patch that hard-codes `policy: ask` therefore breaks the pairing: with
+# `DSH_PERMISSION_MODE=danger-full-access` it composes to (danger-full-access, ask), which matches NO
+# preset, leaves `defaultPreset` unset and unsatisfiable, and can stop the `permission` service from
+# loading -- i.e. the ACP process never comes up and the worker becomes UNREACHABLE. That is the F24
+# failure shape, reached through a configuration combination rather than through code.
+#
+# A hard-coded `ask` was the RIGHT call when it was made (F18's round: it turns a sandbox refusal into
+# a request the master can see, instead of a silent failure). It is retained here for exactly those
+# cases -- the expression below still yields `ask` for every mode except full access. What changes is
+# only that the profile stops DISAGREEING with the base composition about the full-access pairing.
+#
+# The consequence must be stated plainly rather than buried: A FULL-ACCESS WORKER ALSO RUNS WITH
+# APPROVAL POLICY `never`. That is DSH's own preset semantics and it is coherent -- with an
+# unrestricted sandbox there is no refusal left for the approval queue to surface. It is not a bypass
+# of the queue; it is the queue having nothing to ask about. Every other mode keeps `ask`, and so
+# does a deployment that sets no mode at all.
+# ---------------------------------------------------------------------------
+
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    # MUST stay this expression, not a literal. It mirrors `dsh-base` byte for byte for the modes that
+    # yield `ask`, so this entry is a no-op except when a full-access deployment is in force.
+    policy: !!js (process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'

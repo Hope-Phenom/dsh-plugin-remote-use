@@ -1343,6 +1343,74 @@ DshSelfCheckLogon  AtLogOn  +45s, Interactive   -> slave-selfcheck.ps1（提供 
 主机在它存活期间截图。否则永远截到空屏，而现象读起来像"GUI 起不来"（F21 的误判里有这个成分）。
 **待办**：从机侧"预先置于可跑 GUI 的档位"这条路还没做成产品能力，见 `F:\dsh-plugin-remote-use-open-items.md`。
 
+### 8.6.3 GUI 工作用全权档位**按部署设定**，不做运行时授权
+
+**结论（用户 2026-10-15 定稿）**：跑 GUI 测试的工作节点，**就设成全权档位**；CLI 类的测试用现有的
+per-call 审批已经够用。**不做**"逐节点档位开关 / 运行时下发 / 主机侧授权界面"这一整套 ——
+那套设计的复杂度与它买到的东西不成比例（原话："按当前的路线继续下去没完没了了"）。
+
+**为什么"按部署"是对的，而不是偷懒**
+
+- 这个工作节点**只有一件事要做**：替配对好的主机跑 GUI 任务。它就是一台专用机器。
+  一台专用机器的运行档位是**它的部署属性**，不是每个任务临时谈判的结果。
+- **ACP 根本没有档位开关**（`dsh-acp` 注册的方法里没有；`session/set_config_option` 只认
+  `model` / `reasoning_effort`，`dsh-acp/lib/index.js:393-407`）。所以"运行时从主机下发"从来不可能
+  走协议本身，只能靠插件自己造一条带外通道 —— 那才是真正的复杂度来源。
+- per-call 提权**养不活** GUI 进程（F33：放行一结束窗口就被回收），而 GUI 任务天然多步。
+  所以对 GUI 工作，per-call 审批**不是"更细的授权"，而是一个用不上的机制**。
+
+**怎么设（DSH 自带的机制，零插件改动）**
+
+```powershell
+node slave/make-launch-spec.mjs --permission-mode danger-full-access --out agent-spec.json
+```
+
+**一个命令行参数，加一处 profile 配套**（配套见下）：`make-launch-spec.mjs:30,61` 把它写进启动规格的
+`env.DSH_PERMISSION_MODE`，
+中继在 spawn 子 DSH 时合并 `LAUNCH.env`（`relay.mjs:593`），而 `dsh-base` 用这个变量决定
+**沙箱档位与审批策略**（`dsh-base/cordis.patch.yml:232,248`）。**中继本身一行都不用改。**
+新建会话会把该部署默认值钉进会话（`dsh-permission-presets/lib/index.js:377-383`）。
+
+这就是本节一度打算用"新 RPC + 主机侧设置项 + 审计 + 界面"去实现的东西 —— 而它其实是一个生成
+启动规格时的命令行参数。**在给一个能力造控制面板之前，先问它是不是一个部署常量。**
+
+**唯一非做不可的配套（否则设成全权会让从机不可达）**
+
+`dsh-base` 把"全权沙箱"与"审批 `never`"**成对**绑定（这就是 `danger-full-access` 这个 preset），
+而 `permission` 行的 preset 表里**没有** *(danger-full-access, ask)* 这一项，且没有 `defaultPreset`
+（schema 注明它"composition defaults match no preset 时必需"）。若 profile 把审批策略**写死**成
+`ask`，那么设成全权就会组合出**不命中任何 preset** 的状态，很可能让该服务加载失败 ⇒
+**ACP 进程起不来 ⇒ 从机不可达**（F24 那一类）。
+
+所以 profile 里那一条要**镜像 `dsh-base` 自己的表达式**，而不是写死。**这条表达式只有一个出处**：
+随包发布的 `packages/dsh-plugin-remote-use/slave/acp-profile-approval.patch.yml`（含完整推导与理由），
+由 `tools/deploy-slave.ps1` 部署到从机。**本文与 PITFALLS 都不重抄那行表达式** —— 同一段东西抄在三处
+就有三处会各自漂移，而其中最难被跟着更新的那一处，恰好是会被发到从机上去的那一处。
+
+无变量时结果与今天**逐字相同**；三种档位都恰好命中一个已配置 preset。
+
+**代价必须说明白（安全问题不能埋在脚注里）**：全权档位**连带**把该会话的审批策略置为 `never`。
+这是 DSH 自己 preset 表的配对语义；沙箱已无限制之后，审批队列原本要放行的那类拒绝**已经不存在**，
+它无事可做。**但这也意味着：给一台工作节点设成全权，等于放弃该节点上"沙箱层拒绝"这一道可见性**，
+换来的是一次部署即可跑完整 GUI 流程。这个交换是明确的、且**由部署者一次做出**，而不是被逐步漂移掉。
+
+**待实测**：以 `DSH_PERMISSION_MODE=danger-full-access` 启动从机的 acp profile，确认进程正常起来、
+档位生效、GUI 真能跑。**这一条没测过就不算出货。**
+
+**剩下的一件事（就一件，写清楚免得又变成"没完没了"）**
+
+现在这套是"**文档 + 片段**"级的保护：片段随包发布、部署脚本会送到从机，但**没有任何东西检查从机
+到底有没有把它贴上**。一次忘记粘贴 = 从机不可达，而所有检查照旧报 OK。
+
+补法不是新造机制，而是**挂到已有的那道门上**：`lib/core/sandbox-probe.js` 已经在读从机的 profile
+（`shimNamedByProfile`，`config.ok` 判定），`lib/core/worker-arming.js:183-185` 已经把它的结论变成
+**布防阻断项**。也就是说，"全权档位 + profile 里写死的 `ask`"这个组合**已经有一个现成的地方可以拦**，
+只是它还不知道要拦这个。同一件事的另一半是让 `slave/make-launch-spec.mjs --permission-mode` 在收到
+`danger-full-access` 时**提醒一句**它还需要那处配套 —— 它是唯一知道"正在申请哪个档位"的地方。
+
+**这两处加起来是"把保护从事后阅读变成事前拦截"，不是新功能。** 在它们落地之前，设置成全权**必须**
+手工确认 profile 已带配套，否则先别设。
+
 ### 8.7 数据不出局域网
 
 - 传输不经过任何第三方服务

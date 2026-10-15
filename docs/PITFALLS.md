@@ -3589,6 +3589,54 @@ props）。凡是"渲染取决于某个可选字段"的地方，都要问一句�
 **我的授权粒度是否覆盖整个过程？**
 
 ---
+## F34. 把工作节点设成全权，会连带撞上"不命中任何 preset"—— 差点让从机不可达
+
+**状态：读源码 + `dsh --profile acp --dump-config` 预判出来的，**尚未**在真机实测（出货前必须测）。**
+这条记的是"**差点踩到**"，以及它是怎么被拦住的。
+
+**背景**：F33 定了方向——GUI 工作靠**会话级**档位，而不是 per-call 提权。查下来 DSH 已经支持：
+`sandbox-policy` 行的 `mode` 来自 `!!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`
+（`dsh-base/cordis.patch.yml:232`），而且从机的启动规格**已经**有 `--permission-mode` 把它塞进子进程 env
+（`slave/make-launch-spec.mjs:30,61`）。看起来只是"生成规格时多给一个参数"。
+
+**差点踩到的坑**：同一个变量在 `:248` 还决定**审批策略**：
+
+```yaml
+policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'"
+```
+
+即 **DSH 自己的组合把"档位 + 审批策略"成对绑定**（这就是它的 preset 语义）。而从机 profile 补丁把
+`approval` 的 `policy` **写死成 `ask`**，而"补丁会替换该行的整个 `config`"。于是：
+
+- 只设 `DSH_PERMISSION_MODE=danger-full-access` → 实际组合成 **(danger-full-access, ask)**；
+- 而 `permission` 行（`dsh-permission-presets`）配的三个 preset 是
+  *(read-only, ask)* / *(workspace-write, ask)* / *(danger-full-access, **never**)* ——
+  **一个都不命中**；
+- 该行**没有** `defaultPreset`，而 schema 注明它"**composition defaults match no preset 时必需**"。
+- 后果很可能是 `permission` 服务加载失败 ⇒ **ACP 进程起不来 ⇒ 从机不可达**（F24 那一类：
+  一个配置组合让整个应用起不来，而现象看起来像"从机坏了"）。
+
+**修法**：让 profile 那一条**镜像 `dsh-base` 自己的表达式**，不要写死。片段随包发布在
+`slave/acp-profile-approval.patch.yml`，由 `tools/deploy-slave.ps1` 部署到从机 ——
+**具体那行表达式不在这里重抄**（同一段抄三处就会有三处漂移，见 DESIGN §8.6.3），
+测试 `test/shipped-scripts.test.js` 钉住它必须是"由同一个变量推导"而不是写死的值。
+
+无变量时结果与今天**逐字相同**；三种档位都恰好命中一个已配置 preset。
+
+**教训**
+
+1. **"加一个参数"要先问：这个值还参与决定了别的什么？** 一个变量同时承载"沙箱档位"和"审批策略"，
+   而后者正是本项目的核心机制。**改动一个被多处读取的值，必须先把读者全部列出来** ——
+   这次是 `grep` 到 **YAML** 才发现的，`grep *.js` 一个都没命中（值写在 `!!js` 表达式里）。
+2. **"补丁替换整个 `config`"意味着局部覆盖会抵销组合默认值。** 从机 profile 写死 `ask` 在**当时**是对的
+   （F18 那一轮：让沙箱拒绝变成看得见的请求），但它与"档位由环境变量驱动"**互不知情**。
+   两个各自正确的决定合起来成了一个能锁死机器的组合 —— **组合出来的状态也要有人负责。**
+3. **拦阻来自"读配置的权威输出"（`--dump-config`）而不是读代码。** 代码只告诉我变量被读；
+   只有**合成后的真实配置**才告诉我这两个读者会怎样相遇。
+4. **顺带一条更好的教训**：这个坑最初是在给一个"运行时授权"功能做设计时撞出来的，而那个功能本身
+   就是多余的——见 DESIGN §8.6.3。**复杂度不只是成本，它会主动带你去撞本来不必遇到的坑。**
+
+---
 ## G1. "主屏必须是虚拟屏" —— 一条**忠实实现后让机器无法登录**的要求
 
 **现象**
