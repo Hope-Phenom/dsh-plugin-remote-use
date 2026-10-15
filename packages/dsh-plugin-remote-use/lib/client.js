@@ -131,7 +131,7 @@ window.__ModuleLoader__.load({
       approvalsDockWaiting: '有 {n} 件远程任务在等你批准',
       approvalsDockHint: '每个请求最多等 {s} 秒，超时按拒绝处理',
       approvalsHeaderPending: '审批 {n}',
-      approvalsHeaderMissed: '审批 · {n} 件错过',
+      approvalsHeaderMissed: '错过 {n} 件',
       approvalsOpenPanel: '打开审批面板',
       approvalsPanelPending: '等待批准（{n}）',
       approvalsPanelEmpty: '当前没有等待批准的请求。',
@@ -336,7 +336,7 @@ window.__ModuleLoader__.load({
       approvalsDockWaiting: '{n} remote task(s) are waiting for your approval',
       approvalsDockHint: 'each waits up to {s}s, then it is refused',
       approvalsHeaderPending: 'Approvals {n}',
-      approvalsHeaderMissed: 'Approvals \u00b7 {n} missed',
+      approvalsHeaderMissed: '{n} missed',
       approvalsOpenPanel: 'Open the approvals panel',
       approvalsPanelPending: 'Waiting for you ({n})',
       approvalsPanelEmpty: 'Nothing is waiting for approval.',
@@ -1916,6 +1916,25 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-remote-use: dictionaries')
+
+      /**
+       * The stylesheet must be GLOBAL, not a `<style>` inside the settings page's tree.
+       *
+       * MEASURED 2026-10-15: the three approval surfaces render in the session header, above the
+       * composer and in the right pane -- all OUTSIDE the settings page -- so the `<style>` node
+       * that lives in that page's tree never mounted for them. What the operator saw was unstyled
+       * HTML that read as a design failure: `pwsh` touching its tier with no gap, no chip, and the
+       * two-line grid collapsing into the host's own status line. The page keeps its own copy
+       * (belt and braces); this one covers the chrome. Id-guarded, so two loads cannot stack sheets.
+       */
+      const STYLE_ID = 'dsh-plugin-remote-use-style'
+      if (typeof document !== 'undefined' && document.getElementById(STYLE_ID) === null) {
+        const sheet = document.createElement('style')
+        sheet.id = STYLE_ID
+        sheet.textContent = CSS
+        document.head.appendChild(sheet)
+        ctx.effect(() => () => { sheet.remove() }, 'dsh-plugin-remote-use: stylesheet')
+      }
 
       // ---- the three approval surfaces, where the work happens --------------------------
       //
