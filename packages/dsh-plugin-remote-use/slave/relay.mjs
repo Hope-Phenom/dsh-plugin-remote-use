@@ -116,6 +116,15 @@ const TASK_DIR = (() => {
 /** Which source `TASK_DIR` came from. Reported at startup, because "where did this come from" is
  *  exactly the question the bug above made unanswerable. */
 const TASK_DIR_SOURCE = arg('task-dir', '') === '' ? 'process.cwd()' : '--task-dir'
+/**
+ * What a RELATIVE transfer path may resolve against: a directory someone actually chose, or nothing.
+ *
+ * `null` means no `--task-dir` was given, and the transfer layer then REFUSES a relative path. The old
+ * behaviour fell back to `process.cwd()`, which for a supervised relay is the DSH profile directory --
+ * so a relative upload landed there and reported success (PITFALLS F40). Absolute paths are unaffected;
+ * a hand-started relay that wants relative paths passes `--task-dir .`.
+ */
+const DECLARED_TASK_DIR = TASK_DIR_SOURCE === '--task-dir' ? TASK_DIR : null
 
 // ---------- screenshot ----------
 const SCREENSHOT_SCRIPT = arg('screenshot-script', join(HERE, 'screenshot.ps1'))
@@ -474,7 +483,7 @@ async function handleLocalRpc(msg) {
       // The pre-flight question every transfer starts with: is it there, how big is it, and when was
       // it last written. It travels over the RPC channel rather than HTTP because the answer is four
       // fields, and a HEAD would have to be asked on a path this side parsed anyway.
-      const resolved = resolveTransferPath(msg.params?.path, TASK_DIR)
+      const resolved = resolveTransferPath(msg.params?.path, DECLARED_TASK_DIR)
       if (!resolved.ok) return fail(-32602, resolved.error)
       try {
         // `hash: true` is opt-in: a stat is what the master asks before deciding whether to transfer
@@ -497,7 +506,7 @@ async function handleLocalRpc(msg) {
     }
 
     case `${PLUGIN_PREFIX}list`: {
-      const resolved = resolveTransferPath(msg.params?.path, TASK_DIR)
+      const resolved = resolveTransferPath(msg.params?.path, DECLARED_TASK_DIR)
       if (!resolved.ok) return fail(-32602, resolved.error)
       try {
         const listed = await listDir(resolved.path, { limit: msg.params?.limit })
@@ -758,7 +767,7 @@ function audit(req, direction, detail) {
  * for it -- the header is then simply absent, which a caller cannot mistake for a wrong digest.
  */
 async function serveFileDownload(req, res, url) {
-  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  const resolved = resolveTransferPath(url.searchParams.get('path'), DECLARED_TASK_DIR)
   if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
 
   const info = await statTarget(resolved.path)
@@ -828,7 +837,7 @@ async function serveFileDownload(req, res, url) {
  * connection continue instead of restart.
  */
 async function acceptFileChunk(req, res, url) {
-  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  const resolved = resolveTransferPath(url.searchParams.get('path'), DECLARED_TASK_DIR)
   if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
 
   // A chunked body has no declared length, and the contract makes that a 411 rather than a guess:
@@ -860,7 +869,7 @@ async function acceptFileCommit(req, res) {
   const parsed = await readJsonBody(req)
   if (!parsed.ok) { jsonOut(res, parsed.status, parsed.json); return }
 
-  const resolved = resolveTransferPath(parsed.value.path, TASK_DIR)
+  const resolved = resolveTransferPath(parsed.value.path, DECLARED_TASK_DIR)
   if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
 
   const started = Date.now()
@@ -883,7 +892,7 @@ async function acceptFileCommit(req, res) {
 
 /** `DELETE /file?path=<p>` -- drops the staging file and never the target. */
 async function dropFilePart(req, res, url) {
-  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  const resolved = resolveTransferPath(url.searchParams.get('path'), DECLARED_TASK_DIR)
   if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
   const result = await deletePart(resolved.path)
   audit(req, 'abort', `path=${resolved.path} removed=${result.json.removed} part=${result.json.part}`)
@@ -935,7 +944,11 @@ const server = createServer((req, res) => {
       // C:\Windows\System32 therefore hands the sandbox System32 as the workspace, which
       // breaks child process creation (pwsh dies with 0xC0000142 / STATUS_DLL_INIT_FAILED).
       // Surfacing it here makes that misconfiguration visible instead of mysterious.
-      cwd: process.cwd(),
+      cwd: TASK_DIR,
+      // WHERE THAT DIRECTORY CAME FROM. `cwd` alone cannot distinguish "the operator armed this
+      // directory" from "the relay inherited whatever the DSH process had", and that ambiguity is what
+      // let a relative upload land in the profile directory while every surface reported success.
+      taskDirSource: TASK_DIR_SOURCE,
       // The mode the child this relay spawns will actually run at, so a mismatch between "what the
       // operator set" and "what this process will do" is visible from either side.
       ...(() => { const m = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env }); return { sessionMode: m.mode, sessionModeFrom: m.from } })(),

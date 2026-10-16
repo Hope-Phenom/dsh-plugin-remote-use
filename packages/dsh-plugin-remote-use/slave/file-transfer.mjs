@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { open, readdir, rename, stat, unlink } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
@@ -91,10 +91,29 @@ export function resolveTransferPath(rawPath, baseDir) {
   // NUL is the one byte that cannot survive the trip: it must be refused before it reaches the
   // filesystem, where some APIs silently truncate at it and others throw something unhelpful.
   if (rawPath.includes('\0')) return { ok: false, error: 'path contains a NUL byte' }
-  const base = typeof baseDir === 'string' && baseDir !== '' ? baseDir : process.cwd()
+
+  // A RELATIVE PATH REQUIRES A *DECLARED* TASK DIRECTORY -- never an inferred one.
+  //
+  // `null` means the relay was not told one. The old fallback was `process.cwd()`, and that is how a
+  // relative upload wrote into `...\.dsh\profiles\desktop\` on a supervised worker: the plugin starts
+  // the relay without a `cwd`, so the inherited directory is the DSH profile directory -- a place
+  // nothing should ever be written -- and the transfer reported success while doing it.
+  //
+  // An absolute path is unaffected: it names its own destination, so no base is needed. A relative one
+  // now fails loudly with both remedies named, which is the only honest answer when the alternative is
+  // guessing at a directory the operator never chose. A hand-started relay that WANTS relative paths
+  // says so once: `--task-dir .`.
+  const base = typeof baseDir === 'string' && baseDir !== '' ? baseDir : null
+  if (base === null && !isAbsolute(rawPath)) {
+    return {
+      ok: false,
+      error: `"${rawPath}" is a relative path and this relay has no task directory; `
+        + 'send an absolute path, or start the relay with --task-dir <dir>',
+    }
+  }
   // One `resolve` covers both cases: it ignores `base` when the input is absolute and normalises
   // `.`/`..` either way, which is what makes the echoed path the path that is really used.
-  return { ok: true, path: resolve(base, rawPath) }
+  return { ok: true, path: resolve(base ?? process.cwd(), rawPath) }
 }
 
 /** The temporary name a transfer to `targetPath` lands under. */

@@ -2208,6 +2208,52 @@ test('every user-facing string exists in BOTH languages, with matching placehold
   }
 })
 
+test('every placeholder a CALL SITE passes is one the string DECLARES', () => {
+  // WHY THIS EXISTS (found 2026-10-16, by a person looking at the page):
+  //
+  // The shot-cache panel renders two pairs of buttons -- one for the host cache, one for the worker
+  // cache -- and labels each with its scope: `fmt(t('btnCacheApply'), { scope: t('labelCacheHost') })`.
+  // The two dictionary strings contained no `{scope}`. `fmt()` leaves a string with no placeholder
+  // untouched, so BOTH pairs rendered as `应用上限` / `清空缓存` and the panel looked like a bug that
+  // drew every button twice. Nothing errored; the sibling messages (`cacheCleared`, `cachePruned`, ...)
+  // all declare `{scope}`, which is what made the omission invisible in review.
+  //
+  // The parity test above compares the two LANGUAGES against each other. This one compares the CALL
+  // SITES against the strings, which is a different axis: a key can be perfectly consistent across
+  // languages and still be handed a variable it never declares.
+  const { dictionaries } = loadClient()
+  const { zh, en } = dictionaries[0].dicts
+  const source = readFileSync(join(PKG_ROOT, 'lib', 'client.js'), 'utf8')
+
+  const callSites = [...source.matchAll(/fmt\(t\('([A-Za-z0-9_]+)'\),\s*\{([^}]*)\}/g)]
+  assert.ok(callSites.length > 0, 'the scan must find call sites, or it proves nothing')
+
+  const missing = []
+  for (const [, key, params] of callSites) {
+    // Property names are matched at the START of a line, not anywhere in the object. Without the
+    // anchor, a ternary like `cond ? audit.archives.length : 0` reads as a property called `length`
+    // and the guard reports a placeholder nobody passes -- a false positive that would get the guard
+    // switched off, which is worse than not having it.
+    const names = [...params.matchAll(/(?:^|\n)\s*([A-Za-z0-9_]+)\s*:/g)].map((m) => m[1])
+    for (const [lang, dict] of [['zh', zh], ['en', en]]) {
+      if (!(key in dict)) {
+        // A key that is not in the dictionary at all renders as the raw key (or nothing), and the
+        // parity test above cannot see it because BOTH languages lack it equally.
+        missing.push(`${key}[${lang}] is used by a call site but is MISSING from the dictionary`)
+        continue
+      }
+      const text = String(dict[key])
+      for (const name of names) {
+        if (!text.includes(`{${name}}`)) {
+          missing.push(`${key}[${lang}] is passed {${name}} but its text is "${text}"`)
+        }
+      }
+    }
+  }
+  assert.deepEqual(missing, [],
+    `these call sites substitute a value the string never uses, so the label renders without it:\n  ${missing.join('\n  ')}`)
+})
+
 test('the two dictionaries are not the same language wearing two names', () => {
   // A copy-paste that left the Chinese text in `en` would pass every parity check above and still
   // show Chinese to an English reader, so the one property that catches it is asserted directly.

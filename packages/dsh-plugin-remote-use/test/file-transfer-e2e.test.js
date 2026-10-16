@@ -82,7 +82,13 @@ async function startRelay(taskDir, shotDir, token = TOKEN, opts = {}) {
     '--shot-dir', shotDir,
     '--pairing-file', '',
   ]
-  if (opts.taskDir !== undefined) args.push('--task-dir', opts.taskDir)
+  // DEFAULT TO DECLARING THE TASK DIRECTORY, because that is what a supervised relay always gets and
+  // therefore the shape production has. The one test that needs its ABSENCE opts out with
+  // `declareTaskDir: false`. (Two older tests here spawned the relay with no task dir and used
+  // relative paths -- i.e. they depended on exactly the ambiguity that is now refused. They failed the
+  // moment the refusal landed, which is the guard doing its job; making the default explicit is the
+  // honest fix rather than weakening the refusal.)
+  if (opts.declareTaskDir !== false) args.push('--task-dir', opts.taskDir ?? taskDir)
   const child = spawn(process.execPath, args, { cwd: opts.cwd ?? taskDir, stdio: ['ignore', 'pipe', 'pipe'] })
 
   let stderr = ''
@@ -283,4 +289,47 @@ test('a RELATIVE path lands in the armed task directory, not in the relay\'s inh
   // test round.
   assert.equal(String(sent.remote?.path), wanted,
     'the result must report the path the WORKER resolved, not the path the caller typed')
+})
+
+test('with NO declared task directory, a relative path is REFUSED rather than guessed', async (t) => {
+  // The other half of the same defect. Passing `--task-dir` fixes the supervised case, but the relay
+  // still had a fallback to `process.cwd()` for when nobody declares one -- and for a supervised relay
+  // that inherited cwd IS the DSH profile directory. So "no task directory" must not silently mean
+  // "whatever directory I happen to be in"; it must mean "relative paths are not available".
+  //
+  // An absolute path names its own destination, so it keeps working: refusing THOSE would break the
+  // ordinary way to use the tool.
+  const root = mkdtempSync(join(tmpdir(), 'transfer-notaskdir-'))
+  const taskDir = join(root, 'some-directory')
+  const shotDir = join(root, 'shots')
+  const receiveDir = join(root, 'received')
+  for (const d of [taskDir, shotDir, receiveDir]) mkdirSync(d, { recursive: true })
+
+  // No declared task directory: the one case that must NOT get `--task-dir`, with cwd set somewhere
+  // arbitrary -- the shape a supervised relay would have if the arming panel left the field blank.
+  const { child, base } = await startRelay(taskDir, shotDir, TOKEN, { cwd: taskDir, declareTaskDir: false })
+  t.after(async () => {
+    child.kill()
+    await new Promise((resolve) => child.once('exit', resolve))
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const conn = new PeerConnection({ peerId: 'no-taskdir', httpBase: base, token: TOKEN, receiveDir })
+  const buf = payload(2048)
+  const local = join(root, 'probe.txt')
+  writeFileSync(local, buf)
+
+  await assert.rejects(
+    () => conn.sendFile({ localPath: local, remotePath: 'relative.txt' }),
+    (error) => /task directory/iu.test(error.message),
+    'a relative path with no declared task dir must be refused, not silently based on cwd',
+  )
+  assert.equal(existsSync(join(taskDir, 'relative.txt')), false,
+    'nothing may be written when the destination could not be resolved honestly')
+
+  // And the explicit form still works, which is what the refusal message tells the caller to do.
+  const sent = await conn.sendFile({ localPath: local, remotePath: join(taskDir, 'absolute.txt') })
+  assert.equal(existsSync(join(taskDir, 'absolute.txt')), true)
+  assert.equal(sha256(readFileSync(join(taskDir, 'absolute.txt'))), sha256(buf))
+  assert.equal(String(sent.remote?.path), join(taskDir, 'absolute.txt'))
 })

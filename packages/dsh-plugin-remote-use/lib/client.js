@@ -208,6 +208,10 @@ window.__ModuleLoader__.load({
       transferFetched: '从节点取回',
       auditNote: '追加写入，位置：{p}',
       auditByEngine: '引擎',
+      // This key was MISSING entirely: the audit table has always called `t('auditBy')`, so the column
+      // rendered the raw key instead of "by <who>". Neither the dictionary-parity test nor review could
+      // see it -- both languages lacked it equally. Found by the call-site guard in settings-page.test.js.
+      auditBy: '由 {by}',
       auditByPage: '你在设置页点的',
       auditByApi: '程序调用（脚本/API）',
       auditByHuman: '人（旧记录：来源未区分）',
@@ -284,8 +288,13 @@ window.__ModuleLoader__.load({
       cacheOver: '超出 {size}',
       fieldShotCache: '截图缓存上限',
       fieldShotCacheHint: '留空或 0 表示不设上限。可写 512MB、1.5GB 或字节数。超限时自动删除最旧的；最新一张始终保留——主机正在读取的那张若被删掉，截图工具就会"报成功但没有文件"。',
-      btnCacheApply: '应用上限',
-      btnCacheClear: '清空缓存',
+      // {scope} is not decoration. Host and worker each get their own pair of buttons, so without it
+      // the four render as `应用上限 清空缓存 应用上限 清空缓存` -- which reads as a duplicated row
+      // rather than as two scopes. The sibling messages below (`cacheCleared`, `cachePruned`, ...) all
+      // pass a scope; these two labels were the only ones that forgot it, and because `fmt()` leaves a
+      // string with no placeholder untouched, nothing errored.
+      btnCacheApply: '{scope}：应用上限',
+      btnCacheClear: '{scope}：清空缓存',
       cacheSaveFailed: '上限无法识别：请填 512MB、1.5GB 这样的值，或 0 表示不设上限。',
       cacheCleared: '已清空 {scope}：删除 {n} 个文件，释放 {size}',
       cacheClearNothing: '{scope} 没有可清理的文件',
@@ -458,6 +467,7 @@ window.__ModuleLoader__.load({
       transferFetched: 'fetched from node',
       auditNote: 'Append-only, at {p}',
       auditByEngine: 'engine',
+      auditBy: 'by {by}',
       auditByPage: 'you, on the settings page',
       auditByApi: 'a script/API call',
       auditByHuman: 'a person (legacy row: source not distinguished)',
@@ -524,8 +534,8 @@ window.__ModuleLoader__.load({
       cacheOver: 'over by {size}',
       fieldShotCache: 'Screenshot cache limit',
       fieldShotCacheHint: 'Blank or 0 means no limit. Accepts 512MB, 1.5GB, or a byte count. Past the limit the oldest are deleted automatically; the newest is always kept \u2014 deleting the capture the host is reading would leave the screenshot tool reporting success with no file to show.',
-      btnCacheApply: 'Apply limit',
-      btnCacheClear: 'Clear cache',
+      btnCacheApply: 'Apply limit to {scope}',
+      btnCacheClear: 'Clear {scope}',
       cacheSaveFailed: 'That limit is not readable \u2014 use a value like 512MB, 1.5GB, or 0 for no limit.',
       cacheCleared: 'Cleared {scope}: {n} file(s), {size} freed',
       cacheClearNothing: '{scope} had nothing to clear',
