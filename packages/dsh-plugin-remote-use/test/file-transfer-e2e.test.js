@@ -63,9 +63,17 @@ function payload(size) {
   return buf
 }
 
-async function startRelay(taskDir, shotDir, token = TOKEN) {
+/**
+ * Start a real relay.
+ *
+ * `opts.cwd` and `opts.taskDir` are SEPARATE on purpose. A supervised relay inherits the DSH
+ * process's working directory, which is NOT the directory the operator armed -- so the two differ in
+ * production, and a test that makes them the same cannot see the difference. That is how a relative
+ * upload came to write into `...\.dsh\profiles\desktop\` while reporting success.
+ */
+async function startRelay(taskDir, shotDir, token = TOKEN, opts = {}) {
   const port = await freePort()
-  const child = spawn(process.execPath, [
+  const args = [
     RELAY,
     '--port', String(port),
     '--token', token,
@@ -73,7 +81,9 @@ async function startRelay(taskDir, shotDir, token = TOKEN) {
     // Keep every write out of the package directory: a test must not litter the thing it tests.
     '--shot-dir', shotDir,
     '--pairing-file', '',
-  ], { cwd: taskDir, stdio: ['ignore', 'pipe', 'pipe'] })
+  ]
+  if (opts.taskDir !== undefined) args.push('--task-dir', opts.taskDir)
+  const child = spawn(process.execPath, args, { cwd: opts.cwd ?? taskDir, stdio: ['ignore', 'pipe', 'pipe'] })
 
   let stderr = ''
   child.stderr.on('data', (d) => { stderr += String(d) })
@@ -227,4 +237,50 @@ test('a real relay: upload, verify, download, refuse to overwrite, and hold the 
     'a wrong token must be refused, not served',
   )
   assert.equal(existsSync(join(receiveDir, 'nope.bin')), false)
+})
+
+test('a RELATIVE path lands in the armed task directory, not in the relay\'s inherited cwd', async (t) => {
+  // THE REGRESSION THIS EXISTS FOR, measured on the reference worker 2026-10-16.
+  //
+  // A supervised relay inherits the DSH process's working directory -- the profile directory -- which
+  // is NOT the directory the operator armed (`--task-dir`). With the task dir inferred from
+  // `process.cwd()`, `remotePath: "note.txt"` reported SUCCESS while the bytes landed in
+  // `...\.dsh\profiles\desktop\`. Every test passed, because the only end-to-end test spawned the
+  // relay itself with the task dir as its cwd, so the two directories were always the same.
+  //
+  // So this test keeps them DIFFERENT on purpose: that difference IS the bug's precondition, and it is
+  // also what production looks like.
+  const root = mkdtempSync(join(tmpdir(), 'transfer-taskdir-'))
+  const taskDir = join(root, 'armed-task-dir')
+  const inheritedCwd = join(root, 'profile-dir-standing-in-for-dsh')
+  const shotDir = join(root, 'shots')
+  const receiveDir = join(root, 'received')
+  for (const d of [taskDir, inheritedCwd, shotDir, receiveDir]) mkdirSync(d, { recursive: true })
+
+  const { child, base } = await startRelay(taskDir, shotDir, TOKEN, { cwd: inheritedCwd, taskDir })
+  t.after(async () => {
+    child.kill()
+    await new Promise((resolve) => child.once('exit', resolve))
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const conn = new PeerConnection({ peerId: 'taskdir', httpBase: base, token: TOKEN, receiveDir })
+  const buf = payload(4096)
+  const local = join(root, 'probe.txt')
+  writeFileSync(local, buf)
+
+  const sent = await conn.sendFile({ localPath: local, remotePath: 'relative-probe.txt' })
+
+  const wanted = join(taskDir, 'relative-probe.txt')
+  assert.equal(existsSync(wanted), true,
+    'a relative path must resolve against the ARMED task directory')
+  assert.equal(sha256(readFileSync(wanted)), sha256(buf))
+  assert.equal(existsSync(join(inheritedCwd, 'relative-probe.txt')), false,
+    'and it must NOT land in the directory the relay happened to inherit')
+
+  // The mitigation, not just the fix: the caller is told where the bytes actually went. Without this
+  // echo the bug above is indistinguishable from success -- which is how it survived a real-machine
+  // test round.
+  assert.equal(String(sent.remote?.path), wanted,
+    'the result must report the path the WORKER resolved, not the path the caller typed')
 })

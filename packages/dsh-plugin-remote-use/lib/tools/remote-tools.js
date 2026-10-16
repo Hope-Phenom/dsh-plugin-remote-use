@@ -498,11 +498,14 @@ export function makeRemoteTools(deps) {
         const elapsedMs = Date.now() - startedAt
         const bytes = Number(result?.bytes ?? 0)
         const sha = String(result?.sha256 ?? '')
-        // The RESOLVED remote path, not the one the caller typed: a relative path is resolved against
-        // the worker's task directory, and the whole point of echoing it is that the caller learns
-        // where the file actually went. Read defensively because the transfer layer names it
-        // `remotePath` while an older shape used `path`.
-        const resolvedRemote = String(result?.remotePath ?? result?.path ?? remotePath)
+        // The RESOLVED remote path, not the one the caller typed.
+        //
+        // This echo is the mitigation for the worst failure this feature has produced: a relative path
+        // resolved against the wrong directory (the relay's inherited cwd), landed in the worker's DSH
+        // profile directory, and this tool reported the caller's own spelling back -- so the mistake
+        // looked exactly like success. The relay echoes what it resolved (`remote.path` from the commit
+        // body / `x-file-path`); the chain is defensive because the upload and download shapes differ.
+        const resolvedRemote = String(result?.remote?.path ?? result?.remotePath ?? result?.path ?? remotePath)
         // The ledger row: a transfer is a durable write on someone else's disk, so it belongs in the
         // same trail as approvals rather than only in this tool's output.
         if (typeof audit?.record === 'function') {

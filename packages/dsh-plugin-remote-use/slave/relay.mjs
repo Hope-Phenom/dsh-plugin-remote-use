@@ -37,7 +37,7 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { timingSafeEqual } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
@@ -98,12 +98,24 @@ const MAX_TRANSFER_BYTES = maxTransferBytesOf(Number(arg('max-transfer-bytes', S
 /**
  * The task directory: where a RELATIVE transfer path resolves.
  *
- * This is the relay's own working directory, which is also what `/healthz` reports as `cwd` and the
- * directory the agent's sandbox policy uses as its workspace root. Capturing it once is deliberate --
- * a `process.chdir` anywhere later would silently re-point every relative transfer at a different
- * directory, and the echoed path would then disagree with the one the operator started the relay in.
+ * IT IS PASSED IN, NOT INFERRED FROM `process.cwd()`. Measured 2026-10-16 on the reference worker:
+ * a SUPERVISED relay starts with its working directory set to the DSH profile directory -- the plugin
+ * spawns it without a `cwd`, so it inherits the desktop process's -- which is NOT the directory the
+ * operator armed. The consequence was the worst shape there is: `remotePath: "note.txt"` reported
+ * success while the bytes landed in `...\.dsh\profiles\desktop\`, and the master had no way to see it
+ * (`--task-dir` now carries the armed value, the same one the pairing string advertises, and the
+ * master echoes back what the relay resolved).
+ *
+ * Capturing it once is still deliberate: a `process.chdir` later would silently re-point every
+ * relative transfer at a different directory.
  */
-const TASK_DIR = process.cwd()
+const TASK_DIR = (() => {
+  const given = arg('task-dir', '')
+  return given === '' ? process.cwd() : resolve(given)
+})()
+/** Which source `TASK_DIR` came from. Reported at startup, because "where did this come from" is
+ *  exactly the question the bug above made unanswerable. */
+const TASK_DIR_SOURCE = arg('task-dir', '') === '' ? 'process.cwd()' : '--task-dir'
 
 // ---------- screenshot ----------
 const SCREENSHOT_SCRIPT = arg('screenshot-script', join(HERE, 'screenshot.ps1'))
@@ -1095,7 +1107,7 @@ server.listen(PORT, HOST, () => {
   log(`self-check script: ${SELFCHECK_SCRIPT} (cache ${SELFCHECK_CACHE_MS}ms)`)
   // Printed because it is the one setting that turns a working transfer into a 413 at an arbitrary
   // byte, and the operator's only other clue is that status code.
-  log(`file transfer: task dir ${TASK_DIR}, ceiling ${MAX_TRANSFER_BYTES} bytes`)
+  log(`file transfer: task dir ${TASK_DIR} (from ${TASK_DIR_SOURCE}), ceiling ${MAX_TRANSFER_BYTES} bytes`)
   if (TOKEN === '') log('WARNING: auth disabled')
   // Leave the pairing string where an operator can find it. It is written on every start so it
   // cannot go stale against a rotated token -- a pairing string with the OLD token fails with

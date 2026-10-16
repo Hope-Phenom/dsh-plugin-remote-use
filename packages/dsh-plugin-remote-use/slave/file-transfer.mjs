@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { open, readdir, rename, stat, unlink } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
@@ -320,6 +320,20 @@ export async function putChunk(options) {
 
   // Create-if-missing without truncating: `'a'` extends nothing and destroys nothing, and a second
   // PUT to the same path must never silently discard the first chunk.
+  // A missing PARENT is the caller's mistake, not the server's: answering 500 tells the master the
+  // worker broke, and a 5xx invites a retry of a condition that will never change. 409 names the
+  // directory instead, which is the actionable half.
+  //
+  // Deliberately NOT creating it: the destination FILE is named by the caller, its directory is not,
+  // and silently materialising `D:\build` is not a side effect a file transfer should take on itself.
+  const parentDir = await statOrNull(dirname(part))
+  if (parentDir === null || !parentDir.isDirectory()) {
+    return refusal(409, {
+      ok: false,
+      error: `the directory ${dirname(part)} does not exist on the worker; create it there first, or send into a directory that already exists`,
+    })
+  }
+
   const created = await open(part, 'a')
   await created.close()
 

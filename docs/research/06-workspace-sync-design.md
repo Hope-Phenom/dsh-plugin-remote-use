@@ -261,15 +261,15 @@ export function fullyQualifiedWorkspacePath(path, platform = process.platform) {
     "git": {
       "available": true,
       "repoRoot": "F:\\WorkSpace\\proj",
-      "headOid": "3ab77d1f0c9e4a2b8d5f6e7a9b0c1d2e3f405162",  // 宿主 HEAD（仅作诊断/记录）
-      "snapshotTree": "9f1c0e77aa12bc34de56fa78bc90de12f3456789", // 私有 index 的 write-tree 结果
-      "baseTree": "71b0aa22cc33dd44ee55ff66aa77bb88cc99dd00",     // 从机回报「我有」的 tree（无则 null）
+      "headOid": "<oid>",  // 宿主 HEAD（仅作诊断/记录）
+      "snapshotTree": "<oid>", // 私有 index 的 write-tree 结果
+      "baseTree": "<oid>",     // 从机回报「我有」的 tree（无则 null）
       "unknownBase": false,        // true = 从机有仓库但 tree 对不上，bundle 必须自包含
       "transport": "bundle",       // "bundle" | "none"(git 层缺席)
       "bundle": {
-        "path": "blobs/pack/9f1c0e77aa12bc34de56fa78bc90de12f3456789.bundle",
+        "path": "blobs/pack/<oid>.bundle",
         "bytes": 184320512,
-        "sha256": "5d41c0a7e2f9b8d1c3a5e7f90123456789abcdef0123456789abcdef0123456"
+        "sha256": "<digest>"
       },
       "trackedCount": 8123,
       "excludes": [".dsh-remote", "node_modules", "test-results", "playwright-report"]
@@ -280,11 +280,11 @@ export function fullyQualifiedWorkspacePath(path, platform = process.platform) {
       "entries": [
         { "p": "drivers/chromedriver.exe",
           "s": 16777216, "m": 1739340000123,
-          "h": "sha256:9d2f4c1b8a7e6f5d4c3b2a1908172635445566778899aabbccddeeff00112233",
+          "h": "sha256:<digest>",
           "x": true },                          // x = 从机可执行位（仅 POSIX；Windows 忽略）
         { "p": "fixtures/models/vision.onnx",
           "s": 268435456, "m": 1739340001234,
-          "h": "sha256:41ab7c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f7081920",
+          "h": "sha256:<digest>",
           "x": false }
       ]
     }
@@ -316,7 +316,7 @@ export function fullyQualifiedWorkspacePath(path, platform = process.platform) {
     ]
   },
 
-  "manifestDigest": "sha256:0011aa22bb33cc44dd55ee66ff77008899aabbccddeeff0011223344556677"
+  "manifestDigest": "sha256:<digest>"
   // 对除本字段以外的规范化 JSON 求 sha256（键排序、UTF-8、无多余空白）
 }
 ```

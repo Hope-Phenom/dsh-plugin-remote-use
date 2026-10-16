@@ -576,6 +576,16 @@ export async function uploadFile(opts) {
     attempts,
     aligned,
     commit,
+    // The WORKER's view of what it wrote, in the same shape `downloadFile` already reports (`remote`).
+    // The worker is the side that resolves a relative path, so the caller must be able to see the
+    // result and not only its own input. Its absence on this path is precisely why a relative upload
+    // could land in the wrong directory (the relay's inherited cwd, not the armed task dir) while
+    // every layer above reported success.
+    remote: {
+      path: String(commit?.path ?? remotePath),
+      mtime: String(commit?.mtime ?? ''),
+      bytes: Number.isFinite(commit?.bytes) ? Number(commit.bytes) : size,
+    },
     elapsedMs: Date.now() - started,
   }
 }

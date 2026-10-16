@@ -163,6 +163,36 @@ test('the relay is told NOT to write a pairing file beside itself', () => {
   }
 })
 
+test('the ARMED task directory is passed to the relay, and omitted when there is none', () => {
+  // WHY THIS IS ITS OWN TEST. The end-to-end transfer test passes `--task-dir` itself when it spawns
+  // the relay, so it verifies the RELAY's half and would stay green if this half -- the supervisor and
+  // the wiring in `apply()` -- stopped passing it. That is the half that was missing in production:
+  // the relay then fell back to its inherited cwd, which for a supervised process is the DSH profile
+  // directory, so a relative upload reported success while writing there.
+  const withDir = makeSupervisor({ taskDir: () => 'E:\\WorkSpace\\dsh-remote' })
+  try {
+    withDir.supervisor.start('192.168.1.100', 7331, 'tok')
+    const args = withDir.calls[0].args
+    assert.equal(args.includes('--task-dir'), true, 'the flag must be on the command line')
+    assert.equal(args[args.indexOf('--task-dir') + 1], 'E:\\WorkSpace\\dsh-remote')
+  } finally {
+    withDir.supervisor.stop()
+    rmSync(withDir.dir, { recursive: true, force: true })
+  }
+
+  // Absent means "a hand-started relay", which keeps its old meaning (`process.cwd()`). Passing an
+  // empty value instead would look like a real directory and resolve relative paths against nothing.
+  const withoutDir = makeSupervisor()
+  try {
+    withoutDir.supervisor.start('192.168.1.100', 7331, 'tok')
+    assert.equal(withoutDir.calls[0].args.includes('--task-dir'), false,
+      'no task dir must mean no flag, not an empty one')
+  } finally {
+    withoutDir.supervisor.stop()
+    rmSync(withoutDir.dir, { recursive: true, force: true })
+  }
+})
+
 test('the ACP agent is handed over as a spec FILE, not a command line', () => {
   // The install path contains a space, and passing it as a string has already produced
   // `Cannot find module '...\Programs\DeepSeek'`.

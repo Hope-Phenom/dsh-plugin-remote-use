@@ -392,6 +392,12 @@ export function apply(ctx, config) {
     // one the operator could not control. That asymmetry is exactly what the 218 MB incident was.
     shotCacheBytes: () => cfg.shotCacheBytes,
     launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp', permissionMode: cfg.workerSessionMode }),
+    // Where a RELATIVE transfer path resolves ON THIS MACHINE. Read lazily because `arming` is
+    // constructed just below; the closure only runs when the listener starts, long after both exist.
+    // It is deliberately the SAME value the pairing string advertises, so the master and the relay
+    // cannot disagree about the task directory -- which is exactly how a relative upload once wrote
+    // into the DSH profile directory while reporting success.
+    taskDir: () => arming.taskCwd,
   })
   const arming = new WorkerArming({
     interfaces: () => networkInterfaces(),

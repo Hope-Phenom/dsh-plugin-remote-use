@@ -47,6 +47,15 @@ export class RelaySupervisor {
     // How many captures the worker keeps. Read at start time rather than captured once, so a
     // change on the settings page applies to the next arming instead of the next DSH restart.
     this.keepShots = deps.keepShots ?? (() => 20)
+    /**
+     * The ARMED task directory, i.e. where a relative transfer path must resolve on this machine.
+     *
+     * It has to be passed to the relay rather than inferred from `process.cwd()`. Measured 2026-10-16:
+     * a supervised relay inherits THIS process's working directory -- the DSH profile directory -- so
+     * `remotePath: "note.txt"` reported success while writing into `...\.dsh\profiles\desktop\`, not
+     * into the directory the operator armed.
+     */
+    this.taskDir = deps.taskDir ?? (() => '')
     // The worker's byte ceiling for its own captures. 0 means no ceiling, which is the shipped
     // default: the count above already bounds ordinary use, and a byte ceiling that appeared on
     // upgrade would start deleting captures the operator never agreed to lose.
@@ -130,6 +139,11 @@ export class RelaySupervisor {
       // every one of them, and the page's setting would only govern the HOST side -- the
       // larger of the two accumulations would be the one the operator could not control.
       '--keep-shots', String(this.keepShots()),
+      // Where a RELATIVE transfer path resolves. Passed explicitly for the same reason as every other
+      // path here: the relay's own `process.cwd()` is not the operator's task directory when the
+      // PLUGIN starts the relay, and a wrong answer is silent -- the transfer succeeds, into the wrong
+      // directory, and reports the path the caller asked for.
+      ...(this.taskDir() === '' ? [] : ['--task-dir', this.taskDir()]),
       // The byte ceiling, beside the count. Both are passed because they bound different things:
       // the count bounds how many captures exist, the byte budget bounds what they occupy, and a
       // worker left running a long GUI loop needs the second one to stay inside a disk budget.
