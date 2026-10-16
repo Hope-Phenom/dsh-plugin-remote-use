@@ -199,6 +199,13 @@ window.__ModuleLoader__.load({
       roleStopHint: '立即生效，且不会联系主机。',
       groupAudit: '最近的裁定',
       auditNone: '尚无裁定记录。',
+      groupTransfers: '文件传输',
+      noTransfers: '尚无文件传输记录。',
+      colDirection: '方向',
+      colPath: '路径',
+      colSize: '大小',
+      transferSent: '上传到节点',
+      transferFetched: '从节点取回',
       auditNote: '追加写入，位置：{p}',
       auditByEngine: '引擎',
       auditByPage: '你在设置页点的',
@@ -442,6 +449,13 @@ window.__ModuleLoader__.load({
       roleStopHint: 'Take effect immediately and never contact the master.',
       groupAudit: 'Recent decisions',
       auditNone: 'No decisions recorded yet.',
+      groupTransfers: 'File transfers',
+      noTransfers: 'No file transfers recorded yet.',
+      colDirection: 'Direction',
+      colPath: 'Path',
+      colSize: 'Size',
+      transferSent: 'sent to node',
+      transferFetched: 'fetched from node',
       auditNote: 'Append-only, at {p}',
       auditByEngine: 'engine',
       auditByPage: 'you, on the settings page',
@@ -1701,6 +1715,12 @@ window.__ModuleLoader__.load({
       const missedCount = Number.isFinite(Number(approvals.missedCount)) ? Number(approvals.missedCount) : missed.length
       const audit = snapshot?.audit ?? { available: false, path: '', error: '', recent: [] }
       const recentAudit = Array.isArray(audit.recent) ? audit.recent : []
+      // The trail is ONE append-only ledger of everything that happened, but the panel's table is
+      // shaped for decisions (tier, option, who ruled). A transfer row has none of those fields, so
+      // feeding it to that table renders a row of dashes under a "decisions" heading -- a silent
+      // misreport of the kind this project keeps finding. Two kinds, two tables.
+      const approvalRows = recentAudit.filter((row) => row?.kind !== 'transfer')
+      const transferRows = recentAudit.filter((row) => row?.kind === 'transfer')
 
       // Refusals that were never seen. Kept in the SAME group as the live requests on purpose: the
       // operator's question after "why did that task fail?" is "was I asked?", and a list one group
@@ -1948,7 +1968,7 @@ window.__ModuleLoader__.load({
                 n: String(Array.isArray(audit.archives) ? audit.archives.length : 0),
               })),
               audit.error === '' ? null : h('p', { className: 'ru-note warn' }, String(audit.error)),
-              recentAudit.length === 0
+              approvalRows.length === 0
                 ? h('p', { className: 'ru-note' }, t('auditNone'))
                 : h('div', { className: 'ru-scroll' },
                   h('table', { className: 'ru-table' },
@@ -1958,7 +1978,7 @@ window.__ModuleLoader__.load({
                       h('th', null, t('colTier')),
                       h('th', null, t('colState')),
                       h('th', null, t('colWorker')))),
-                    h('tbody', null, recentAudit.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
+                    h('tbody', null, approvalRows.map((row, index) => h('tr', { key: `${String(row.at)}-${index}` },
                       h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
                       h('td', { className: 'ru-mono' }, String(row.toolName ?? '\u2014')),
                       h('td', null, shownTier(row)),
@@ -1969,6 +1989,28 @@ window.__ModuleLoader__.load({
                         ' ',
                         h('span', { className: 'ru-dim' }, fmt(t('auditBy'), { by: describeBy(row.by) }))),
                       h('td', null, String(row.peerId ?? ''))))))))),
+
+        // File movement is a durable write on another machine's disk, so it belongs in the ledger --
+        // but it is not a decision, and it gets its own columns rather than being dressed as one.
+        h('div', { className: 'ru-group' },
+          h('h3', { className: 'ru-group-title' }, t('groupTransfers')),
+          transferRows.length === 0
+            ? h('p', { className: 'ru-note' }, t('noTransfers'))
+            : h('div', { className: 'ru-scroll' },
+              h('table', { className: 'ru-table' },
+                h('thead', null, h('tr', null,
+                  h('th', null, t('colStarted')),
+                  h('th', null, t('colDirection')),
+                  h('th', null, t('colPath')),
+                  h('th', null, t('colSize')),
+                  h('th', null, t('colWorker')))),
+                h('tbody', null, transferRows.map((row, index) => h('tr', { key: `${String(row.at)}-t-${index}` },
+                  h('td', { className: 'ru-mono ru-dim' }, formatTime(row.at)),
+                  h('td', null, row.direction === 'send' ? t('transferSent') : t('transferFetched')),
+                  h('td', { className: 'ru-mono' },
+                    String(row.direction === 'send' ? (row.remotePath ?? '') : (row.localPath ?? ''))),
+                  h('td', { className: 'ru-mono' }, formatBytes(Number(row.bytes ?? 0))),
+                  h('td', null, String(row.peer ?? '')))))))),
 
         h('div', { className: 'ru-group' },
           h('h3', { className: 'ru-group-title' }, t('groupTasks')),

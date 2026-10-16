@@ -6,7 +6,9 @@
 // exist so that cannot happen again.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { Readable } from 'node:stream'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -378,6 +380,229 @@ test('screenshot does not require an established ACP session', async () => {
   assert.ok(existsSync(shot.localPath))
   assert.equal(fetchImpl.calls.length, 1)
   rmSync(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// file transfer
+//
+// The bytes must NOT travel through the ACP pump: a multi-gigabyte file inside a JSON-RPC result
+// would be base64 (a third larger), would have to be held in memory, and would queue every GUI
+// control frame behind it on the single relay socket. So the transfers are asserted against the
+// relay's HTTP face, with `fetch` doubled -- the same shape as the screenshot tests above.
+// ---------------------------------------------------------------------------
+
+/** A fetch double that answers the four file endpoints and records every request. */
+function fakeTransferFetch(opts = {}) {
+  const calls = []
+  const impl = async (url, init = {}) => {
+    const method = init.method ?? 'GET'
+    const query = new URL(url)
+    let body = null
+    if (init.body !== undefined && init.body !== null && typeof init.body !== 'string') {
+      const chunks = []
+      for await (const chunk of init.body) chunks.push(chunk)
+      body = Buffer.concat(chunks)
+    }
+    calls.push({ url, method, headers: init.headers ?? {}, query, body, stringBody: typeof init.body === 'string' ? init.body : null })
+    if (opts.throwError !== undefined) throw new Error(opts.throwError)
+    if (opts.status !== undefined && opts.status !== 200) {
+      return { status: opts.status, headers: new Headers(), async text() { return opts.error ?? 'no' }, async json() { return { ok: false, error: opts.error ?? 'no' } } }
+    }
+    if (method === 'PUT') return { status: 200, headers: new Headers(), async json() { return { ok: true, offset: 0, received: body?.length ?? 0 } } }
+    if (method === 'POST') return { status: 200, headers: new Headers(), async json() { return { ok: true, sha256: 'c'.repeat(64), bytes: 1, mtime: 't' } } }
+    if (method === 'DELETE') return { status: 200, headers: new Headers(), async json() { return { ok: true, removed: true, part: '/d/x.part' } } }
+    const payload = opts.payload ?? Buffer.from('downloaded')
+    return {
+      status: 200,
+      headers: new Headers({
+        'x-file-size': String(payload.length),
+        'x-file-sha256': createHash('sha256').update(payload).digest('hex'),
+        'x-file-path': '/abs/from-worker.bin',
+      }),
+      body: Readable.toWeb(Readable.from([payload])),
+    }
+  }
+  impl.calls = calls
+  return impl
+}
+
+/** A connection wired for HTTP transfers, with a scratch receive directory. */
+function makeTransferConnection(fetchImpl, overrides = {}) {
+  const { conn, created } = makeConnection()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-xfer-conn-'))
+  conn.httpBase = overrides.httpBase ?? 'http://worker:7331'
+  conn.token = overrides.token ?? 'secret'
+  conn.fetchImpl = fetchImpl
+  conn.receiveDir = overrides.receiveDir ?? dir
+  conn.transferMaxBytes = overrides.transferMaxBytes ?? 8 * 1024 * 1024 * 1024
+  return { conn, created, dir }
+}
+
+test('sendFile chunks the file over HTTP with the bearer token, and never connects', async () => {
+  const fetchImpl = fakeTransferFetch()
+  const { conn, created, dir } = makeTransferConnection(fetchImpl)
+  const src = join(dir, 'big.bin')
+  const size = 4 * 1024 * 1024 * 2 + 512
+  writeFileSync(src, Buffer.alloc(size, 7))
+
+  assert.equal(conn.connected, false)
+  const result = await conn.sendFile({ localPath: src, remotePath: 'remote.bin' })
+
+  // TWO chunks plus the tail must be two-plus PUTs: one body holding the whole file is the exact
+  // regression this pins, and it is invisible in the result object.
+  const puts = fetchImpl.calls.filter((c) => c.method === 'PUT')
+  assert.equal(puts.length, 3)
+  assert.deepEqual(puts.map((p) => Number(p.query.searchParams.get('offset'))), [0, 4194304, 8388608])
+  assert.deepEqual(puts.map((p) => p.headers['content-length']), ['4194304', '4194304', '512'])
+  assert.deepEqual(puts.map((p) => p.body.length), [4194304, 4194304, 512], 'each request carries only its own slice')
+  assert.equal(puts[0].headers.authorization, 'Bearer secret')
+  assert.equal(result.peerId, 'labpc')
+  assert.equal(result.size, size)
+
+  const commit = fetchImpl.calls.filter((c) => c.method === 'POST')
+  assert.equal(commit.length, 1)
+  assert.match(commit[0].url, /\/file\/commit$/)
+  assert.equal(commit[0].headers['content-type'], 'application/json')
+  assert.equal(JSON.parse(commit[0].stringBody).size, size)
+
+  assert.equal(created.length, 0, 'an upload must not require an ACP session')
+  assert.equal(conn.connected, false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('sendFile refuses a source over transferMaxBytes without issuing a request', async () => {
+  // The host ceiling is checked before anything is sent, so a refusal costs no bytes -- and the
+  // fetch double makes "no request" checkable rather than merely claimed.
+  const fetchImpl = fakeTransferFetch()
+  const { conn, dir } = makeTransferConnection(fetchImpl, { transferMaxBytes: 10 })
+  const src = join(dir, 'big.bin')
+  writeFileSync(src, Buffer.alloc(4096))
+
+  await assert.rejects(() => conn.sendFile({ localPath: src, remotePath: 'remote.bin' }), /exceeds the 10-byte limit/)
+  assert.equal(fetchImpl.calls.length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('fetchFile streams into the receive directory and stages before the final name', async () => {
+  const payload = Buffer.from('the worker sent this')
+  const fetchImpl = fakeTransferFetch({ payload })
+  const { conn, dir } = makeTransferConnection(fetchImpl)
+
+  const result = await conn.fetchFile({ remotePath: 'C:\\work\\report.txt' })
+
+  assert.equal(result.localPath.startsWith(dir), true, `${result.localPath} should be under ${dir}`)
+  assert.match(result.localPath, /labpc-[\dTZ-]+-report\.txt$/, 'the peer id and a stamp make two pulls of one path two files')
+  assert.deepEqual(readFileSync(result.localPath), payload)
+  assert.equal(existsSync(`${result.localPath}.part`), false, 'the staging file must not survive a success')
+  assert.equal(result.receiveDir, dir)
+  assert.equal(fetchImpl.calls[0].headers.authorization, 'Bearer secret')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('fetchFile hashes the body and refuses to rename a mismatched download', async () => {
+  const fetchImpl = fakeTransferFetch({ payload: Buffer.from('real bytes') })
+  const { conn, dir } = makeTransferConnection(fetchImpl)
+  const dest = join(dir, 'exact.bin')
+  // The response is doctored so the digest cannot match: the download must fail and leave nothing
+  // plausible at the destination, because a wrong file with the right name is silent data corruption.
+  const original = fetchImpl
+  conn.fetchImpl = async (url, init) => {
+    const res = await original(url, init)
+    if (res.body !== undefined) res.headers.set('x-file-sha256', 'f'.repeat(64))
+    return res
+  }
+
+  await assert.rejects(() => conn.fetchFile({ remotePath: 'remote.bin', destPath: dest }), /failed verification/)
+  assert.equal(existsSync(dest), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('fetchFile carries the peer id into a transport failure', async () => {
+  const fetchImpl = fakeTransferFetch({ throwError: 'ECONNREFUSED' })
+  const { conn, dir } = makeTransferConnection(fetchImpl)
+  await assert.rejects(
+    () => conn.fetchFile({ remotePath: 'remote.bin', destPath: join(dir, 'x.bin') }),
+    /worker "labpc" GET \/file[\s\S]*ECONNREFUSED/,
+  )
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('both HTTP transfer directions refuse when no HTTP base could be derived', async () => {
+  const fetchImpl = fakeTransferFetch()
+  const { conn, dir } = makeTransferConnection(fetchImpl, { httpBase: '' })
+  const src = join(dir, 'a.bin')
+  writeFileSync(src, Buffer.from('x'))
+  await assert.rejects(() => conn.sendFile({ localPath: src, remotePath: 'r.bin' }), /no HTTP base/)
+  await assert.rejects(() => conn.fetchFile({ remotePath: 'r.bin' }), /no HTTP base/)
+  await assert.rejects(() => conn.abortTransfer({ remotePath: 'r.bin' }), /no HTTP base/)
+  assert.equal(fetchImpl.calls.length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('abortTransfer asks the relay to delete only the staging file', async () => {
+  const fetchImpl = fakeTransferFetch()
+  const { conn, dir } = makeTransferConnection(fetchImpl)
+  const result = await conn.abortTransfer({ remotePath: 'remote.bin' })
+  assert.equal(fetchImpl.calls.length, 1)
+  assert.equal(fetchImpl.calls[0].method, 'DELETE')
+  assert.equal(fetchImpl.calls[0].query.searchParams.get('path'), 'remote.bin')
+  assert.equal(fetchImpl.calls[0].headers.authorization, 'Bearer secret')
+  assert.equal(result.removed, true)
+  assert.equal(result.peerId, 'labpc')
+  // No DELETE may ever name the target itself: cancelling must be unable to destroy a file.
+  assert.equal(fetchImpl.calls[0].query.searchParams.get('path').endsWith('.part'), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('statFile and listFiles ask the worker over the RPC channel, connecting first', async () => {
+  const { conn, created } = makeConnection()
+  const seen = []
+  let connects = 0
+  conn.createBridge = () => {
+    const bridge = fakeBridge()
+    const inner = bridge.connect
+    bridge.connect = async () => { connects += 1; return await inner() }
+    bridge.callPlugin = async (method, params, o) => {
+      seen.push({ method, params, o })
+      if (method === 'dsh-remote/stat') return { ok: true, path: params.path, exists: true, isDir: false, size: 99, mtime: 'T' }
+      return { ok: true, path: params.path, entries: [{ name: 'a', isDir: false, size: 3, mtime: 'T' }], truncated: false }
+    }
+    return bridge
+  }
+
+  const stat = await conn.statFile('C:\\work\\a.bin', { timeoutMs: 5000 })
+  const list = await conn.listFiles('C:\\work', { limit: 10 })
+
+  assert.equal(connects, 1, 'the RPC path needs a session, unlike the HTTP one')
+  assert.equal(conn.connected, true)
+  assert.equal(stat.size, 99)
+  assert.equal(list.entries[0].name, 'a')
+  assert.deepEqual(seen, [
+    { method: 'dsh-remote/stat', params: { path: 'C:\\work\\a.bin' }, o: { timeoutMs: 5000 } },
+    { method: 'dsh-remote/list', params: { path: 'C:\\work', limit: 10 }, o: {} },
+  ])
+})
+
+test('a worker that does not know the stat RPC keeps the link: an older relay is not a dead one', async () => {
+  // REGRESSION SHAPE: tearing the link down here would turn "this worker predates the feature" into a
+  // reconnect loop, so the same reading `workerShotCache` makes must hold on this path too.
+  const { conn, created } = makeConnection()
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  created[0].callPlugin = async () => { throw new Error('unknown plugin method: dsh-remote/stat (-32601)') }
+
+  await assert.rejects(() => conn.statFile('C:\\x'), /-32601/)
+  assert.equal(conn.connected, true, 'the link is healthy; only the capability is missing')
+  assert.equal(created[0].calls.dispose, 0)
+})
+
+test('a transfer RPC over a dead link drops it so the next call reconnects', async () => {
+  const { conn, created } = makeConnection()
+  await conn.startTask({ cwd: 'c', prompt: 'a' })
+  created[0].callPlugin = async () => { throw new Error('ACP connection closed') }
+
+  await assert.rejects(() => conn.listFiles('C:\\x'), /connection closed/)
+  assert.equal(conn.connected, false)
+  assert.equal(created[0].calls.dispose, 1)
 })
 
 // ---------------------------------------------------------------------------

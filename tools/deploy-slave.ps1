@@ -77,6 +77,7 @@ $files = @(
   @{ name = 'prune-shots.mjs'; why = 'IMPORTED BY relay.mjs (new)' },
   @{ name = 'pairing.mjs'; why = 'IMPORTED BY relay.mjs (new)' },
   @{ name = 'net-address.mjs'; why = 'IMPORTED BY relay.mjs (new)' },
+  @{ name = 'file-transfer.mjs'; why = 'IMPORTED BY relay.mjs: the /file endpoints and dsh-remote/stat+list' },
   @{ name = 'selfcheck.ps1'; why = 'S14/S15/S18 path fixes' },
   @{ name = 'screenshot.ps1'; why = 'capture' },
   @{ name = 'make-launch-spec.mjs'; why = 'optional: generates the ACP launch spec' },
@@ -134,7 +135,7 @@ if ($failures -gt 0) {
 Write-Host ''
 Write-Host '--- relay.mjs really imports them ---'
 $relayText = Get-Content -LiteralPath (Join-Path $Source 'relay.mjs') -Raw
-foreach ($dep in 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs') {
+foreach ($dep in 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'file-transfer.mjs') {
   & $check "relay.mjs imports $dep" ($relayText -match [regex]::Escape("./$dep"))
 }
 # ...and the BARE import, which no `./` scan would ever notice.
@@ -257,7 +258,7 @@ $nodeHere = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $remoteMode -and -not $nodeHere) {
   & $check 'node is on PATH (needed to verify and to run the relay)' $false
 } else {
-  foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'make-launch-spec.mjs') {
+  foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'file-transfer.mjs', 'make-launch-spec.mjs') {
     if ((& $exists $name) -ne 'yes') { continue }
     if ($remoteMode) {
       $r = Invoke-Remote "node --check $Destination/$name"

@@ -9,10 +9,11 @@
  *   ws client <--text frames (NDJSON)--> relay --+--> dsh-remote/*   (handled here)
  *                                                +--> everything else --> dsh --profile acp
  *
- * The `dsh-remote/*` methods are `ping`, `selfcheck`, `pairing`, `screenshot` and `shotcache`.
- * `shotcache` is the odd one out: it is the only method that both reports AND deletes (the
+ * The `dsh-remote/*` methods are `ping`, `selfcheck`, `pairing`, `screenshot`, `shotcache`, `stat` and
+ * `list`. `shotcache` is the odd one out: it is the only method that both reports AND deletes (the
  * worker's own captured PNGs), which is why its rules live in `prune-shots.mjs` with their own
- * tests rather than inline here.
+ * tests rather than inline here. `stat`/`list` are the metadata half of file transfer, whose byte
+ * half is HTTP (`/file`, `/file/commit`) for the reason /screenshot is: see file-transfer.mjs.
  *
  * WHY THE RELAY OWNS SELF-CHECK: the readiness report has session-level checks
  * (`S7` unlocked, `S8` live input injection) that only mean anything in an
@@ -30,14 +31,16 @@
  *                  [--selfcheck-script selfcheck.ps1] [--selfcheck-cache-ms 30000]
  *                  [--screenshot-script screenshot.ps1] [--shot-dir <dir>]
  *                  [--keep-shots <n>] [--keep-shot-bytes <n>]
+ *                  [--max-transfer-bytes <n>]
  *                  [--allow-no-auth] [--verbose]
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { timingSafeEqual } from 'node:crypto'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 // Sibling file, not a package: it ships next to this one so a worker needs no install step.
@@ -45,6 +48,19 @@ import { RELAY_SHOT_PATTERN, pruneShots, shotUsage } from './prune-shots.mjs'
 import { encodePairing } from './pairing.mjs'
 import { bestAddress } from './net-address.mjs'
 import { effectiveSessionMode } from './permission-pairing.mjs'
+import {
+  DEFAULT_MAX_TRANSFER_BYTES,
+  commitPart,
+  deletePart,
+  listDir,
+  maxTransferBytesOf,
+  putChunk,
+  rangeOf,
+  readJsonBody,
+  resolveTransferPath,
+  sha256File,
+  statTarget,
+} from './file-transfer.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -63,6 +79,31 @@ const SELFCHECK_SCRIPT = arg('selfcheck-script', join(HERE, 'selfcheck.ps1'))
 const SELFCHECK_CACHE_MS = Number(arg('selfcheck-cache-ms', '30000'))
 const ALLOW_NO_AUTH = argv.includes('--allow-no-auth')
 const VERBOSE = argv.includes('--verbose')
+
+// ---------- file transfer ----------
+/**
+ * The hard write ceiling for `PUT /file`, and the same ceiling for reading one back out.
+ *
+ * WHY THE WORKER GETS ITS OWN CEILING AT ALL: the master has a budget too, but the master is the side
+ * that decided to start the transfer, and a token that leaked -- or a second master that paired with
+ * this worker -- would otherwise be able to fill this disk. A ceiling this process enforces is the
+ * only one that holds when the other side does not cooperate. Both ends default to 8 GiB so a
+ * transfer that never touched a flag does not die at the last chunk.
+ *
+ * Unusable values keep the default rather than removing the ceiling: see `maxTransferBytesOf` in
+ * file-transfer.mjs for why `0` must not mean "no limit" here.
+ */
+const MAX_TRANSFER_BYTES = maxTransferBytesOf(Number(arg('max-transfer-bytes', String(DEFAULT_MAX_TRANSFER_BYTES))))
+
+/**
+ * The task directory: where a RELATIVE transfer path resolves.
+ *
+ * This is the relay's own working directory, which is also what `/healthz` reports as `cwd` and the
+ * directory the agent's sandbox policy uses as its workspace root. Capturing it once is deliberate --
+ * a `process.chdir` anywhere later would silently re-point every relative transfer at a different
+ * directory, and the echoed path would then disagree with the one the operator started the relay in.
+ */
+const TASK_DIR = process.cwd()
 
 // ---------- screenshot ----------
 const SCREENSHOT_SCRIPT = arg('screenshot-script', join(HERE, 'screenshot.ps1'))
@@ -417,6 +458,46 @@ async function handleLocalRpc(msg) {
       }
     }
 
+    case `${PLUGIN_PREFIX}stat`: {
+      // The pre-flight question every transfer starts with: is it there, how big is it, and when was
+      // it last written. It travels over the RPC channel rather than HTTP because the answer is four
+      // fields, and a HEAD would have to be asked on a path this side parsed anyway.
+      const resolved = resolveTransferPath(msg.params?.path, TASK_DIR)
+      if (!resolved.ok) return fail(-32602, resolved.error)
+      try {
+        // `hash: true` is opt-in: a stat is what the master asks before deciding whether to transfer
+        // anything, and hashing an 8 GiB file to answer that would cost more than the transfer.
+        const info = await statTarget(resolved.path, { hash: msg.params?.hash === true })
+        return reply({
+          ok: true,
+          path: resolved.path,
+          exists: info.exists,
+          isDir: info.isDir,
+          size: info.size,
+          mtime: info.mtime,
+          // Absent rather than null when it was not asked for: "not computed" and "computed and
+          // there is no such thing" are different answers, and only one of them is about the file.
+          ...(info.sha256 !== undefined ? { sha256: info.sha256 } : {}),
+        })
+      } catch (e) {
+        return fail(-32603, `stat failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
+    case `${PLUGIN_PREFIX}list`: {
+      const resolved = resolveTransferPath(msg.params?.path, TASK_DIR)
+      if (!resolved.ok) return fail(-32602, resolved.error)
+      try {
+        const listed = await listDir(resolved.path, { limit: msg.params?.limit })
+        // A path that is not a directory is an error, not an empty listing: "there is nothing there"
+        // and "that is a file" lead an operator to opposite conclusions.
+        if (!listed.ok) return fail(-32602, `${listed.error} (path=${resolved.path})`)
+        return reply({ ok: true, path: resolved.path, entries: listed.entries, truncated: listed.truncated })
+      } catch (e) {
+        return fail(-32603, `list failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
     default:
       // Unknown dsh-remote/* method: answer explicitly, never silently forward. A
       // silent forward would make a future protocol addition look like a no-op.
@@ -615,6 +696,219 @@ if (TOKEN === '' && !ALLOW_NO_AUTH) {
 /** Last capture, reused by /screenshot so an RPC followed by a download is one capture. */
 let lastShot
 
+// ---------------------------------------------------------------------------
+// file transfer, over HTTP
+//
+// WHY THESE LIVE NEXT TO /screenshot AND NOT ON THE RPC CHANNEL: the WebSocket carries the ACP pump
+// and the plugin's own control frames on one socket, so a file body on it would queue every GUI
+// control frame behind the bytes -- the same reason the screenshot moved here. What is in this
+// section is only the HTTP shape; every rule it obeys (ranges, `.part` staging, hashing, the commit
+// check) lives in file-transfer.mjs, where a test can reach it.
+// ---------------------------------------------------------------------------
+
+/** Write a JSON response. `content-length` is set explicitly so a truncated reply cannot be mistaken
+ *  for a complete one by a client that is reading a transfer protocol. */
+function jsonOut(res, status, body) {
+  const text = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': String(Buffer.byteLength(text)),
+    'cache-control': 'no-store',
+  })
+  res.end(text)
+}
+
+/**
+ * One audit line per transfer request, on the worker.
+ *
+ * The master keeps the durable audit log; this is the worker's own record, and it exists because the
+ * resolved path is the only place the truth lives. A relative path from a master is meaningless
+ * later -- "which file did that 4 GiB write actually land in" is answerable only from this side, and
+ * there is no cage here (see resolveTransferPath), so the echo IS the safety mechanism.
+ */
+function audit(req, direction, detail) {
+  log(`transfer ${direction} peer=${req.socket.remoteAddress ?? '?'} ${detail}`)
+}
+
+/**
+ * `GET`/`HEAD /file?path=<p>[&offset=<n>]`.
+ *
+ * The WHOLE-FILE sha256 is computed before the headers, in a streaming pre-pass, and that ordering is
+ * forced by the protocol rather than chosen: the digest is a HEADER, so it must be known before the
+ * first body byte, and a header cannot be filled in from the bytes that follow it. The alternatives
+ * were worse -- buffering the file (the one thing this feature may not do) or sending the digest as
+ * an HTTP trailer, which no client of this protocol reads. On a resume (`206`) the file is therefore
+ * read twice, once to hash and once to send; no byte is ever held in memory either way.
+ *
+ * `HEAD` IS THE EXCEPTION, and it has to be: the whole point of asking for headers alone is to learn
+ * the size cheaply, and hashing first would make a probe of a 2 GiB file read 2 GiB. The host's
+ * pre-flight reads only `x-file-size` and the 413, so `HEAD` skips the digest unless `hash=1` asks
+ * for it -- the header is then simply absent, which a caller cannot mistake for a wrong digest.
+ */
+async function serveFileDownload(req, res, url) {
+  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
+
+  const info = await statTarget(resolved.path)
+  if (!info.exists || info.isDir) {
+    jsonOut(res, 404, {
+      ok: false,
+      error: info.isDir ? `${resolved.path} is a directory` : `${resolved.path} does not exist`,
+    })
+    return
+  }
+  // The same ceiling as `PUT`, applied to reads. It is not about this worker's disk -- it is about
+  // the master: a hard limit the receiving side sets is the only one that holds when the other side
+  // is a token someone else holds, and "over the limit" must be the same answer in both directions.
+  if (info.size > MAX_TRANSFER_BYTES) {
+    jsonOut(res, 413, {
+      ok: false,
+      error: `${resolved.path} is ${info.size} bytes, over the ${MAX_TRANSFER_BYTES}-byte ceiling (--max-transfer-bytes)`,
+      limit: MAX_TRANSFER_BYTES,
+    })
+    return
+  }
+
+  const range = rangeOf(info.size, url.searchParams.get('offset'))
+  if (!range.ok) { jsonOut(res, range.status, { ok: false, error: range.error }); return }
+
+  const started = Date.now()
+  // A `HEAD` that hashes the file is NOT a cheap probe: it reads every byte. The host's pre-flight
+  // needs two things -- the size, and whether the ceiling already refuses it -- so the digest is
+  // computed for `GET` (where the receiver verifies against it) and skipped for `HEAD` unless the
+  // caller explicitly asks with `hash=1`.
+  const wantsHash = req.method !== 'HEAD' || url.searchParams.get('hash') === '1'
+  const sha256 = wantsHash ? (await sha256File(resolved.path)).sha256 : ''
+  /** @type {Record<string,string>} */
+  const headers = {
+    // Deliberately generic: this is bytes, not an image or a document, and guessing a type would make
+    // some clients helpfully transform them.
+    'content-type': 'application/octet-stream',
+    'content-length': String(range.length),
+    'cache-control': 'no-store',
+    'x-file-size': String(info.size),
+    'x-file-path': resolved.path,
+    'x-file-mtime': info.mtime ?? '',
+    ...(wantsHash ? { 'x-file-sha256': sha256 } : {}),
+    'x-file-offset': String(range.offset),
+  }
+  if (range.contentRange !== undefined) headers['content-range'] = range.contentRange
+  res.writeHead(range.status, headers)
+  audit(req, 'download', `path=${resolved.path} offset=${range.offset} bytes=${range.length} sha256=${sha256 === '' ? 'not-requested' : sha256} ms=${Date.now() - started}`)
+
+  if (req.method === 'HEAD' || range.length === 0) { res.end(); return }
+  try {
+    // `end` is inclusive and only valid for a non-empty range, which the branch above guarantees.
+    await pipeline(createReadStream(resolved.path, { start: range.offset, end: info.size - 1 }), res)
+  } catch (error) {
+    // A client that hung up mid-download is the ordinary way a transfer is cancelled, and the master
+    // resumes with `offset=`. Nothing on disk changed, so this is a line, not a failure.
+    log(`download of ${resolved.path} interrupted: ${error.message}`)
+    res.destroy()
+  }
+}
+
+/**
+ * `PUT /file?path=<p>&offset=<n>`.
+ *
+ * No method check beyond the route table below: a chunk that arrives out of order is answered with the
+ * offset `.part` actually holds (see putChunk), which is what makes a retry after a dropped
+ * connection continue instead of restart.
+ */
+async function acceptFileChunk(req, res, url) {
+  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
+
+  // A chunked body has no declared length, and the contract makes that a 411 rather than a guess:
+  // without it the receiver cannot tell a complete chunk from a truncated one, and the ceiling cannot
+  // be checked before the bytes are on disk.
+  const chunked = String(req.headers['transfer-encoding'] ?? '').toLowerCase().includes('chunked')
+  const started = Date.now()
+  const result = await putChunk({
+    target: resolved.path,
+    offset: url.searchParams.get('offset') ?? 0,
+    contentLength: chunked ? undefined : req.headers['content-length'],
+    body: req,
+    maxBytes: MAX_TRANSFER_BYTES,
+  })
+
+  if (result.aborted === true) {
+    // There is no client left to answer. `.part` keeps whatever arrived -- those bytes are the resume
+    // point -- and this line is the only record that the transfer stopped short.
+    audit(req, 'upload-interrupted', `path=${resolved.path} received=${result.received} ${result.json.error}`)
+    res.destroy()
+    return
+  }
+  audit(req, 'upload', `path=${resolved.path} offset=${result.json.offset} received=${result.json.received} partBytes=${result.json.partBytes} status=${result.status} ms=${Date.now() - started}`)
+  jsonOut(res, result.status, result.json)
+}
+
+/** `POST /file/commit` -- the only step that can publish a file under its real name. */
+async function acceptFileCommit(req, res) {
+  const parsed = await readJsonBody(req)
+  if (!parsed.ok) { jsonOut(res, parsed.status, parsed.json); return }
+
+  const resolved = resolveTransferPath(parsed.value.path, TASK_DIR)
+  if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
+
+  const started = Date.now()
+  const result = await commitPart({
+    target: resolved.path,
+    sha256: parsed.value.sha256,
+    size: parsed.value.size,
+    overwrite: parsed.value.overwrite === true,
+  })
+  audit(req, 'commit', [
+    `path=${resolved.path}`,
+    `ok=${result.ok}`,
+    `bytes=${result.json.bytes ?? result.json.actualSize ?? 0}`,
+    `sha256=${result.json.sha256 ?? result.json.actual ?? ''}`,
+    `status=${result.status}`,
+    `ms=${Date.now() - started}`,
+  ].join(' '))
+  jsonOut(res, result.status, result.json)
+}
+
+/** `DELETE /file?path=<p>` -- drops the staging file and never the target. */
+async function dropFilePart(req, res, url) {
+  const resolved = resolveTransferPath(url.searchParams.get('path'), TASK_DIR)
+  if (!resolved.ok) { jsonOut(res, 400, { ok: false, error: resolved.error }); return }
+  const result = await deletePart(resolved.path)
+  audit(req, 'abort', `path=${resolved.path} removed=${result.json.removed} part=${result.json.part}`)
+  jsonOut(res, result.status, result.json)
+}
+
+/** The four `/file` endpoints, dispatched by path and method. */
+async function handleFileRequest(req, res, url) {
+  if (url.pathname === '/file/commit') {
+    if (req.method !== 'POST') {
+      res.setHeader('allow', 'POST')
+      jsonOut(res, 405, { ok: false, error: `${req.method} is not allowed on /file/commit` })
+      return
+    }
+    await acceptFileCommit(req, res)
+    return
+  }
+
+  switch (req.method) {
+    case 'GET':
+    case 'HEAD':
+      await serveFileDownload(req, res, url)
+      return
+    case 'PUT':
+      await acceptFileChunk(req, res, url)
+      return
+    case 'DELETE':
+      await dropFilePart(req, res, url)
+      return
+    default:
+      // Explicit, so a POST or PATCH to /file is a named refusal rather than the "/file" handler
+      // silently doing something it was not asked to do.
+      res.setHeader('allow', 'GET, HEAD, PUT, DELETE')
+      jsonOut(res, 405, { ok: false, error: `${req.method} is not allowed on /file` })
+  }
+}
+
 const server = createServer((req, res) => {
   const url = (() => { try { return new URL(req.url, 'http://x') } catch { return undefined } })()
 
@@ -633,8 +927,11 @@ const server = createServer((req, res) => {
       // The mode the child this relay spawns will actually run at, so a mismatch between "what the
       // operator set" and "what this process will do" is visible from either side.
       ...(() => { const m = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env }); return { sessionMode: m.mode, sessionModeFrom: m.from } })(),
-      pluginRpc: [`${PLUGIN_PREFIX}ping`, `${PLUGIN_PREFIX}selfcheck`, `${PLUGIN_PREFIX}screenshot`],
-      http: ['/healthz', '/screenshot'],
+      pluginRpc: [`${PLUGIN_PREFIX}ping`, `${PLUGIN_PREFIX}selfcheck`, `${PLUGIN_PREFIX}screenshot`, `${PLUGIN_PREFIX}stat`, `${PLUGIN_PREFIX}list`],
+      http: ['/healthz', '/screenshot', '/file', '/file/commit'],
+      // A master that has just paired can see, before it tries anything, which byte ceiling this
+      // worker will hold it to -- the number a `413` would otherwise announce mid-transfer.
+      maxTransferBytes: MAX_TRANSFER_BYTES,
     }))
     return
   }
@@ -676,6 +973,25 @@ const server = createServer((req, res) => {
       } else {
         try { res.end() } catch { /* already sent */ }
       }
+    })
+    return
+  }
+
+  // The transfer surface. One token check for all four endpoints, exactly as /screenshot does it, so
+  // a new endpoint cannot be added here without passing through the same gate.
+  if (url !== undefined && (url.pathname === '/file' || url.pathname === '/file/commit')) {
+    if (!tokenOk(bearerOf(req))) {
+      jsonOut(res, 401, { ok: false, error: 'unauthorized' })
+      return
+    }
+    handleFileRequest(req, res, url).catch((error) => {
+      // A throw from here is a local failure -- a disk that refused, a path that vanished mid-flight.
+      // It must be LOUD: answering 200 for a transfer that did not land is the silent-failure class
+      // this whole feature is built to avoid, and the master's commit check cannot catch what it was
+      // never told.
+      log(`/file failed: ${error?.stack ?? error}`)
+      if (!res.headersSent) jsonOut(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      else { try { res.end() } catch { /* already gone */ } }
     })
     return
   }
@@ -777,6 +1093,9 @@ server.listen(PORT, HOST, () => {
   log(`agent: ${LAUNCH.command}`)
   log(`       ${LAUNCH.args.join(' ')}`)
   log(`self-check script: ${SELFCHECK_SCRIPT} (cache ${SELFCHECK_CACHE_MS}ms)`)
+  // Printed because it is the one setting that turns a working transfer into a 413 at an arbitrary
+  // byte, and the operator's only other clue is that status code.
+  log(`file transfer: task dir ${TASK_DIR}, ceiling ${MAX_TRANSFER_BYTES} bytes`)
   if (TOKEN === '') log('WARNING: auth disabled')
   // Leave the pairing string where an operator can find it. It is written on every start so it
   // cannot go stale against a rotated token -- a pairing string with the OLD token fails with

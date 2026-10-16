@@ -71,6 +71,7 @@ profile 的 `package.json` 长这样：
 | `remote_selfcheck` | 节点就绪报告。**委托前先调它**——未就绪的节点会被派单门禁拒绝 |
 | `remote_agents` | 查看任务进度；`action: status` / `wait` 盯某一个任务，**任务落定后把它的答案正文一并取回** |
 | `remote_screenshot` | 抓节点屏幕并落盘到主机，然后用 `read_image` 看 |
+| `remote_file` | **在主节点与工作节点之间传文件**——`action: send` / `fetch` / `list` / `stat`。不需要 SSH、不需要 `scp`、节点上不需要任何配置，而且它**不占用节点唯一的 GUI 任务槽**，所以 GUI 任务在跑的时候也能传 |
 | `remote_interrupt` | 停止任务（协作式） |
 
 后台派单的结果这样取回（这是后台模式唯一的路）：

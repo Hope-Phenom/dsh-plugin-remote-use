@@ -27,6 +27,16 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { DEFAULT_KEEP_SHOTS, DEFAULT_SHOT_CACHE_BYTES, clearShots, pruneShots, scanShotUsage } from '../core/shot-gc.js'
+import {
+  DEFAULT_TRANSFER_MAX_BYTES,
+  TRANSFER_CHUNK_BYTES,
+  abortTransfer,
+  defaultReceiveDir,
+  downloadFile,
+  listFiles,
+  statFile,
+  uploadFile,
+} from '../core/transfer.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -75,6 +85,8 @@ export class PeerConnection {
    * @param {string} [opts.token]      bearer for those endpoints
    * @param {string} [opts.shotDir]    where downloaded screenshots are written
    * @param {number} [opts.shotCacheBytes] byte ceiling for those downloads; <= 0 disables it
+   * @param {string} [opts.receiveDir] where received FILES are written (never automatically pruned)
+   * @param {number} [opts.transferMaxBytes] host-side refusal ceiling for ONE transfer
    * @param {typeof fetch} [opts.fetchImpl]
    * @param {number} [opts.heartbeatMs] liveness probe interval; 0 disables it
    * @param {number} [opts.heartbeatTimeoutMs]
@@ -98,6 +110,36 @@ export class PeerConnection {
       ? Number(opts.shotCacheBytes)
       : DEFAULT_SHOT_CACHE_BYTES
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
+    /**
+     * Where files pulled from this worker land.
+     *
+     * WHY NOT `shotDir`: that one is in the system temp directory and IS pruned by `pruneShots`. A
+     * received file is output the operator explicitly asked for, so it lives under the plugin's own
+     * state directory and is never deleted automatically -- silently removing requested output is a
+     * different act from reclaiming a cache, and the receive directory therefore has no GC.
+     */
+    this.receiveDir = opts.receiveDir ?? defaultReceiveDir()
+    /**
+     * Host-side ceiling for ONE transfer, checked BEFORE anything is sent (see core/transfer.js).
+     *
+     * Captured at construction, like `keepShots` and for the same reason: the refusal has to be
+     * answerable before a single byte is read, and a budget that changed mid-transfer would leave
+     * "was this allowed?" unanswerable after the fact.
+     */
+    this.transferMaxBytes = Number.isFinite(Number(opts.transferMaxBytes)) && opts.transferMaxBytes !== null && opts.transferMaxBytes !== undefined
+      ? Number(opts.transferMaxBytes)
+      : DEFAULT_TRANSFER_MAX_BYTES
+    /**
+     * How much of a file travels per PUT/GET, i.e. the resume granularity.
+     *
+     * It has to be forwarded explicitly: the core reads `opts.chunkBytes` (see its
+     * `chunkBytes` default), but an option a caller passes and the connection drops is a setting
+     * that silently does nothing -- the master would honour `transferChunkBytes` everywhere except
+     * on the wire.
+     */
+    this.transferChunkBytes = Number.isFinite(Number(opts.transferChunkBytes)) && Number(opts.transferChunkBytes) > 0
+      ? Math.floor(Number(opts.transferChunkBytes))
+      : TRANSFER_CHUNK_BYTES
     this.heartbeatMs = Number.isFinite(opts.heartbeatMs) ? Math.max(0, Number(opts.heartbeatMs)) : DEFAULT_HEARTBEAT_MS
     this.heartbeatTimeoutMs = Number.isFinite(opts.heartbeatTimeoutMs)
       ? Math.max(1, Number(opts.heartbeatTimeoutMs))
@@ -306,6 +348,193 @@ export class PeerConnection {
       // able to see that the plugin is reclaiming its own files, and how many it kept.
       pruned,
     }
+  }
+
+  /**
+   * The HTTP face of this worker's relay, wired for one transfer.
+   *
+   * WHY ONE PLACE: every file endpoint needs the same three things -- the derived origin, the bearer
+   * header and the fetch that is actually in use -- and the three must agree. Two copies of this
+   * (one per direction) is how a `wss://` worker ends up being uploaded to over plain `http://`, or
+   * how a test that injected `fetchImpl` silently falls back to the global one.
+   */
+  #httpChannel() {
+    if (this.httpBase === '') {
+      throw new Error(`PeerConnection(${this.peerId}): no HTTP base derived from the worker URL`)
+    }
+    if (typeof this.fetchImpl !== 'function') {
+      throw new Error('PeerConnection: no fetch implementation available')
+    }
+    const fetchImpl = this.fetchImpl
+    return {
+      base: this.httpBase,
+      authHeaders: () => (this.token === '' ? {} : { authorization: `Bearer ${this.token}` }),
+      head: (url, init) => fetchImpl(url, { ...init, method: 'HEAD' }),
+      put: (url, init) => fetchImpl(url, init),
+      post: (url, init) => fetchImpl(url, init),
+      get: (url, init) => fetchImpl(url, init),
+      del: (url, init) => fetchImpl(url, init),
+    }
+  }
+
+  /**
+   * Send one local file to the worker.
+   *
+   * WHY IT DOES NOT GO THROUGH THE RPC: the payload would have to be base64 inside a JSON-RPC result
+   * (a third larger) and would cross the ACP message pump, which exists for small control frames --
+   * the same reasoning that put screenshots on HTTP. Bytes travel on the relay's HTTP side.
+   *
+   * WHY IT SKIPS `ensure()`: an upload must work while the agent is busy, and a worker whose link is
+   * down can still accept one, so requiring a session would refuse a transfer the relay would have
+   * taken. That is the same choice `screenshot()` makes.
+   *
+   * @param {{ localPath: string, remotePath: string, overwrite?: boolean, timeoutMs?: number,
+   *           signal?: AbortSignal, onProgress?: Function }} req
+   * @returns {Promise<object>} the core's upload report, plus `peerId` and `httpBase`
+   */
+  async sendFile(req) {
+    const result = await uploadFile({
+      peerId: this.peerId,
+      localPath: req.localPath,
+      remotePath: req.remotePath,
+      channel: this.#httpChannel(),
+      overwrite: req.overwrite === true,
+      maxBytes: Number.isFinite(req.maxBytes) ? Number(req.maxBytes) : this.transferMaxBytes,
+      chunkBytes: Number.isFinite(req.chunkBytes) ? Number(req.chunkBytes) : this.transferChunkBytes,
+      timeoutMs: req.timeoutMs,
+      signal: req.signal,
+      onProgress: req.onProgress,
+    })
+    return { ...result, peerId: this.peerId, httpBase: this.httpBase }
+  }
+
+  /**
+   * Pull one remote file into `receiveDir` (or `destPath`), atomically.
+   *
+   * The default destination is derived from the REMOTE file's own name so a download the operator
+   * did not name still lands under the name the worker knows -- and gets a timestamp prefix, because
+   * two pulls of the same path must not silently overwrite each other. The `.part` staging file the
+   * core uses is what makes an interrupted pull resumable and the destination path trustworthy.
+   *
+   * @param {{ remotePath: string, destPath?: string, overwrite?: boolean, timeoutMs?: number,
+   *           signal?: AbortSignal, onProgress?: Function }} req
+   * @returns {Promise<object>} the core's download report, plus `peerId` and `receiveDir`
+   */
+  async fetchFile(req) {
+    const remotePath = String(req.remotePath ?? '')
+    const destPath = typeof req.destPath === 'string' && req.destPath !== ''
+      ? req.destPath
+      : join(this.receiveDir, this.#receivedName(remotePath))
+    const result = await downloadFile({
+      peerId: this.peerId,
+      remotePath,
+      destPath,
+      channel: this.#httpChannel(),
+      overwrite: req.overwrite === true,
+      maxBytes: Number.isFinite(req.maxBytes) ? Number(req.maxBytes) : this.transferMaxBytes,
+      chunkBytes: Number.isFinite(req.chunkBytes) ? Number(req.chunkBytes) : this.transferChunkBytes,
+      timeoutMs: req.timeoutMs,
+      signal: req.signal,
+      onProgress: req.onProgress,
+    })
+    return { ...result, peerId: this.peerId, httpBase: this.httpBase, receiveDir: this.receiveDir }
+  }
+
+  /**
+   * A collision-free local name for an unnamed download.
+   *
+   * The worker's own basename is kept -- it is the name the operator will recognise -- but prefixed
+   * with the peer id and a stamp, so two workers sending `report.pdf`, or the same worker sending it
+   * twice, cannot land on one path. A trailing separator is dropped so a remote directory path cannot
+   * produce a name that is only a directory reference.
+   */
+  #receivedName(remotePath) {
+    const last = String(remotePath).replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
+    // The remote basename reaches the FILESYSTEM here, so the shapes that are not writable names are
+    // replaced rather than passed through: an empty result or a traversal token would make a path
+    // that means something other than "a file in the receive directory", and on Windows the reserved
+    // device names (`NUL`, `CON`, `COM1`...) address hardware, not files -- a download that named
+    // itself `NUL` would fail with an error that looks nothing like a naming problem.
+    const safe = last === '' || last === '.' || last === '..' || /^(?:nul|con|prn|aux|com[1-9]|lpt[1-9])(?:\..*)?$/iu.test(last)
+      ? 'file'
+      : last
+    const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, '-')
+    return `${this.peerId}-${stamp}-${safe}`
+  }
+
+  /**
+   * Ask the worker what it knows about one path.
+   *
+   * A small JSON question over the RPC channel the plugin already owns: existence and size are a
+   * handful of bytes, and reusing the channel means no new endpoint and no second thing to
+   * authenticate. `HEAD /file` is deliberately NOT used here -- it is kept for the upload pre-flight,
+   * where the response headers are the point.
+   *
+   * @param {string} path
+   * @param {{ timeoutMs?: number }} [opts]
+   */
+  async statFile(path, opts = {}) {
+    await this.ensure()
+    if (typeof this.bridge?.callPlugin !== 'function') {
+      throw new Error(`PeerConnection(${this.peerId}): bridge does not implement callPlugin`)
+    }
+    return await this.#withRpc((client) => statFile(client, path, opts), opts)
+  }
+
+  /**
+   * List one directory on the worker.
+   * @param {string} path
+   * @param {{ limit?: number, timeoutMs?: number }} [opts]
+   */
+  async listFiles(path, opts = {}) {
+    await this.ensure()
+    if (typeof this.bridge?.callPlugin !== 'function') {
+      throw new Error(`PeerConnection(${this.peerId}): bridge does not implement callPlugin`)
+    }
+    return await this.#withRpc((client) => listFiles(client, path, opts), opts)
+  }
+
+  /**
+   * Run one transfer RPC, discarding the link only when the failure was the link's fault.
+   *
+   * A worker that does not know the method yet (an older relay) is a HEALTHY worker with a missing
+   * capability: tearing the session down over it would turn "this relay is older than the feature"
+   * into a reconnect loop, which is precisely the reading `workerShotCache` already makes.
+   *
+   * The call's own options (`limit`) stay the CALLER's business -- only the timeout is pulled out for
+   * the transport. Collapsing the two once dropped `listFiles`'s limit on the floor, which produces
+   * an unfiltered directory listing that looks like it honoured a limit it never sent.
+   */
+  async #withRpc(run, opts = {}) {
+    const client = { rpc: (method, params, rpcOpts) => this.bridge.callPlugin(method, params, rpcOpts) }
+    const rpcOpts = Number.isFinite(opts.timeoutMs) ? { timeoutMs: Number(opts.timeoutMs) } : {}
+    try {
+      return await run(client, rpcOpts)
+    } catch (error) {
+      await this.#invalidateIfTransportError(error)
+      throw error
+    }
+  }
+
+  /**
+   * Give up on a transfer by deleting the WORKER's staging file.
+   *
+   * The contract makes this safe to offer: `DELETE /file` removes `<path>.part` and never the target,
+   * so the worst outcome of cancelling is losing resume progress. A partial upload therefore cannot be
+   * mistaken for a finished one later, and the operator cannot accidentally delete real data by
+   * cancelling.
+   *
+   * @param {{ remotePath: string, timeoutMs?: number, signal?: AbortSignal }} req
+   */
+  async abortTransfer(req) {
+    const result = await abortTransfer({
+      peerId: this.peerId,
+      remotePath: req.remotePath,
+      channel: this.#httpChannel(),
+      timeoutMs: req.timeoutMs,
+      signal: req.signal,
+    })
+    return { ...result, peerId: this.peerId }
   }
 
   /**

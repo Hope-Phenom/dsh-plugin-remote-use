@@ -111,6 +111,10 @@ export const REMOTE_TOOL_NAMES = Object.freeze([
   'remote_interrupt',
   'remote_selfcheck',
   'remote_screenshot',
+  // Moves files across the same paired link the rest of these use. It rides the relay's HTTP surface
+  // rather than the ACP session, so a copy neither waits for the worker's GUI slot nor is governed by
+  // its session sandbox mode -- see DESIGN's transfer section for why that is deliberate.
+  'remote_file',
   // The delegation entry point. It is in this list for the same reason as the others: the list
   // drives BOTH the per-session deny mask (hides these tools from a session that has not run
   // `/remote-use on`) and the fail-closed execution guard. Registering a remote tool without
@@ -229,6 +233,27 @@ export const Config = Schema !== null
      */
     workerSessionMode: Schema.string().default('danger-full-access'),
     /**
+     * The largest single file the transfer tools will move, in either direction.
+     *
+     * WHY THERE ARE TWO CEILINGS: this one is the HOST's policy and it is checked BEFORE anything is
+     * sent (a `stat`/`HEAD` pre-flight), so an oversized transfer is refused early instead of eating
+     * a disk first. The relay carries its own hard `--max-transfer-bytes`, because this value lives in
+     * the master's config and a worker must not depend on a remote machine's politeness.
+     *
+     * DELIBERATELY NOT ON THE SETTINGS PAGE. Every page-editable key has to be registered in four
+     * places (schema, save route, MANAGED_KEYS, currentSettings) and each omission fails silently --
+     * see PITFALLS F37. These are deployment constants an operator sets once in YAML, so they stay
+     * out of that blast radius.
+     */
+    transferMaxBytes: Schema.number().default(8 * 1024 * 1024 * 1024),
+    /**
+     * How much of a file travels per HTTP request, and therefore the resume granularity.
+     *
+     * 4 MiB is the compromise: large enough that a 1 GiB transfer is ~256 requests rather than
+     * thousands, small enough that a dropped connection costs at most one chunk of re-sending.
+     */
+    transferChunkBytes: Schema.number().default(4 * 1024 * 1024),
+    /**
      * Rotate the audit trail once the live file reaches this many bytes.
      *
      * The trail is append-only, so nothing stops it growing; without a cap it grows for as long as
@@ -266,6 +291,8 @@ export const Config = Schema !== null
     // The deployment default for a remote session, and the reason is in the schema above: the GUI
     // failure it prevents is silent, so it cannot be left to a per-call decision.
     workerSessionMode: 'danger-full-access',
+    transferMaxBytes: 8 * 1024 * 1024 * 1024,
+    transferChunkBytes: 4 * 1024 * 1024,
     auditMaxBytes: 8 * 1024 * 1024,
     auditKeepFiles: 5,
     delegationPolicy: DEFAULT_DELEGATION_POLICY,
@@ -432,6 +459,12 @@ export function apply(ctx, config) {
       // `policyStamp` includes it: a connection that kept the old ceiling would enforce a budget
       // the page no longer shows.
       shotCacheBytes: cfg.shotCacheBytes,
+      // The two transfer ceilings go to the CONNECTION as well as to the tool. The tool passes them
+      // per call, so a direct `connection.sendFile` (or any future caller) would otherwise fall back
+      // to the connection's own defaults and quietly ignore what the operator configured -- a setting
+      // honoured on one path and not the other is the F32 shape.
+      transferMaxBytes: cfg.transferMaxBytes,
+      transferChunkBytes: cfg.transferChunkBytes,
       createBridge: () => new AcpBridge({
         url: worker.url,
         token: worker.token,
@@ -688,7 +721,14 @@ export function apply(ctx, config) {
   // workers, which was fine while the worker list was fixed at load time -- but the page can
   // now add the first worker at runtime, and a session that started with none would then have
   // no tools to drive it with.
-  for (const def of makeRemoteTools({ registry, peers })) {
+  for (const def of makeRemoteTools({
+    registry,
+    peers,
+    audit,
+    // The two ceilings are read ONCE here, like `keepShots`: a transfer that started under one policy
+    // should not change its mind halfway through because the config was reloaded.
+    transfer: { maxBytes: cfg.transferMaxBytes, chunkBytes: cfg.transferChunkBytes },
+  })) {
     ctx.effect(() => ctx.tools.register(def), `remote-use: tool ${def.name}`)
   }
 
@@ -909,6 +949,15 @@ export function normalizeConfig(config) {
     // say "do not rotate / keep every archive", which is a choice, not an invalid value.
     auditMaxBytes: Number.isFinite(config?.auditMaxBytes) ? Number(config.auditMaxBytes) : 8 * 1024 * 1024,
     auditKeepFiles: Number.isFinite(config?.auditKeepFiles) ? Number(config.auditKeepFiles) : 5,
+    // CLAMPED, unlike the two audit caps above, because these are not "a budget you can switch off":
+    // `transferMaxBytes: 0` would refuse every file (nonsense dressed as a setting), and a chunk of
+    // 0 would make the resume loop never advance.
+    transferMaxBytes: Number.isFinite(config?.transferMaxBytes) && Number(config.transferMaxBytes) > 0
+      ? Math.floor(Number(config.transferMaxBytes))
+      : 8 * 1024 * 1024 * 1024,
+    transferChunkBytes: Number.isFinite(config?.transferChunkBytes) && Number(config.transferChunkBytes) > 0
+      ? Math.floor(Number(config.transferChunkBytes))
+      : 4 * 1024 * 1024,
     // `undefined` means "not configured" and takes the default; an explicit empty string is
     // the operator switching the injection OFF, which must survive. `??` would be wrong here
     // in the other direction; the check is deliberately about the type.

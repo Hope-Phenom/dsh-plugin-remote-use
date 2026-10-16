@@ -19,6 +19,7 @@
  */
 
 import { blocksToText } from '../provider/remote-provider.js'
+import { makeTransferQueue } from '../core/transfer-queue.js'
 
 /**
  * Build an object-rooted JSON Schema from a field map.
@@ -80,10 +81,16 @@ export function objectSchema(fields) {
  * @param {object} deps
  * @param {import('./task-registry.js').TaskRegistry} deps.registry
  * @param {Map<string, {peerId:string, name:string, bridge:any, selfcheck:() => Promise<object>, defaultCwd:string}>} deps.peers
+ * @param {{ record: (entry: object) => unknown }} [deps.audit]  the transfer ledger
+ * @param {{ maxBytes: number, chunkBytes: number }} [deps.transfer]  ceilings, read once at load
  * @returns {ToolDefinition[]}
  */
 export function makeRemoteTools(deps) {
   const { registry, peers } = deps
+  const audit = deps.audit
+  const transfer = deps.transfer ?? {}
+  // One lane for the life of this plugin instance, i.e. per host, keyed by peer inside.
+  const transfers = makeTransferQueue()
 
   /** @type {ToolDefinition} */
   const remoteAgents = {
@@ -358,7 +365,181 @@ export function makeRemoteTools(deps) {
     },
   }
 
-  return [remoteAgents, remoteInterrupt, remoteSelfcheck, remoteScreenshot, remoteSubagent]
+  /**
+   * Move files between this machine and a paired worker.
+   *
+   * WHY THIS EXISTS: the only way to get a file onto a worker used to be `scp`, which requires the
+   * operator to install and configure SSH on that machine before any of this works. The paired link
+   * already carries an authenticated channel (the same token, the same port), so a transfer needs no
+   * new dependency, no new credential and no new firewall rule -- and it stays inside the LAN.
+   *
+   * WHY IT DOES NOT GO THROUGH THE WORKER'S AGENT: the alternative is to make the worker's model
+   * write the file, i.e. put the bytes in a prompt. That costs tokens proportional to the file, goes
+   * through a model that can mangle binary, cannot be verified, and -- worst -- occupies the worker's
+   * GUI slot, which is exclusive, so a 2 GiB copy would block the visual work it exists to support.
+   * Transfers ride the relay's own HTTP surface instead, on their own per-peer lane.
+   */
+  const remoteFile = {
+    name: 'remote_file',
+    group: 'remote',
+    description:
+      'Move files between this machine and a paired LAN worker, over the link that is already paired.\n'
+      + 'Use it instead of `scp`/SSH: no SSH setup is needed on the worker, and it works while that '
+      + 'worker is busy with a GUI task, because a transfer never uses the worker\'s single task slot.\n'
+      + 'action="send": upload a local file to the worker. Needs `localPath` and `remotePath`.\n'
+      + 'action="fetch": download a file from the worker. Needs `remotePath`; `localPath` defaults to '
+      + 'this machine\'s transfer directory. The tool returns the absolute local path it wrote.\n'
+      + 'action="list": list a directory on the worker (name, size, mtime).\n'
+      + 'action="stat": existence, size and mtime of one path on the worker.\n'
+      + 'PATHS: a relative `remotePath` resolves against the worker\'s task directory; an absolute one '
+      + 'is used as given. The resolved path is always reported back, so what happened is visible.\n'
+      + 'An existing destination is NEVER overwritten unless you pass `overwrite: true`.\n'
+      + 'Large files are chunked and verified with a sha256 at the end; a dropped connection resumes '
+      + 'rather than restarting. The size ceiling is `transferMaxBytes` (config, default 8 GiB).',
+    parameters: objectSchema({
+      action: { type: 'string', required: true, description: 'send | fetch | list | stat' },
+      peerId: { type: 'string', description: 'Worker to use. Omit when only one worker is paired.' },
+      localPath: {
+        type: 'string',
+        description: 'For send: the local file to upload. For fetch: where to save it '
+          + '(default: this machine\'s transfer directory, and the name is de-duplicated, never clobbered).',
+      },
+      remotePath: {
+        type: 'string',
+        description: 'Path on the worker. Relative paths resolve against the worker\'s task directory.',
+      },
+      overwrite: { type: 'boolean', description: 'Allow replacing the destination. Defaults to false.' },
+    }),
+    output: {
+      schema: { type: 'string' },
+      render: (_args, result) => [{ type: 'text', text: String(result ?? '') }],
+    },
+    async execute(args, exec) {
+      const which = typeof args?.peerId === 'string' && args.peerId !== ''
+        ? peers.get(args.peerId)
+        : [...peers.values()][0]
+      if (which === undefined) {
+        return typeof args?.peerId === 'string' && args.peerId !== ''
+          ? `remote_file: no worker with peerId "${args.peerId}"`
+          : 'remote_file: no paired workers'
+      }
+      const connection = which.connection
+      if (connection === undefined) return `remote_file: worker "${which.peerId}" has no connection`
+      const action = String(args?.action ?? '')
+      const remotePath = typeof args?.remotePath === 'string' ? args.remotePath : ''
+      const localPath = typeof args?.localPath === 'string' ? args.localPath : ''
+
+      // list/stat are cheap metadata reads, not transfers: they must not queue behind a 2 GiB copy.
+      if (action === 'list' || action === 'stat') {
+        try {
+          if (action === 'stat') {
+            if (remotePath === '') return 'remote_file: stat needs remotePath'
+            const info = await connection.statFile(remotePath)
+            if (info?.exists !== true) return `remote_file: "${info?.path ?? remotePath}" does not exist on ${which.name}`
+            const kind = info.isDir === true ? 'directory' : 'file'
+            return [
+              `${which.name}: ${info.path} is a ${kind}.`,
+              info.isDir === true ? '' : `Size: ${info.size} bytes`,
+              `Modified: ${info.mtime || 'unknown'}`,
+            ].filter((l) => l !== '').join('\n')
+          }
+          const listing = await connection.listFiles(remotePath === '' ? '.' : remotePath)
+          const entries = Array.isArray(listing?.entries) ? listing.entries : []
+          const lines = [`${which.name}: ${listing?.path ?? remotePath} (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})`]
+          for (const e of entries) {
+            lines.push(`  ${e.isDir === true ? 'd' : '-'} ${String(e.size ?? 0).padStart(12)}  ${e.mtime ?? ''}  ${e.name}`)
+          }
+          if (listing?.truncated === true) lines.push('  (truncated -- more entries than the worker returned)')
+          return lines.join('\n')
+        } catch (error) {
+          return `remote_file ${action} failed for "${which.peerId}": ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+
+      if (action !== 'send' && action !== 'fetch') {
+        return `remote_file: unknown action "${action}" (expected send, fetch, list or stat)`
+      }
+      if (remotePath === '') return `remote_file: ${action} needs remotePath`
+      if (action === 'send' && localPath === '') return 'remote_file: send needs localPath'
+
+      // Report the wait BEFORE entering the lane: a queued copy that says nothing is indistinguishable
+      // from a hung one (PITFALLS: a slow feature and a broken one look the same to the caller).
+      const ahead = transfers.depth(which.peerId)
+      const startedAt = Date.now()
+      const progress = []
+      const onProgress = (p) => {
+        // Keep the last few marks only; a 1 GiB transfer would otherwise build a huge array.
+        if (progress.length > 24) progress.shift()
+        progress.push(p)
+      }
+
+      try {
+        const result = await transfers.run(which.peerId, () => (action === 'send'
+          ? connection.sendFile({
+            localPath,
+            remotePath,
+            overwrite: args?.overwrite === true,
+            maxBytes: transfer.maxBytes,
+            chunkBytes: transfer.chunkBytes,
+            onProgress,
+            signal: exec?.signal,
+          })
+          : connection.fetchFile({
+            remotePath,
+            // `destPath`, not `localPath`: that is the name the connection takes, and passing the
+            // wrong one is silent -- the file lands in the default receive directory and the caller
+            // is told it succeeded somewhere else.
+            destPath: localPath === '' ? undefined : localPath,
+            overwrite: args?.overwrite === true,
+            maxBytes: transfer.maxBytes,
+            onProgress,
+            signal: exec?.signal,
+          })))
+        const elapsedMs = Date.now() - startedAt
+        const bytes = Number(result?.bytes ?? 0)
+        const sha = String(result?.sha256 ?? '')
+        // The RESOLVED remote path, not the one the caller typed: a relative path is resolved against
+        // the worker's task directory, and the whole point of echoing it is that the caller learns
+        // where the file actually went. Read defensively because the transfer layer names it
+        // `remotePath` while an older shape used `path`.
+        const resolvedRemote = String(result?.remotePath ?? result?.path ?? remotePath)
+        // The ledger row: a transfer is a durable write on someone else's disk, so it belongs in the
+        // same trail as approvals rather than only in this tool's output.
+        if (typeof audit?.record === 'function') {
+          audit.record({
+            kind: 'transfer',
+            direction: action,
+            peer: which.peerId,
+            localPath: action === 'send' ? localPath : String(result?.localPath ?? ''),
+            remotePath: resolvedRemote,
+            bytes,
+            sha256: sha,
+            ms: elapsedMs,
+            overwrite: args?.overwrite === true,
+          })
+        }
+        const head = action === 'send'
+          ? `Uploaded to ${which.name}: ${resolvedRemote}`
+          : `Downloaded from ${which.name}: ${resolvedRemote}`
+        const lines = [
+          head,
+          action === 'fetch' ? `Local file: ${String(result?.localPath ?? '')}` : `Local source: ${localPath}`,
+          `Size: ${bytes} bytes in ${elapsedMs}ms`,
+          sha === '' ? '' : `sha256: ${sha}`,
+        ].filter((l) => l !== '')
+        if (ahead > 0) lines.push(`(waited behind ${ahead} transfer(s) on this worker)`)
+        if (action === 'fetch') {
+          lines.push('')
+          lines.push(`Next: read it with the file tools, or \`read_image\` if it is an image.`)
+        }
+        return lines.join('\n')
+      } catch (error) {
+        return `remote_file ${action} failed for "${which.peerId}": ${error instanceof Error ? error.message : String(error)}`
+      }
+    },
+  }
+
+  return [remoteAgents, remoteInterrupt, remoteSelfcheck, remoteScreenshot, remoteFile, remoteSubagent]
 }
 
 /**

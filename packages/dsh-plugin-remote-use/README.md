@@ -78,6 +78,7 @@ even when written correctly, because a Web session's model-facing tool catalog i
 | `remote_selfcheck` | The node's readiness report. **Call it before delegating** — a node that is not ready is refused by the dispatch gate |
 | `remote_agents` | Task progress; `action: status` / `wait` for one task, and **it returns that task's answer text once the task has settled** |
 | `remote_screenshot` | Capture the node's screen to the master, then look at it with `read_image` |
+| `remote_file` | **Move files to and from a node** — `action: send` / `fetch` / `list` / `stat`. No SSH, no `scp`, no setup on the node, and it does **not** occupy the node's single GUI task slot, so a copy can run while a visual task is in flight |
 | `remote_interrupt` | Stop a task (cooperative) |
 
 Collecting a background delegation's answer — the only route back:
