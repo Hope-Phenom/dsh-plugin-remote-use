@@ -106,7 +106,10 @@ shows the **audit trail**, edits the delegation policy, and can **arm this machi
 
 - **Off by default** — a new session injects no policy and cannot see the remote tools at all
 - **The sandbox must actually hold** — if confinement cannot be *proved*, worker mode is **refused**,
-  not warned about
+  not warned about. What the worker needs (a materialized mediator, plus a `sandbox` row naming it) is
+  **hand-deployed and can disappear**; the arming panel therefore reports it on **page load** and hands
+  back a ready-to-run command (`lib/tools/prepare-sandbox-mediator.mjs`) instead of leaving the operator
+  to reverse-engineer a three-layer error.
 - **Escalation is never auto-approved** — `needsHuman` / `danger-full-access` go to a human queue, and
   a timeout counts as a refusal
 - **The session's own sandbox level is a deployment setting, and it defaults to `danger-full-access`** —
@@ -118,6 +121,71 @@ shows the **audit trail**, edits the delegation policy, and can **arm this machi
   confined work. The master sees the level the node actually reports.
 - **Credentials never reach the browser** — the page only ever gets a mask
 - The node must be **genuinely logged in to a desktop**: input injection does not work on a locked screen
+
+## Keeping the launch spec in sync
+
+`workerSessionMode` is a **deployment value**: it is written into the ACP launch spec when the worker
+role is armed, not applied to a session already running.
+
+### The model used when arming (`workerModel`)
+
+**Settings → Remote workers → Model for this machine's remote sessions**, filled in as
+`provider/model` (for example `deepseek-official/deepseek-flash`). It is a deployment value of the
+same kind as the mode, but it decides which model the worker's agent runs:
+
+- it is applied by a plugin-owned **`--patch` overlay** at launch, so it does **not** edit your
+  `cordis.patch.yml`;
+- empty means "use whatever the worker profile configures" (the previous behaviour);
+- it decides `initialize`'s `promptCapabilities.image`: a model that does not declare image input
+  makes the master **unable to send pictures** and breaks `read_image` on the worker, and that is
+  **silent**. Arming therefore resolves the id against this machine's catalogue first: an unknown
+  id **refuses to arm**, and a model without image support produces a warning (a text-only worker
+  is a legitimate choice);
+- changing it needs **re-arming**: the overlay is part of the launch spec, and a running relay does
+  not replace it.
+
+> Why not per task: `dsh-acp` fixes the image capability at `initialize` from the configured
+> provider/model, and it is fixed for that connection. `session/set_config_option` changes the
+> route but does not re-advertise the capability, so this can only be a deployment value.
+
+- **Supervised worker** (the plugin owns the relay): saving a new mode while a listener is running
+  does **not** rewrite that listener's spec. The settings page now shows **both** the saved value and
+  the mode the running relay was started with, and says **re-arm required** when they differ. Stop
+  and arm again to apply it; the pairing token survives, so no re-pairing is needed.
+- **Hand-managed relay** (a scheduled task running `relay.mjs --cmd-file agent-spec.json`):
+  `node slave/make-launch-spec.mjs --out agent-spec.json` **without** `--permission-mode` now reads
+  `workerSessionMode` from the plugin's settings file, so the manual path follows the page. An
+  explicit `--permission-mode` still wins. The relay reads the same settings file and reports
+  `sessionModeMismatch` plus a warning check (`S19`) when its spec disagrees with the setting —
+  including a loud line at startup. Regenerate the spec and restart the relay.
+
+> **If you do not want to redeploy `slave/` for every plugin upgrade**, stop the scheduled task and
+> arm this machine as a worker from **Settings → Remote workers → This machine's role**. The relay
+> then runs from the installed package, so a plugin upgrade plus a DSH restart is enough; the launch
+> spec is a temp file regenerated on each arming. The trade-off is that the relay runs only while
+> DSH does — keep the scheduled task if you need a listener before login.
+
+## GUI apps in a workspace: the Low-integrity trap
+
+A worker that has ever run `workspace-write` carries an **inheritable Low mandatory label** on its
+workspace. Files copied into that tree inherit the label, and Windows launches a Low-labelled image
+at **Low integrity even when the parent token is High**. The symptom is a GUI app that cannot write
+`%LOCALAPPDATA%` (`UnauthorizedAccessException`) while the agent shell writes the same path fine — it
+looks like an ACL or application bug, not a sandbox leftover.
+
+- Under `danger-full-access`, the relay **repairs an explicitly armed task directory** on start
+  (`icacls ... /setintegritylevel (OI)(CI)Medium /T`). This is the correct counterpart to removing
+  the sandbox: the label is no longer protecting anything. Pass `--no-integrity-repair` to keep it,
+  or `--repair-integrity` to allow the relay's inherited cwd (still never a system directory).
+- A hand-managed relay should pass `--task-dir <workspace>` so both the repair and the S20 probe
+  have a directory to work on. To repair by hand:
+  `powershell -File slave/repair-workspace-integrity.ps1 -Path <workspace>`.
+- To keep GUI payloads out of the workspace entirely:
+  `powershell -File slave/stage-app.ps1 -Source <app-dir> [-Launch]`. It copies to
+  `%LOCALAPPDATA%\dsh-remote-use\staging\...` and sets the staged tree to Medium.
+- `remote_selfcheck` reports the workspace and `%TEMP%` readings as `integrity` and as check `S20`.
+  A degraded reading is a **warning**, because the machine is still reachable — but GUI work will
+  fail until the label is fixed.
 
 ## Requirements
 

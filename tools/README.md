@@ -15,6 +15,7 @@
 | `run-unconfined.ps1` | 用一次性计划任务把命令放到 **DSH 沙箱之外**执行（沙箱内自检的合成输入项会假失败） |
 | `check-brackets.mjs` | 括号/引号配对检查，给生成或大改的 JS 用 |
 | `icon-check.mjs` | 校验插件图标满足 DSH 的 `iconOf()` 规则（相对路径、扩展名、体积、XML 良构） |
+| `release-age-exclude.ps1` | 给**刚发布的某个版本**加/删 pnpm 发布年龄白名单（只放行这一个版本），可 `-Install` 并**校验装上的版本**，`-Remote <host>` 走 ssh |
 
 ## `dsh-env-backup.py`
 
@@ -212,6 +213,39 @@ C:\Users\you\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\...
 
 ---
 
+# 发布年龄白名单（刚发布的版本装不上）
+
+pnpm 11 默认 `minimumReleaseAge` = **24 小时**。版本发布不到 24 小时时，`pnpm add` **不会选它**，
+而是静默装回上一个版本 —— 症状是"装成功了，但没有新 UI"，输出里不会有一句解释。
+
+`minimumReleaseAgeExclude` 是**窄**修法：只放行这一个 `<包>@<版本>`，24 小时门禁对其他包仍然有效。
+
+```powershell
+# 只加白名单（默认 profile；幂等，已存在则不改）
+.\tools\release-age-exclude.ps1 -Version 0.2.22
+
+# 加白名单 + 安装 + 校验装上的版本（版本不对就以非零退出）
+.\tools\release-age-exclude.ps1 -Version 0.2.22 -Install
+
+# 另一台机器：白名单和安装都在目标机上完成（免密 ssh）
+.\tools\release-age-exclude.ps1 -Version 0.2.22 -Install -Remote 192.168.3.35
+
+# 所有 profile / 24 小时后清理
+.\tools\release-age-exclude.ps1 -Version 0.2.22 -AllProfiles
+.\tools\release-age-exclude.ps1 -Version 0.2.22 -Remove
+```
+
+- `-DryRun` 只报告要做什么，**不写文件**。
+- 只改 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude:` 块；改前备份、**无 BOM**、保持原换行
+  风格；增删循环后文件逐字节不变（已验证）。
+- 退出码：`0` 目标状态成立 · `1` 某个 profile 失败或装上的版本不对 · `2` 工具/参数/ssh 问题。
+- **卸载**仍可能被年龄门禁拦住（锁文件校验不认白名单，见 [PITFALLS F6b](../docs/PITFALLS.md)）；
+  那时才用 `minimumReleaseAge: 0` 的全局修法。
+- `-Remote` 会把脚本 `scp` 到目标的 `%TEMP%`，在**目标机上**执行并返回它的退出码，然后清理。
+  脚本用 `[scriptblock]::Create` 加载，因此不受目标机 ExecutionPolicy 限制。
+
+---
+
 # 沙箱就绪检查
 
 `check-sandbox-ready.mjs` —— 回答"**这台机器现在能不能用 Windows 沙箱约束住命令**"。
@@ -226,6 +260,22 @@ node tools\check-sandbox-ready.mjs --mediator C:\dsh-sandbox-mediator --profile 
 ```
 
 退出码：`0` 就绪 · `1` 未就绪 · `2` 检查本身跑不了（mediator 未物化）。
+
+## 修好它：用插件包里那条命令，不要照文档手工拼
+
+```powershell
+# 幂等；先加 --dry-run 可以只看它要做什么
+& "<node.exe>" "<插件目录>\lib\tools\prepare-sandbox-mediator.mjs" `
+    --dsh-home "$env:USERPROFILE\.dsh" --profile acp --install "<安装目录>"
+```
+
+它会：物化 mediator（profile 已指名目录就物化到**那里**）→ **仅在 profile 没有 `sandbox` 行时**追加
+managed 块（先备份、无 BOM）→ 跑与门禁**同一个**探针。设置页「本机角色」里的「沙箱 mediator」一行
+显示缺失时，给的就是填好本机路径的这一条命令。
+
+> 早先那句"DSH 升级后必须重跑"要收窄：mediator 与 DSH 之间是 runner 的 CLI 契约，不是包版本。
+> 实测两次升级、一次没重抽，沙箱正常。**以探针为准**，别按版本号主动重抽。
+
 
 ## 它检查两件事，缺一不可
 
@@ -255,8 +305,8 @@ Windows 沙箱的 mediator 由 `process.execPath` 构造，而那是 `DeepSeek H
 
 | 脚本 | 用途 |
 |---|---|
-| `extract-mediator.mjs` | 把 runner 依赖闭包物化出 app.asar（**DSH 升级后必须重跑**） |
-| `sandbox-mediator-shim.mjs` | 方言翻译器本体，部署为 `<mediator>\shim.mjs` |
+| `extract-mediator.mjs` | 把 runner 依赖闭包物化出 app.asar（研究用；**插件侧等价物是包内的 `lib/tools/prepare-sandbox-mediator.mjs`，也是设置页给出的那条命令**） |
+| `sandbox-mediator-shim.mjs` | 方言翻译器本体，部署为 `<mediator>\shim.mjs`。**随包发布的那份在 `packages/dsh-plugin-remote-use/lib/tools/mediator-shim.mjs`**，两者必须逐字节相同（有守卫测试） |
 | `validate-shim.ps1` | 只验方言翻译（4/4），可参数化给主机/从机 |
 | `validate-sandbox-confinement.ps1` | 只验限制能力（5/5），可参数化 |
 | `deploy-ps1.ps1` | `.ps1` 部署门禁（ASCII + PS 5.1 语法）；`-ValidateOnly` 可离线跑 |

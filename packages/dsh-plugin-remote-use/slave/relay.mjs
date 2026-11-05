@@ -32,13 +32,15 @@
  *                  [--screenshot-script screenshot.ps1] [--shot-dir <dir>]
  *                  [--keep-shots <n>] [--keep-shot-bytes <n>]
  *                  [--max-transfer-bytes <n>]
+ *                  [--settings-file <settings.json>]
+ *                  [--repair-integrity] [--no-integrity-repair]
  *                  [--allow-no-auth] [--verbose]
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { networkInterfaces } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import { timingSafeEqual } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +49,8 @@ import { WebSocketServer } from 'ws'
 import { RELAY_SHOT_PATTERN, pruneShots, shotUsage } from './prune-shots.mjs'
 import { encodePairing } from './pairing.mjs'
 import { bestAddress } from './net-address.mjs'
-import { effectiveSessionMode } from './permission-pairing.mjs'
+import { effectiveSessionMode, sessionModeCheck, sessionModeConsistency } from './permission-pairing.mjs'
+import { repairWorkspaceIntegrity } from './workspace-integrity.mjs'
 import {
   DEFAULT_MAX_TRANSFER_BYTES,
   commitPart,
@@ -79,6 +82,31 @@ const SELFCHECK_SCRIPT = arg('selfcheck-script', join(HERE, 'selfcheck.ps1'))
 const SELFCHECK_CACHE_MS = Number(arg('selfcheck-cache-ms', '30000'))
 const ALLOW_NO_AUTH = argv.includes('--allow-no-auth')
 const VERBOSE = argv.includes('--verbose')
+
+/**
+ * The settings file the plugin writes on THIS machine.
+ *
+ * A supervised relay is started by the plugin, so the plugin already knows the mode; a hand-managed
+ * relay (a scheduled task with a fixed `--cmd-file`) does not. Reading the same file gives both
+ * deployments one place to compare "what is configured" against "what this relay will spawn".
+ */
+const CONFIGURED_SETTINGS_FILE = arg('settings-file', join(
+  process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+  'storages', 'dsh-plugin-remote-use', 'settings.json',
+))
+
+/**
+ * Clear a stale Low mandatory label from the task directory when the session is full access.
+ *
+ * Measured 2026-10-19 on a real worker: `workspace-write` leaves an inheritable Low label on the
+ * workspace, and Windows launches a Low-labelled image at Low integrity even from a High token --
+ * so a GUI app copied into the tree cannot write `%LOCALAPPDATA%`. Full access is exactly the mode
+ * in which that label is no longer protecting anything. The repair is opt-out so an operator can
+ * keep the label deliberately.
+ */
+const REPAIR_INTEGRITY = argv.includes('--repair-integrity')
+const NO_INTEGRITY_REPAIR = argv.includes('--no-integrity-repair')
+const INTEGRITY_REPAIR_TIMEOUT_MS = Number(arg('integrity-repair-timeout-ms', '60000'))
 
 // ---------- file transfer ----------
 /**
@@ -281,6 +309,136 @@ function readTextFile(path) {
   return buf.subarray(start).toString('utf8')
 }
 
+/** mtime of a path, or 0 when it does not exist / cannot be read. */
+function mtimeOf(path) {
+  if (typeof path !== 'string' || path === '') return 0
+  try { return statSync(path).mtimeMs } catch { return 0 }
+}
+
+/** The plugin's settings file, as text. '' means absent or unreadable. */
+function readSettingsText() {
+  return readTextFile(CONFIGURED_SETTINGS_FILE)
+}
+
+/**
+ * What this relay will ACTUALLY spawn, next to what the machine is configured for.
+ *
+ * Two different truths, deliberately reported together: `effective` is the spec the child gets,
+ * `configured` is the settings-page value. A manual relay can make them disagree for hours, which is
+ * exactly the F38 failure -- one side says full access, the other runs workspace-write, and neither
+ * surface says so. `mismatch` is the field that makes that visible.
+ */
+function sessionModeSnapshot() {
+  const consistency = sessionModeConsistency({
+    specEnv: LAUNCH.env,
+    env: process.env,
+    settingsText: readSettingsText(),
+  })
+  return {
+    consistency,
+    state: {
+      sessionMode: consistency.effective.mode,
+      sessionModeFrom: consistency.effective.from,
+      effectiveSessionMode: consistency.effectiveMode,
+      configuredSessionMode: consistency.configured,
+      sessionModeMismatch: consistency.mismatch,
+      sessionModeSettingsError: consistency.settingsError,
+      settingsFile: CONFIGURED_SETTINGS_FILE,
+      settingsMtime: mtimeOf(CONFIGURED_SETTINGS_FILE),
+      launchSpec: {
+        path: CMD_FILE,
+        mtime: mtimeOf(CMD_FILE),
+        mode: typeof LAUNCH.env?.DSH_PERMISSION_MODE === 'string' ? LAUNCH.env.DSH_PERMISSION_MODE : '',
+      },
+      integrityRepair: INTEGRITY_REPAIR,
+    },
+  }
+}
+
+/** The subset of the mode state that `/healthz` may expose without authentication. */
+function healthModeState() {
+  const { state } = sessionModeSnapshot()
+  return {
+    sessionMode: state.sessionMode,
+    sessionModeFrom: state.sessionModeFrom,
+    effectiveSessionMode: state.effectiveSessionMode,
+    configuredSessionMode: state.configuredSessionMode,
+    sessionModeMismatch: state.sessionModeMismatch,
+    integrityRepair: {
+      applied: state.integrityRepair.applied,
+      skipped: state.integrityRepair.skipped,
+      reason: state.integrityRepair.reason,
+    },
+  }
+}
+
+/**
+ * Add the configured/effective check to a self-check report and recompute its counts.
+ *
+ * The report came from PowerShell, which cannot see the launch spec or the settings file. The relay
+ * can, so the check is appended here rather than in the script. Recomputing the verdict is not
+ * optional: a `warn` row with `verdict: ready` is the "report lies" shape this project keeps fixing.
+ */
+function withSessionModeCheck(report, snapshot) {
+  const base = { ...report, ...snapshot.state }
+  const check = sessionModeCheck(snapshot.consistency, { specPath: CMD_FILE })
+  if (check === null) return base
+  const checks = [...(Array.isArray(report.checks) ? report.checks : []), check]
+  const blockingFailures = checks.filter((c) => c.severity === 'blocking' && c.status === 'fail').length
+  const warnings = checks.filter((c) => (c.severity === 'blocking' || c.severity === 'warning') && c.status === 'warn').length
+  const unchecked = checks.filter((c) => c.status === 'unchecked').length
+  const verdict = blockingFailures > 0
+    ? 'blocked'
+    : unchecked > 0
+      ? 'partial'
+      : warnings > 0
+        ? 'warn'
+        : 'ready'
+  return { ...base, checks, blockingFailures, warnings, unchecked, verdict }
+}
+
+/**
+ * Repair the workspace label BEFORE the port opens.
+ *
+ * Doing it at module load rather than on the first connection is deliberate: a GUI task can start
+ * immediately after arming, and a repair that races it would leave the first launch Low. A large
+ * workspace makes this pass take longer; the timeout and the result are reported either way.
+ */
+const EARLY_MODE = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env })
+const EFFECTIVE_MODE = EARLY_MODE.mode === '' ? 'workspace-write' : EARLY_MODE.mode
+if (EFFECTIVE_MODE === 'danger-full-access' && DECLARED_TASK_DIR !== null) {
+  // Say it BEFORE a potentially slow recursive pass, so a relay that takes a few extra seconds to
+  // listen is explainable from its own output.
+  log(`workspace integrity: checking ${TASK_DIR} for a stale Low label ...`)
+}
+const INTEGRITY_REPAIR = NO_INTEGRITY_REPAIR
+  ? { applied: false, skipped: true, reason: 'disabled with --no-integrity-repair', error: '', dir: '', durationMs: 0, timedOut: false }
+  : repairWorkspaceIntegrity({
+    mode: EFFECTIVE_MODE,
+    dir: TASK_DIR,
+    declared: DECLARED_TASK_DIR !== null,
+    force: REPAIR_INTEGRITY,
+    timeoutMs: Number.isFinite(INTEGRITY_REPAIR_TIMEOUT_MS) ? INTEGRITY_REPAIR_TIMEOUT_MS : 60_000,
+  })
+if (INTEGRITY_REPAIR.applied) {
+  log(`workspace integrity: ${INTEGRITY_REPAIR.reason} (${INTEGRITY_REPAIR.dir}, ${INTEGRITY_REPAIR.durationMs} ms${INTEGRITY_REPAIR.timedOut ? ', TIMED OUT' : ''})`)
+} else if (INTEGRITY_REPAIR.error !== '') {
+  log(`WARNING: workspace integrity repair failed for ${INTEGRITY_REPAIR.dir}: ${INTEGRITY_REPAIR.error}`)
+} else if (EFFECTIVE_MODE === 'danger-full-access') {
+  log(`workspace integrity: not repaired -- ${INTEGRITY_REPAIR.reason}`)
+}
+
+// Say it at startup, not only when someone opens the report: a hand-managed relay can otherwise run
+// at the wrong level indefinitely while the settings page shows the intended one.
+const STARTUP_MODE = sessionModeSnapshot()
+if (STARTUP_MODE.consistency.mismatch) {
+  log(`WARNING: configured session mode ${STARTUP_MODE.consistency.configured} does not match the `
+    + `launch spec's effective ${STARTUP_MODE.consistency.effectiveMode}; this relay will spawn the SPEC's mode. `
+    + `Re-generate the spec from the saved setting and restart the relay.`)
+} else if (STARTUP_MODE.consistency.settingsError !== '') {
+  log(`WARNING: ${STARTUP_MODE.consistency.settingsError} (${CONFIGURED_SETTINGS_FILE})`)
+}
+
 // ---------------------------------------------------------------------------
 // plugin RPC: dsh-remote/selfcheck
 // ---------------------------------------------------------------------------
@@ -326,14 +484,40 @@ async function runSelfCheck(maxAgeMs) {
   }
 
   const run = await new Promise((resolve) => {
-    const ps = spawn(PS_EXE, [...PS_BASE_ARGS, '-File', SELFCHECK_SCRIPT],
+    // The task directory is where remote work actually runs, so it is the tree S20 must measure.
+    // Only under `danger-full-access`: a `workspace-write` workspace is SUPPOSED to be Low, and
+    // warning about it there would teach the operator to ignore the warning. Only an EXPLICIT
+    // `--task-dir` is passed: an inherited cwd can be System32 (the launcher comment above explains
+    // why), and probing an arbitrary inherited directory is worse than reporting no workspace at all.
+    const selfcheckArgs = [...PS_BASE_ARGS, '-File', SELFCHECK_SCRIPT]
+    if (DECLARED_TASK_DIR !== null && EFFECTIVE_MODE === 'danger-full-access') {
+      selfcheckArgs.push('-Workspace', DECLARED_TASK_DIR)
+    }
+    const ps = spawn(PS_EXE, selfcheckArgs,
       { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
+    let err = ''
     ps.stdout.on('data', (d) => { out += d.toString('utf8') })
-    ps.on('error', (e) => resolve({ error: e.message, out }))
-    ps.on('exit', (code) => resolve({ code, out }))
+    // stderr is kept because "the script produced no JSON" is usually answered by it (a parse
+    // error, an execution-policy refusal, a missing assembly). Discarding it is what made this
+    // failure read as a JSON error instead of "PowerShell could not start".
+    ps.stderr.on('data', (d) => { err += d.toString('utf8') })
+    ps.on('error', (e) => resolve({ error: e.message, out, err }))
+    ps.on('exit', (code) => resolve({ code, out, err }))
     setTimeout(() => { try { ps.kill() } catch { /* already gone */ } }, 60_000)
   })
+
+  // A SPAWN FAILURE means the script never ran at all. Say THAT, with the interpreter it tried:
+  // reporting it as a JSON parse error is how a machine without PowerShell 7 looked like a worker
+  // producing a malformed report (measured 2026-11-05 on a fresh worker).
+  if (run.error !== undefined) {
+    log(`self-check spawn error: ${run.error}`)
+    return degraded({
+      id: 'S0', name: 'self-check script ran', severity: 'blocking', status: 'fail',
+      expected: PS_EXE, actual: String(run.error).slice(0, 200),
+      fix: 'this machine needs PowerShell 7 (install pwsh) or a runnable powershell.exe; the self-check cannot produce a report without one',
+    })
+  }
 
   // The script writes selfcheck.json next to itself; prefer that over stdout, which
   // also carries the human-readable twin.
@@ -342,13 +526,17 @@ async function runSelfCheck(maxAgeMs) {
   try {
     parsed = JSON.parse(readTextFile(jsonPath).replace(/^\uFEFF/, ''))
   } catch (e) {
+    // The exit code and the script's own stderr answer the question this message raises; without
+    // them "Unexpected end of JSON input" is the only clue an operator gets.
+    const stderrTail = String(err ?? '').trim().split(/\r?\n/u).slice(-2).join(' / ')
+    const detail = [String(e.message), run.code === undefined ? '' : `exit ${run.code}`, stderrTail]
+      .filter((part) => part !== '').join(' | ')
     return degraded({
       id: 'S0', name: 'self-check produced a report', severity: 'blocking', status: 'fail',
-      expected: jsonPath, actual: String(e.message).slice(0, 200),
+      expected: jsonPath, actual: detail.slice(0, 300),
       fix: `run ${SELFCHECK_SCRIPT} by hand to see the failure`,
     })
   }
-  if (run.error !== undefined) log(`self-check spawn error: ${run.error}`)
 
   selfcheckCache = { at: Date.now(), report: parsed }
   return { ...parsed, fresh: true, cachedAgeMs: 0 }
@@ -390,8 +578,12 @@ async function handleLocalRpc(msg) {
         // The session mode rides along with the report the master ALREADY renders. It is the answer
         // to "which permission level is this worker actually at", which until now could only be
         // guessed from a spec file that this process may never have read (see effectiveSessionMode).
-        const mode = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env })
-        return reply({ ...(await runSelfCheck(maxAgeMs)), sessionMode: mode.mode, sessionModeFrom: mode.from })
+        //
+        // The settings file is read on EVERY call, not cached at startup: the settings page can be
+        // saved while this relay keeps running, and a mismatch that only appears after a restart is
+        // exactly the "both are true for hours" failure this check exists to end.
+        const snapshot = sessionModeSnapshot()
+        return reply(withSessionModeCheck(await runSelfCheck(maxAgeMs), snapshot))
       } catch (e) {
         return fail(-32603, `self-check failed: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -577,9 +769,20 @@ const PS_EXE = (() => {
     join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'pwsh.exe'),
   ]
   for (const c of candidates) {
-    try { if (statSync(c).isFile()) return c } catch { /* not there */ }
+    try {
+      const info = statSync(c)
+      // A Microsoft Store EXECUTION ALIAS is a 0-byte reparse point. Spawning it opens the Store
+      // instead of running PowerShell, which would look like "the script produced nothing" again.
+      // Only a real image with bytes counts as an installed PowerShell 7.
+      if (info.isFile() && info.size > 0) return c
+    } catch { /* not there */ }
   }
-  return 'pwsh' // on PATH, or it fails loudly rather than silently using the blocked one
+  // FALLBACK: Windows always ships Windows PowerShell 5.1. Returning 'pwsh' here made a worker
+  // WITHOUT PowerShell 7 spawn nothing at all -- the self-check wrote no JSON and S0 read
+  // "Unexpected end of JSON input" (measured 2026-11-05 on a fresh worker). 5.1 is blocked by a
+  // PATH-based rule on some volumes (see the note above); when that happens the spawn error is now
+  // reported as its own S0 with the error text, never as a JSON parse failure.
+  return 'powershell.exe'
 })()
 
 /** `-ExecutionPolicy Bypass` is kept for the 5.1 fallback, where it does help. */
@@ -949,9 +1152,10 @@ const server = createServer((req, res) => {
       // directory" from "the relay inherited whatever the DSH process had", and that ambiguity is what
       // let a relative upload land in the profile directory while every surface reported success.
       taskDirSource: TASK_DIR_SOURCE,
-      // The mode the child this relay spawns will actually run at, so a mismatch between "what the
-      // operator set" and "what this process will do" is visible from either side.
-      ...(() => { const m = effectiveSessionMode({ specEnv: LAUNCH.env, env: process.env }); return { sessionMode: m.mode, sessionModeFrom: m.from } })(),
+      // The mode the child this relay spawns will actually run at, plus the mode this machine is
+      // configured for. A mismatch between the two is the F38 failure, and it is visible from either
+      // side without reading a file by hand.
+      ...healthModeState(),
       pluginRpc: [`${PLUGIN_PREFIX}ping`, `${PLUGIN_PREFIX}selfcheck`, `${PLUGIN_PREFIX}screenshot`, `${PLUGIN_PREFIX}stat`, `${PLUGIN_PREFIX}list`],
       http: ['/healthz', '/screenshot', '/file', '/file/commit'],
       // A master that has just paired can see, before it tries anything, which byte ceiling this

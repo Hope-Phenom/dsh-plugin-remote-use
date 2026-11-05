@@ -1463,6 +1463,60 @@ profile 里那一条要**镜像 `dsh-base` 自己的表达式**，而不是写�
 顺带验证了生效路径：重启从机 DSH 时，插件用**存下来的同一个 token** 恢复布防
 （`worker-arming.js:110,140`）→ 重新生成规格 → 新默认档位落进规格，**全程无需重新配对**。
 
+### 8.6.4 启动规格一致性、有效档位与工作目录完整性（0.2.20）
+
+**问题一：设置改了，规格没改。** 0.2.15 把档位做成"本机设置 + 布防时写进规格"，但仍留下两个
+不同步入口：
+
+- **插件托管的中继**：运行中改 `workerSessionMode` 不会改写已经启动的中继所用的规格。旧页面只显示
+  配置值，所以"我设成全权"与"实际仍跑 workspace-write"在界面上完全一样。
+- **手管中继**（计划任务直接跑 `relay.mjs --cmd-file agent-spec.json`）：设置页与那份手写规格
+  之间原本没有任何联系。`make-launch-spec.mjs` 不带 `--permission-mode` 时仍然写"未设置"，
+  于是改设置不会改变手工生成的规格。
+
+**修法分三层，都是让"实际值"可见，而不是假设某个文件等于实际值：**
+
+| 层 | 行为 |
+|---|---|
+| 设置页 | 同时显示 `configured` 与运行中 listener 的 `effective`；不一致时提示**需要重新布防**。`workerSession` 是派生字段，不持久化。 |
+| 中继 | 每次 `selfcheck` 读本机 settings，与自己的 spec `env` 比较；追加 `S19` 警告行，并回传 `sessionModeMismatch` / `configuredSessionMode` / `launchSpec`。启动时也打一行警告。 |
+| 规格生成 | `make-launch-spec.mjs` 在**没有显式 flag** 时读取 settings 的 `workerSessionMode`，并把来源写进 `_permissionModeSource`。显式 flag 仍然优先，保证可复现部署。 |
+
+**问题二：workspace 内 EXE 仍是 Low。** 实测（2026-10-19，Windows 11 26300）确认：
+
+```
+当前 pwsh / System32\whoami.exe 副本           -> High
+workspace 内 whoami.exe 副本                    -> Low (S-1-16-4096)
+%TEMP% 内 whoami.exe 副本                       -> Medium
+```
+
+根因是 `workspace-write` 沙箱给工作目录写了**可继承的 Low 强制标签**；该标签在切到
+`danger-full-access` 后仍然存在，复制进树的 EXE 继续继承它，而 Windows 会把带 Low 标签的镜像以
+Low 完整性启动。于是 GUI 程序写 `%LOCALAPPDATA%` 被拒，agent shell 写同一路径却成功——现象指向 ACL
+或应用，实际是沙箱残留。
+
+**修法：** `danger-full-access` 下，中继对**显式 `--task-dir`** 的目录执行
+`icacls ... /setintegritylevel (OI)(CI)Medium /T`。`workspace-write` 下绝不执行——那个标签正是约束
+本身。文件系统保护栏：拒绝盘符根、`%SystemRoot%`、`%ProgramFiles%`、`%ProgramData%`、用户 profile
+根；继承 cwd 默认不修，需 `--repair-integrity` 显式允许。
+
+**可观测性：** `selfcheck.ps1` 通过 `integrity-probe.ps1` 把 `whoami.exe` 复制到工作目录和
+`%TEMP%` 各启动一次，读 `whoami /groups` 的 `S-1-16-*` 行，报告 `integrity`（self/workspace/temp）
+并新增 `S20`。降级是 warning：机器仍可用，但 GUI 工作会失败。没有 `--task-dir` 时不探测，报"未测"
+而不是"通过"。
+
+**为什么不是自动重启中继：** 保存设置时重启会打断正在跑的任务，而且会让"保存"这个动作的含义从
+"写入配置"变成"重建运行态"。页面明确提示重新布防，操作者自己决定时机；`S19` 和中继启动日志保证
+不一致不会被静默。
+
+**0.2.21 修复：恢复布防的 TDZ 与旧目录。** 0.2.20 的 `apply()` 用
+`taskDir: () => arming.taskCwd` 给 supervisor 提供任务目录。`WorkerArming` 在构造函数里恢复已布防
+状态时会调用 `start()`，此刻 `arming` 仍在 temporal dead zone，于是每次恢复都抛
+`Cannot access 'arming' before initialization`，`armed` 变回 false，旧计划任务继续占着端口。同一个
+闭包还有第二个错误：正常 `arm()` 在 `this.taskCwd = taskCwd` **之前**调用 `start()`，所以第一次布防
+拿到的是旧目录（F43）。现在任务目录由 `WorkerArming` 作为 `start()` 的显式参数传入，supervisor 只在
+调用者没给时才回落到 `deps.taskDir()`；回归测试同时断言"第一次布防用新目录"和"恢复用 stored 目录"。
+
 ### 8.7 数据不出局域网
 
 - 传输不经过任何第三方服务
@@ -1987,7 +2041,7 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | `cli.js` 路径 | 在 `app.asar` **内**；`fs.existsSync` 返回 false，但 Electron 能读 ⇒ **不要用存在性校验它** |
 | `env.ELECTRON_RUN_AS_NODE` | 必须 `"1"`，否则 Electron 会尝试开窗口 |
 | `env.DSH_PERMISSION_MODE` | 可选；`read-only` / `workspace-write` / `danger-full-access`。**决定这个会话是否会产生审批请求** |
-| 生成 | `make-launch-spec.mjs`（自动定位安装目录，硬编码候选路径优先，因为 SYSTEM 下 `LOCALAPPDATA` 指向 systemprofile） |
+| 生成 | `make-launch-spec.mjs`（自动定位安装目录，硬编码候选路径优先，因为 SYSTEM 下 `LOCALAPPDATA` 指向 systemprofile）。**无 `--permission-mode` 时读取本机 settings 的 `workerSessionMode`**，并把来源写进 `_permissionModeSource`（§8.6.4） |
 
 ### 13.2 中继（slave 侧）
 
@@ -2105,6 +2159,11 @@ store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_K
 | 上下文窗口 / 推理档位元数据缺失 | `resolveModelInfo` 拿不到 |
 
 **修法**：从机 `profiles/acp/cordis.patch.yml` 覆盖 `acp` 行的 model 为 `deepseek-flash`。修好后从机立刻能读图——实测它能准确描述一张探针图（"red/green/blue 三条竖带 + 绿带中央黑圆"）。
+
+**0.2.23 起它是从机的一个设置项，而不是要手改的文件**：`workerModel`（`provider/model`）。布防时由插件
+以 `--patch` overlay 注入 ACP 启动配置（**不写 profile**，留空则沿用 profile）；布防前用
+`llm.resolveModelInfo` 解析这个 id，**不存在就拒绝布防**，存在但未声明 image 输入则**警告**（纯文本节点是
+合法选择）。改了需要重新布防：overlay 是启动规格的一部分。细节见 README「布防时的模型」。
 
 **为什么对本项目关键**：从机的**视觉验证能力**是 GUI 测试的核心。这个 bug 让它完全不可用。
 
@@ -2247,15 +2306,22 @@ node.exe               PE subsystem = 3  (Console)
 #### 主机侧的部署物
 
 ```
-C:\dsh-sandbox-mediator\          1304 文件 / 13.3 MB
-  shim.mjs                        与从机同一份（.research/sandbox-mediator-shim.mjs）
+%DSH_HOME%\sandbox-mediator\        （或 profile 指名的任意目录）
+  shim.mjs                         与从机同一份（lib/tools/mediator-shim.mjs，随包发布）
   node_modules\@deepseek-ai\dsh-sandbox-windows-acl\lib\runner.js
   node_modules\@koromix\koffi-win32-x64\...\koffi.node
   ...
 ```
 
-由 `.research/extract-mediator.mjs` 在 **Electron-as-node** 下物化（`node.exe` 读不了 app.asar）。
-**DSH 升级后必须重跑**，否则这个 mediator 驱动的是上一版的 runner。
+由 `lib/tools/prepare-sandbox-mediator.mjs` 在 **Electron-as-node** 下物化（`node.exe` 读不了 app.asar）。
+设置页的「本机角色」在**页面加载时**就做只读诊断（`lib/core/sandbox-diagnosis.js`），缺失时给出这条命令；
+**页面不代跑** —— 它写的是插件自身状态之外的文件。
+
+> **"DSH 升级后必须重跑"这句要收窄。** 实测 2026-11：DSH 升级过两次、mediator 一次没重抽，沙箱
+> 一直正常 —— 说明这条耦合比当初写的弱：mediator 与 DSH 之间是 runner 的 **CLI 契约**
+> （`--workspace/--temp/--mode/--` 与 `windows-acl-run: ` 前缀），不是包版本。真正该判定的仍是
+> **探针**：它过就是能用。所以不要按版本号主动重抽（那会把一份能用的换成可能抽失败的新拷贝）；
+> 探针失败时再重抽，且**profile 指名的目录优先**（迁移/删除是更常见的成因）。
 
 配置写在 `C:\Users\you\.dsh\profiles\desktop\cordis.patch.yml`（原文件已备份为
 `.bak-before-sandbox-shim`），**需要重启 DSH 才生效**。
@@ -2880,8 +2946,8 @@ provider 那条路是对的（它自己解包 `.optionId`），所以端到端�
 本机的 ACP 子进程由谁启动，其 `process.execPath` 就是谁 —— 若由本机 DSH 启动，同样是
 **GUI 子系统镜像**，§14.2 的 `0xC0000142` 会原样复现。
 
-⇒ **"本机当 worker"要么先复用我们已建的 mediator shim**（`extract-mediator.mjs` +
-`sandbox-mediator-shim.mjs`），**要么只能跑在 `danger-full-access` 下**。
+⇒ **"本机当 worker"要么先复用我们已建的 mediator shim**（`prepare-sandbox-mediator.mjs` +
+`mediator-shim.mjs`，两者都随包发布），**要么只能跑在 `danger-full-access` 下**。
 
 这不是可以绕开的细节：它决定"启用对称配对"是否等于"在工作站上开一个无约束的远程执行口"。
 

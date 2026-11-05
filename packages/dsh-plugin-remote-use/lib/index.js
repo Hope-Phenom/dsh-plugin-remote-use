@@ -32,11 +32,16 @@ import { OPTION, decideApproval, inferRequiredTier } from './core/review-engine.
 import { ApprovalQueue, QUEUE_LEAD_MS } from './core/approval-queue.js'
 import { notifyDesktop, loggerMethods } from './core/desktop-notify.js'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
 import { AuditLog } from './core/audit-log.js'
 import { WorkerArming } from './core/worker-arming.js'
 import { RelaySupervisor } from './core/relay-supervisor.js'
 import { probeSandbox } from './core/sandbox-probe.js'
+import { diagnoseSandbox } from './core/sandbox-diagnosis.js'
+import { parseWorkerModel, writeWorkerModelOverlay } from './core/acp-model-overlay.js'
+import { runSelfcheck, summarizeReport } from './core/selfcheck-runner.js'
+import { buildEnvironmentPrompt } from './core/environment-prompt.js'
 import { resolveAcpLaunchSpec } from './core/self-acp-spec.js'
 // Decoding lives with the relay that encodes, so the two can never disagree about the format.
 import { decodePairing, deriveWorkerId, describePairing } from '../slave/pairing.mjs'
@@ -233,6 +238,21 @@ export const Config = Schema !== null
      */
     workerSessionMode: Schema.string().default('danger-full-access'),
     /**
+     * The model this machine's ACP sessions run with, as `provider/model`.
+     *
+     * WHY IT IS A DEPLOYMENT VALUE AND NOT A PER-CALL PARAMETER: `dsh-acp` advertises
+     * `promptCapabilities.image` at `initialize` from the CONFIGURED route, and fixes it for the
+     * connection. A per-session `session/set_config_option` changes the route but not the
+     * advertised capability, so images stay refused. A wrong or missing id therefore disables
+     * image input silently -- both for prompts the master sends and for `read_image` inside the
+     * worker's own agent (DESIGN 14.1).
+     *
+     * Empty means "whatever the `acp` profile configures" (the pre-0.2.24 behaviour). A value here
+     * is applied by a plugin-owned `--patch` overlay at launch, so the operator's profile is not
+     * touched; see `core/acp-model-overlay.js`.
+     */
+    workerModel: Schema.string().default(''),
+    /**
      * The largest single file the transfer tools will move, in either direction.
      *
      * WHY THERE ARE TWO CEILINGS: this one is the HOST's policy and it is checked BEFORE anything is
@@ -291,6 +311,8 @@ export const Config = Schema !== null
     // The deployment default for a remote session, and the reason is in the schema above: the GUI
     // failure it prevents is silent, so it cannot be left to a per-call decision.
     workerSessionMode: 'danger-full-access',
+    // Empty means "leave the acp profile's model alone" -- the pre-0.2.24 behaviour.
+    workerModel: '',
     transferMaxBytes: 8 * 1024 * 1024 * 1024,
     transferChunkBytes: 4 * 1024 * 1024,
     auditMaxBytes: 8 * 1024 * 1024,
@@ -382,6 +404,100 @@ export function apply(ctx, config) {
    * listener owns none -- see `core/worker-arming.js`.
    */
   const acpProfile = join(resolveDshHome(), 'profiles', 'acp', 'cordis.patch.yml')
+  /**
+   * Read-only diagnosis of the sandbox mediator, computed on demand.
+   *
+   * WHY IT IS SEPARATE FROM THE PROBE, AND WHY IT RUNS AT PAGE LOAD: the probe answers "does
+   * confinement work", but it only runs when somebody clicks Check -- so a machine whose mediator
+   * directory had been removed kept showing nothing at all, and was discovered only when arming
+   * was attempted (measured 2026-11-04, PITFALLS F44). This answers the cheaper question
+   * ("are the artifacts even there") on every page load and hands back the exact command that
+   * fixes it. It writes nothing and spawns nothing: the fix has to be run by a person or an agent,
+   * because it writes outside this plugin's own state.
+   */
+  const sandboxReport = () => diagnoseSandbox({ env: process.env })
+  /**
+   * The worker-model overlay, written on demand and passed to the ACP child as `--patch`.
+   *
+   * Written when the launch spec is built (arm or restore), so the value that reaches the child is
+   * the one on disk at that moment. A failure to write THROWS: launching without the requested
+   * model would silently turn image capability off, which is the defect this exists to prevent.
+   */
+  const modelPatchFiles = () => {
+    const parsed = parseWorkerModel(cfg.workerModel)
+    if (parsed.ok !== true) {
+      throw new Error(`workerModel "${cfg.workerModel}" is not "provider/model": ${parsed.reason}`)
+    }
+    if (parsed.provider === '') return []
+    const written = writeWorkerModelOverlay({ home: resolveDshHome(), value: cfg.workerModel })
+    if (written.ok !== true) throw new Error(`could not write the worker model overlay: ${written.reason}`)
+    return [written.path]
+  }
+  /**
+   * Validate the configured model against this machine's catalogue, before arming.
+   *
+   * Resolving the id here turns a typo from "images silently off" into a refusal. The catalogue
+   * lives in `llm`; when that service is absent (a stripped deployment) the value is accepted with
+   * a warning rather than refused, because the plugin cannot verify it and the ACP child will
+   * still apply it.
+   *
+   * @returns {Promise<{ ok: boolean, warning: string, error: string }>}
+   */
+  const validateWorkerModel = async () => {
+    const parsed = parseWorkerModel(cfg.workerModel)
+    if (parsed.ok !== true) {
+      return { ok: false, warning: '', error: `workerModel "${cfg.workerModel}" is not "provider/model": ${parsed.reason}` }
+    }
+    if (parsed.provider === '') return { ok: true, warning: '', error: '' }
+    const llm = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+    if (llm === undefined || typeof llm.resolveModelInfo !== 'function') {
+      return { ok: true, warning: 'the model catalogue is not available here, so the model id was not verified', error: '' }
+    }
+    try {
+      const info = await llm.resolveModelInfo(parsed.provider, parsed.model)
+      const images = Array.isArray(info?.inputModalities) && info.inputModalities.includes('image')
+      return images
+        ? { ok: true, warning: '', error: '' }
+        : { ok: true, warning: `model ${parsed.provider}/${parsed.model} does not declare image input; the master cannot send images to this worker`, error: '' }
+    } catch (error) {
+      return {
+        ok: false,
+        warning: '',
+        error: `the model ${parsed.provider}/${parsed.model} could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+  /**
+   * Run the worker's OWN readiness self-check, here, on the worker.
+   *
+   * WHY THE WORKER RUNS IT: S1-S12 are facts about THIS machine's session, display and input; the
+   * master can only read the report. Running it in the plugin host means the result reflects the
+   * same interactive session the relay uses, and the operator gets a machine-specific fix prompt
+   * without a round trip.
+   *
+   * WHY IT IS NOT AN ARMING GATE: the session checks depend on somebody being logged in and
+   * unlocked -- an operational state, not a fault -- and S8 moves the mouse. So it runs only when
+   * the page asks for it (the "先检查" button) and it is ADVISORY; the master's dispatch gate
+   * remains the hard gate.
+   */
+  const selfcheckScript = fileURLToPath(new URL('../slave/selfcheck.ps1', import.meta.url))
+  let lastReadiness = null
+  const runReadinessCheck = async ({ taskCwd } = {}) => {
+    const workspace = String(taskCwd ?? '').trim()
+    const run = await runSelfcheck({ scriptPath: selfcheckScript, workspace })
+    const prompt = buildEnvironmentPrompt({
+      report: run.ok === true ? run.report : null,
+      reason: run.ok === true ? '' : run.reason,
+      facts: {
+        scriptPath: selfcheckScript,
+        home: resolveDshHome(),
+        taskCwd: workspace,
+        pluginDir: dirname(dirname(selfcheckScript)),
+      },
+    })
+    if (run.ok !== true) return { ok: false, reason: run.reason, prompt }
+    return { ok: true, ...summarizeReport(run.report), prompt }
+  }
   const supervisor = new RelaySupervisor({
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
     // Read at start time, so a change on the settings page governs the next arming.
@@ -391,13 +507,12 @@ export function apply(ctx, config) {
     // larger accumulation -- the one on the worker, which nothing else ever swept -- would be the
     // one the operator could not control. That asymmetry is exactly what the 218 MB incident was.
     shotCacheBytes: () => cfg.shotCacheBytes,
-    launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp', permissionMode: cfg.workerSessionMode }),
-    // Where a RELATIVE transfer path resolves ON THIS MACHINE. Read lazily because `arming` is
-    // constructed just below; the closure only runs when the listener starts, long after both exist.
-    // It is deliberately the SAME value the pairing string advertises, so the master and the relay
-    // cannot disagree about the task directory -- which is exactly how a relative upload once wrote
-    // into the DSH profile directory while reporting success.
-    taskDir: () => arming.taskCwd,
+    launchSpec: () => resolveAcpLaunchSpec({ profile: 'acp', permissionMode: cfg.workerSessionMode, patchFiles: modelPatchFiles() }),
+    // The task directory is NOT read through a closure here. `WorkerArming` passes it explicitly
+    // to `start()`, because a restore calls `start()` while `arming` is still being constructed --
+    // a closure referring to it would throw "Cannot access 'arming' before initialization". The
+    // value is still the SAME one the pairing string advertises, so the master and the relay cannot
+    // disagree about it.
   })
   const arming = new WorkerArming({
     interfaces: () => networkInterfaces(),
@@ -405,8 +520,11 @@ export function apply(ctx, config) {
     // contain -- not the desktop one the interactive session uses. Checking the wrong file
     // would pass on a machine whose remote execution is unconfined.
     probe: () => probeSandbox({ profile: acpProfile }),
-    start: (bindAddress, port, token) => supervisor.start(bindAddress, port, token),
+    start: (bindAddress, port, token, taskCwd) => supervisor.start(bindAddress, port, token, taskCwd),
     stop: () => supervisor.stop(),
+    // The page shows the configured mode beside the mode the RUNNING listener was started with.
+    // Without this the two can disagree with no surface saying so -- the defect this change fixes.
+    listenerStatus: () => supervisor.status(),
     // Persisted through the same settings path as everything else, so it survives a restart and
     // appears in the documented precedence order.
     persist: (state) => { persistSettings({ ...currentSettings(), workerRole: state }) },
@@ -416,6 +534,34 @@ export function apply(ctx, config) {
   // Stop the listener on unload WITHOUT persisting: a teardown write would clear the stored
   // credential and silently invalidate a pairing the operator had already distributed.
   ctx.effect(() => () => { supervisor.stop() })
+
+  /**
+   * Configured versus effective session mode, for the page.
+   *
+   * `workerSessionMode` is a deployment value: the spec is written when the worker role is armed.
+   * Changing it while a listener runs therefore does NOT change that listener, and the old page only
+   * showed the configured value -- so "I set it to full access" and "it is still running
+   * workspace-write" looked identical from here (PITFALLS F38/F41).
+   */
+  function workerSessionStatus() {
+    const listener = supervisor.status()
+    const running = listener.running === true
+    const rawEffective = running && typeof listener.sessionMode === 'string' ? listener.sessionMode : ''
+    // An empty spec value means dsh-base's own default. Resolving it here is what lets a
+    // `workspace-write` setting match a listener whose spec omits the variable.
+    const effective = running ? (rawEffective === '' ? 'workspace-write' : rawEffective) : ''
+    const configured = cfg.workerSessionMode
+    return {
+      configured,
+      effective,
+      effectiveFrom: running ? listener.sessionModeFrom : 'nothing',
+      running,
+      armed: arming.status().armed,
+      // A stopped listener is not stale: the next arming builds a fresh spec from the setting.
+      reArmRequired: running && effective !== configured,
+      settingsFile: stored.file,
+    }
+  }
 
   // Validate our frozen capability mirror against the live package. A mismatch means
   // DSH changed the contract and our advertisement is no longer honest.
@@ -671,6 +817,9 @@ export function apply(ctx, config) {
       auditMaxBytes: cfg.auditMaxBytes,
       auditKeepFiles: cfg.auditKeepFiles,
       workerSessionMode: cfg.workerSessionMode,
+      // Same rule as the mode above: a key the save route accepts but this projection omits is
+      // written to disk and read back as `undefined`, so the page would show the default again.
+      workerModel: cfg.workerModel,
       delegationPolicy: cfg.delegationPolicy,
       // Same rule: `WorkerArming.persist` writes this through `persistSettings`, so omitting it
       // here would make arming appear to succeed and then vanish on the next read.
@@ -886,9 +1035,23 @@ export function apply(ctx, config) {
       audit,
       sessionsEnabled: () => enabledAgents.size,
       armingStatus: () => arming.status(),
+      // Read-only, cheap, and needed on the FIRST page load: the mediator can be missing while the
+      // role is simply disarmed, and a page that waits for a click to say so hides a broken worker.
+      sandbox: () => sandboxReport(),
+      // The last environment self-check, and the way the page runs a new one. `readinessCheck` is
+      // awaited only when the request asks for it (the "先检查" button), because S8 moves the
+      // mouse and the session checks cost a process per run.
+      readiness: () => lastReadiness,
+      readinessCheck: (opts) => runReadinessCheck(opts),
+      setReadiness: (value) => { lastReadiness = value },
+      // Resolves the configured worker model against this machine's catalogue. Async because the
+      // catalogue lookup is; the route awaits it before arming, which is what turns a typo into a
+      // refusal instead of "images silently off".
+      validateWorkerModel: () => validateWorkerModel(),
       armWorker: (request) => arming.arm(request),
       preflightWorker: (request) => arming.preflight(request),
       disarmWorker: (opts) => arming.disarm(opts),
+      workerSession: () => workerSessionStatus(),
       log,
       currentSettings,
       persistSettings,
@@ -951,6 +1114,9 @@ export function normalizeConfig(config) {
     workerSessionMode: typeof config?.workerSessionMode === 'string' && config.workerSessionMode !== ''
       ? config.workerSessionMode
       : 'danger-full-access',
+    // Trimmed, not validated here: an invalid value must fail loudly when the launch spec is built
+    // (and be refused at save), not be coerced here.
+    workerModel: typeof config?.workerModel === 'string' ? config.workerModel.trim() : '',
     // Not clamped at 0 for the same reason as `keepShots`: 0 or negative is the documented way to
     // say "do not rotate / keep every archive", which is a choice, not an invalid value.
     auditMaxBytes: Number.isFinite(config?.auditMaxBytes) ? Number(config.auditMaxBytes) : 8 * 1024 * 1024,
@@ -1437,6 +1603,20 @@ export function makeSettingsRoute(deps) {
   const armWorker = typeof deps.armWorker === 'function' ? deps.armWorker : () => ({ ok: false, error: 'this build cannot arm the worker role' })
   const preflightWorker = typeof deps.preflightWorker === 'function' ? deps.preflightWorker : () => ({ ok: false, blockers: ['this build cannot check the worker role'], probe: { ok: false, reason: '' } })
   const disarmWorker = typeof deps.disarmWorker === 'function' ? deps.disarmWorker : () => ({ ok: false, error: 'this build cannot disarm the worker role' })
+  // Configured versus effective session mode. Derived on every read (the listener can start or stop
+  // between two page loads), so it is passed as a getter rather than captured.
+  const workerSession = typeof deps.workerSession === 'function' ? deps.workerSession : () => null
+  // The sandbox diagnosis is read-only, so unlike the probe it can run on every page load. Defaulted
+  // to null so a test that constructs this route directly does not have to know about it.
+  const sandbox = typeof deps.sandbox === 'function' ? deps.sandbox : () => null
+  // Resolved lazily (it may need the model catalogue) and awaited by the arming actions only.
+  const validateWorkerModel = typeof deps.validateWorkerModel === 'function'
+    ? deps.validateWorkerModel
+    : async () => ({ ok: true, warning: '', error: '' })
+  // The environment self-check: cached for the page, refreshed only when a check asks for it.
+  const readiness = typeof deps.readiness === 'function' ? deps.readiness : () => null
+  const readinessCheck = typeof deps.readinessCheck === 'function' ? deps.readinessCheck : null
+  const setReadiness = typeof deps.setReadiness === 'function' ? deps.setReadiness : () => {}
   // The route logs sparingly, but pairing is security-relevant and wants a trace. Injected
   // rather than imported, and defaulted so this function stays usable on its own in tests.
   const log = deps.log ?? { info: () => {}, warn: () => {}, error: () => {} }
@@ -1467,6 +1647,14 @@ export function makeSettingsRoute(deps) {
       // "which permission level is this worker actually deployed at" was, until now, answerable
       // only by reading a spec file that the running relay may never have read.
       workerSessionMode: settings.workerSessionMode,
+      // The model the NEXT arming will launch this machine's ACP sessions with, as
+      // `provider/model`; empty means "whatever the acp profile configures". A deployment value:
+      // the image capability is advertised at startup from this route and cannot change per call.
+      workerModel: settings.workerModel,
+      // The same fact split into configured/effective. `workerSessionMode` above is the value the
+      // NEXT arming will use; this carries what the listener that is running NOW was started with,
+      // and whether those two disagree. Derived, never persisted.
+      workerSession: workerSession(),
       auditMaxBytes: settings.auditMaxBytes,
       auditKeepFiles: settings.auditKeepFiles,
       // The delegation policy is editable from the page because getting the wording right is
@@ -1482,6 +1670,13 @@ export function makeSettingsRoute(deps) {
       // The worker role as the PAGE sees it. WorkerArming.status() already carries only a
       // masked credential; nothing here may add the raw one.
       workerRole: armingStatus(),
+      // Whether this machine's sandbox mediator is ready, and -- when it is not -- the exact command
+      // that fixes it. Shown without clicking Check, because a silently missing mediator is exactly
+      // the state that stays invisible when the answer is only computed on demand.
+      sandbox: sandbox(),
+      // The last environment self-check, so a page reload keeps showing the result until the
+      // operator runs another one. Null until the first check.
+      readiness: readiness(),
       // The page cannot drive the switch itself -- it has no session identity, and the switch
       // is per session -- so it points at the real control instead of faking a toggle.
       enableCommand: `/${ENABLE_COMMAND} on`,
@@ -1796,13 +1991,33 @@ export function makeSettingsRoute(deps) {
             // Pairing is a paste; asking the operator to also invent an id would defeat the
             // point, so one is derived from the worker's own name (or its host) unless the
             // page supplied one.
-            if (typeof body?.id === 'string' && body.id !== '') incoming.id = body.id
-            if (incoming.id === undefined || incoming.id === '') {
-              const derived = deriveWorkerId(decoded.worker)
-              if (derived === '') {
+            //
+            // RE-PAIRING AN EXISTING ADDRESS UPDATES THAT WORKER. This is the normal path when a
+            // worker switches from a hand-run relay to the plugin-managed role: the address stays
+            // the same and the token is new. Deriving a fresh id would add a SECOND row for the
+            // same relay, leaving the old token configured forever and making it impossible to
+            // tell which row is live. An explicitly supplied id still wins, so an operator can
+            // intentionally create a second entry.
+            if (typeof body?.id === 'string' && body.id !== '') {
+              incoming.id = body.id
+            } else {
+              const sameUrl = currentSettings().workers.find((w) => w.url === decoded.worker.url)
+              if (sameUrl !== undefined) {
+                incoming.id = sameUrl.id
+                // The pairing string carries url/token/name/cwd only. Re-pairing an existing
+                // worker must not silently reset fields it says nothing about -- a custom serial
+                // queue or a deliberately disabled row would be lost, and a blank cwd in the
+                // string would erase the task directory the operator already configured.
+                if (incoming.name === undefined || incoming.name === '') incoming.name = sameUrl.name
+                if (incoming.cwd === undefined || incoming.cwd === '') incoming.cwd = sameUrl.cwd
+                if (incoming.enabled === undefined) incoming.enabled = sameUrl.enabled
+                if (incoming.serialQueue === undefined) incoming.serialQueue = sameUrl.serialQueue
+              } else {
+                incoming.id = deriveWorkerId(decoded.worker)
+              }
+              if (incoming.id === undefined || incoming.id === '') {
                 return send(400, { ok: false, error: 'could not derive a worker id; supply one explicitly' })
               }
-              incoming.id = derived
             }
             // The pasted string knows url/token/name; the operator may still want a local cwd.
             if (typeof body?.cwd === 'string' && body.cwd !== '') incoming.cwd = body.cwd
@@ -1836,6 +2051,7 @@ export function makeSettingsRoute(deps) {
             // Only the managed, non-worker keys. Workers go through `worker.save` so a token
             // can never be dropped by a form that did not carry one.
             const incoming = body?.settings ?? {}
+            const priorMode = currentSettings().workerSessionMode
             const next = { ...currentSettings() }
             if (incoming.requiredTier !== undefined) next.requiredTier = String(incoming.requiredTier)
             if (Number.isFinite(incoming.approvalTimeoutMs)) next.approvalTimeoutMs = Number(incoming.approvalTimeoutMs)
@@ -1850,6 +2066,16 @@ export function makeSettingsRoute(deps) {
             if (typeof incoming.workerSessionMode === 'string' && incoming.workerSessionMode !== '') {
               next.workerSessionMode = incoming.workerSessionMode
             }
+            // Refused here rather than stored: an invalid `provider/model` would only surface as
+            // "images silently off" after the next arming, and a value the page cannot round-trip
+            // is not a setting the operator can reason about.
+            if (typeof incoming.workerModel === 'string') {
+              const parsed = parseWorkerModel(incoming.workerModel)
+              if (parsed.ok !== true) {
+                return send(400, { ok: false, error: `workerModel "${incoming.workerModel}" is not "provider/model": ${parsed.reason}` })
+              }
+              next.workerModel = incoming.workerModel.trim()
+            }
             if (Number.isFinite(incoming.auditMaxBytes)) next.auditMaxBytes = Number(incoming.auditMaxBytes)
             if (Number.isFinite(incoming.auditKeepFiles)) next.auditKeepFiles = Number(incoming.auditKeepFiles)
             // An empty string is a real choice here: it switches the prompt injection off while
@@ -1857,7 +2083,16 @@ export function makeSettingsRoute(deps) {
             if (typeof incoming.delegationPolicy === 'string') next.delegationPolicy = incoming.delegationPolicy
             const applied = persistSettings(next)
             if (applied.ok !== true) return send(500, { ok: false, error: applied.error })
-            return send(200, { ok: true, applied, settings: publicSettings() })
+            const settingsNow = publicSettings()
+            // A listener already running cannot have its launch spec rewritten underneath it. Say
+            // so where the operator changed the value, instead of leaving the page showing the new
+            // mode while the old one keeps running.
+            if (settingsNow.workerSession?.reArmRequired === true && next.workerSessionMode !== priorMode) {
+              log.warn(`workerSessionMode is now ${next.workerSessionMode}, but the running listener was `
+                + `started with ${settingsNow.workerSession.effective}; re-arm (disarm + arm) to apply it. `
+                + `The change from ${priorMode} has NOT reached the live session.`)
+            }
+            return send(200, { ok: true, applied, settings: settingsNow })
           }
 
           case 'worker.preflight': {
@@ -1867,12 +2102,33 @@ export function makeSettingsRoute(deps) {
             // rather than a decision.
             const result = preflightWorker({ bindAddress: body?.bindAddress, port: body?.port, taskCwd: body?.taskCwd })
             const status = armingStatus()
+            const sandboxNow = sandbox()
+            // Checked here as well as at arm, so the panel can say "this model id does not resolve"
+            // BEFORE the operator spends a click on a refusal.
+            const modelCheck = await validateWorkerModel()
+            // The environment self-check runs only when the page asks for it: it spawns PowerShell
+            // and S8 moves the mouse, so it must not ride on every page load.
+            let readinessNow = readiness()
+            if (body?.checkEnvironment === true && readinessCheck !== null) {
+              readinessNow = await readinessCheck({ taskCwd: body?.taskCwd })
+              setReadiness(readinessNow)
+            }
             return send(200, {
-              ok: result.ok === true,
-              blockers: result.blockers ?? [],
+              ok: result.ok === true && modelCheck.ok === true,
+              blockers: [
+                ...(result.blockers ?? []),
+                ...(modelCheck.ok === true ? [] : [modelCheck.error]),
+              ],
               probe: result.probe ?? { ok: false, reason: '' },
               interfaces: status?.interfaces ?? [],
               port: status?.port ?? 0,
+              // The fix, beside the refusal. The blockers stay machine-readable; this is the part a
+              // person can act on without reverse-engineering which of three layers is missing.
+              sandbox: sandboxNow,
+              prescription: sandboxNow?.prescription?.text ?? '',
+              model: modelCheck,
+              // Environment readiness (advisory) and the prompt that fixes it, on the worker.
+              readiness: readinessNow,
             })
           }
 
@@ -1882,12 +2138,31 @@ export function makeSettingsRoute(deps) {
             //
             // The token comes back HERE and only here. It is returned once so the operator can
             // paste it into a pairing; every later read of the page sees the mask instead.
+            const modelCheck = await validateWorkerModel()
+            if (modelCheck.ok !== true) {
+              return send(409, { ok: false, error: modelCheck.error, blockers: [modelCheck.error] })
+            }
             const result = armWorker({ bindAddress: body?.bindAddress, port: body?.port, taskCwd: body?.taskCwd })
             if (result.ok !== true) {
-              return send(409, { ok: false, error: result.error, blockers: result.blockers ?? [] })
+              const sandboxNow = sandbox()
+              return send(409, {
+                ok: false,
+                error: result.error,
+                blockers: result.blockers ?? [],
+                sandbox: sandboxNow,
+                prescription: sandboxNow?.prescription?.text ?? '',
+              })
             }
             log.info('worker role armed by the page')
-            return send(200, { ok: true, token: result.token, pairing: result.pairing, workerRole: armingStatus() })
+            return send(200, {
+              ok: true,
+              token: result.token,
+              pairing: result.pairing,
+              workerRole: armingStatus(),
+              // Not a failure: the model exists but does not declare image input, which is a real
+              // deployment choice. The page shows it rather than letting it stay silent.
+              warning: modelCheck.warning,
+            })
           }
 
           case 'worker.disarm': {

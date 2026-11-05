@@ -560,7 +560,14 @@ test('EVERY setting the page exposes is one the store manages', async () => {
     // Computed on every read and never stored, so they are not settings and cannot "revert". Naming
     // them is deliberate: a new derived field has to be added here, which is the moment to ask
     // whether it really is derived or is a setting someone forgot to register.
-    const DERIVED = new Set(['sessionsEnabled', 'enableCommand'])
+    //
+    // `sandbox` belongs here for a second reason: it is READ-ONLY by design. It reports whether the
+    // mediator artifacts exist and prescribes the fix; the fix is executed outside this plugin
+    // (lib/tools/prepare-sandbox-mediator.mjs), so there is nothing for the page to persist.
+    //
+    // `readiness` is the same kind of value: the LAST worker self-check result (advisory). It is
+    // computed on the worker and cached in memory, never saved.
+    const DERIVED = new Set(['sessionsEnabled', 'enableCommand', 'workerSession', 'sandbox', 'readiness'])
     const exposed = Object.keys((await get(h.routes[0])).body.settings)
       .filter((key) => !DERIVED.has(key))
     const unmanaged = exposed.filter((key) => !MANAGED_KEYS.includes(key))
@@ -586,6 +593,25 @@ test('the audit retention settings round-trip, because they did NOT before', asy
     const after = await get(h.routes[0])
     assert.equal(after.body.settings.auditMaxBytes, 4096, 'it must survive the read-back, not revert')
     assert.equal(after.body.settings.auditKeepFiles, 2)
+  })
+})
+
+test('the worker model round-trips, and an invalid value is refused at save', async () => {
+  // The value decides the ACP `image` capability (DESIGN 14.1) and an invalid one fails SILENTLY,
+  // so it is refused where the operator can see it rather than stored and dropped at launch.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const saved = await post(h.routes[0], 'settings.save', { settings: { workerModel: 'deepseek-official/deepseek-flash' } })
+    assert.equal(saved.body.ok, true)
+    assert.equal(saved.body.settings.workerModel, 'deepseek-official/deepseek-flash')
+    const after = await get(h.routes[0])
+    assert.equal(after.body.settings.workerModel, 'deepseek-official/deepseek-flash', 'it must survive the read-back')
+
+    const bad = await post(h.routes[0], 'settings.save', { settings: { workerModel: 'no-slash' } })
+    assert.equal(bad.body.ok, false)
+    const still = await get(h.routes[0])
+    assert.equal(still.body.settings.workerModel, 'deepseek-official/deepseek-flash',
+      'a refused save must leave the previous value in place')
   })
 })
 
@@ -622,6 +648,26 @@ test('an UNKNOWN session mode is STORED, not silently coerced to the default', a
     assert.equal(saved.body.settings.workerSessionMode, 'yolo')
     assert.throws(() => acpLaunchSpec({ installDir: 'C:\\x', permissionMode: 'yolo' }),
       /not a sandbox mode DSH understands/u)
+  })
+})
+
+test('the page is told BOTH the configured mode and what a running relay would use', async () => {
+  // `workerSessionMode` alone is the value the NEXT arming writes. The page also needs the live
+  // listener's value, or "I set it to full access" and "it is still running workspace-write" look
+  // identical -- the defect this field exists to end.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const initial = await get(h.routes[0])
+    const session = initial.body.settings.workerSession
+    assert.equal(session.configured, 'danger-full-access')
+    assert.equal(session.running, false, 'nothing is armed in this harness')
+    assert.equal(session.effective, '', 'a stopped listener has no effective mode')
+    assert.equal(session.reArmRequired, false, 'a stopped listener will build a fresh spec on the next arm')
+
+    // Saving a value while stopped is not "re-arm required": the next arm picks it up.
+    const saved = await post(h.routes[0], 'settings.save', { settings: { workerSessionMode: 'workspace-write' } })
+    assert.equal(saved.body.settings.workerSession.configured, 'workspace-write')
+    assert.equal(saved.body.settings.workerSession.reArmRequired, false)
   })
 })
 
@@ -692,6 +738,51 @@ test('worker.pair fills url, token and name from one paste', async () => {
     // The token itself must never travel back to the browser.
     assert.equal('token' in added, false)
     assert.equal(JSON.stringify(body).includes('tok-secret-value'), false)
+  })
+})
+
+test('re-pairing the SAME address updates the existing worker instead of adding a duplicate', async () => {
+  // The normal migration path: a worker moves from a hand-run relay to the plugin-managed role.
+  // The address does not change; the token does. Deriving a new id from the relay's name would
+  // add a second row for the same machine, leave the old token configured forever, and make it
+  // impossible to tell which row is live.
+  await withEnv(async () => {
+    const h = mountWithGate()
+    const before = (await get(h.routes[0])).body.settings.workers
+    assert.equal(before.length, 1)
+    const id = before[0].id
+
+    const pairing = encodePairing({
+      url: worker('w1').url, token: 'rotated-token-value', name: 'a-different-name', cwd: 'C:\\work\\migrated',
+    })
+    const { status, body } = await post(h.routes[0], 'worker.pair', { pairing })
+    assert.equal(status, 200, JSON.stringify(body))
+    assert.equal(body.ok, true)
+
+    const after = body.settings.workers
+    assert.equal(after.length, 1, 'the same address must update the row, not add a second one')
+    assert.equal(after[0].id, id, 'the existing id is what the provider and tool rows are keyed by')
+    assert.equal(after[0].cwd, 'C:\\work\\migrated', 'the new pairing task directory is applied')
+    assert.equal(after[0].tokenSet, true)
+    assert.equal(JSON.stringify(body).includes('rotated-token-value'), false, 'the token never leaves the host')
+  })
+})
+
+test('re-pairing does not reset worker fields the pairing string does not carry', async () => {
+  // A pairing string carries url/token/(name)/(cwd). It does not carry `serialQueue`, and a worker
+  // role with no task directory carries no `cwd` either. Replacing the row with the normalized
+  // string would silently reset a custom queue and erase the configured task directory.
+  await withEnv(async () => {
+    const { ctx, routes } = makeContext()
+    mount(ctx, { workers: [worker('w1', { serialQueue: 2, cwd: 'C:\\work' })] })
+    const pairing = encodePairing({ url: worker('w1').url, token: 'rotated-token-value' })
+    const { status, body } = await post(routes[0], 'worker.pair', { pairing })
+    assert.equal(status, 200, JSON.stringify(body))
+    const updated = body.settings.workers[0]
+    assert.equal(updated.id, 'w1')
+    assert.equal(updated.cwd, 'C:\\work', 'a blank cwd in the paste must not erase the configured directory')
+    assert.equal(updated.serialQueue, 2, 'a custom serial queue must survive a re-pair')
+    assert.equal(updated.tokenSet, true)
   })
 })
 

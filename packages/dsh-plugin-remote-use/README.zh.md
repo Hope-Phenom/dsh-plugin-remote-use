@@ -94,7 +94,11 @@ remote_agents   { action: "status", taskId: "rtask_xxx" }  →  状态 + 完整�
 ## 安全模型（要点）
 
 - **默认关闭** —— 新会话不注入策略、远程工具在该会话内不可见
-- **沙箱必须真实生效** —— 沙箱无法被证明时**拒绝**启用 worker 模式，不是警告
+- **沙箱必须真实生效** —— 沙箱无法被证明时**拒绝**启用 worker 模式，不是警告。
+  从机需要的两样东西（mediator 目录、指名它的 `sandbox` 行）都是**手工部署物**，会消失；
+  所以「本机角色」在**页面加载时**就报告状态，并在缺失时给出**填好本机路径、可直接执行**的命令
+  （`lib/tools/prepare-sandbox-mediator.mjs`）。它只物化 + 仅在 profile 没有该行时追加 + 跑同一个
+  探针，幂等、可 `--dry-run`；**页面不会替你执行** —— 写的是插件自身状态之外的文件。
 - **提权永不自动批准** —— `needsHuman` / `danger-full-access` 进人工审批队列，超时按拒绝
 - **会话自己的沙箱档位是部署设置，默认 `danger-full-access`** —— 在作为工作节点的那台机器上设置
   （**设置 → 远程工作节点 → 本机远程会话的沙箱档位**），布防时写进启动规格。它是**部署值**而不是逐任务
@@ -103,6 +107,72 @@ remote_agents   { action: "status", taskId: "rtask_xxx" }  →  状态 + 完整�
   主机侧能看到该节点**实际自报**的档位。
 - **凭据不回传浏览器** —— 页面只拿到掩码
 - 节点侧必须**真的登录进桌面**：锁屏时无法注入输入
+
+## 让启动规格与设置保持一致
+
+`workerSessionMode` 是**部署值**：布防时写进 ACP 启动规格，**不会**改动已经在运行的会话。
+
+### 布防时的模型（`workerModel`）
+
+**设置 → 远程工作节点 → 本机远程会话的模型**，填 `provider/model`（例如 `deepseek-official/deepseek-flash`）。
+它和档位是同一类**部署值**，但作用的是"从机的 agent 用哪个模型"：
+
+- 布防时以插件自己的 **`--patch` overlay** 注入 ACP 启动配置，**不修改你的 `cordis.patch.yml`**；
+- 留空 = 沿用从机 profile 里配的模型（旧行为）；
+- 它决定 `initialize` 的 `promptCapabilities.image`：模型不声明 image 输入时，主机**不能**向从机发图，
+  从机的 `read_image` 也会失败 —— 而且这是**静默**的。所以布防时会先用本机模型目录解析这个 id：
+  **不存在就拒绝布防**，存在但不带图则给警告（纯文本节点是合法选择，只是别指望它读图）；
+- 改了需要**重新布防**：overlay 是启动规格的一部分，运行中的中继不会自己换。
+
+> 为什么不能按任务指定：`dsh-acp` 在 `initialize` 时就按**配置的** provider/model 定下图片能力，并固定给这条连接；
+> `session/set_config_option` 只改会话路由，不会重新 advertise。所以它是部署值，不是逐任务参数。
+
+### 从机环境自动配置（提示词）
+
+从机的 GUI 就绪项（虚拟显示器、分辨率与原点、QuickEdit、屏保、睡眠/休眠、被测应用……）可以**交给从机自己的
+DSH 会话**去做：把随包发布的 [`lib/tools/selfcheck-fix-prompt.md`](lib/tools/selfcheck-fix-prompt.md) 整段粘进
+从机的对话即可。它会：
+
+- 找到并运行 `slave/selfcheck.ps1`，读 `selfcheck.json`；
+- 按报告逐项修复（blocking 优先），每步贴原始输出；
+- 需要管理员、装驱动、或**需要人登录/解锁**的步骤，停下来说明，不假装成功；
+- 最后复跑自检并对比修复前后的 `checks`。
+
+> 自检必须在**已登录、已解锁的交互式桌面会话**里跑（DSH 桌面进程所在的那个）。SSH/服务会话里跑出来的
+> `session=0`、S1=0 块屏是假阴性。
+
+- **插件托管的从机**（中继由插件拉起）：运行中修改档位**不会**改写那个中继的启动规格。设置页现在
+  同时显示**保存值**和**运行中中继实际使用的档位**，两者不一致时明确提示**需要重新布防**。先停止
+  再布防即可生效；凭据跨重启保留，所以**不需要重新配对**。
+- **手管中继**（计划任务直接跑 `relay.mjs --cmd-file agent-spec.json`）：不带 `--permission-mode`
+  运行 `node slave/make-launch-spec.mjs --out agent-spec.json` 时，它会读取插件设置文件里的
+  `workerSessionMode`，所以手工路径也跟随设置页；显式传 `--permission-mode` 仍然优先。中继自己也会
+  读同一个设置文件，在规格与设置不一致时报告 `sessionModeMismatch` 和一条警告检查（`S19`），启动时
+  还会打一行醒目日志。重建规格并重启中继即可。
+
+> **如果不想每次升级插件都重新部署 `slave/`**，停掉计划任务，改用设置页的
+> **远程工作节点 → 本机角色 → 布防为工作节点**。中继会从已安装的插件包启动，升级插件 + 重启 DSH
+> 就够；启动规格是临时文件，每次布防自动重建。代价是中继只在 DSH 运行时存在 —— 如果要在登录前
+> 就监听，请保留计划任务。
+
+## 工作目录里的 GUI：低完整性陷阱
+
+只要工作目录曾经跑过 `workspace-write`，它就会带上**可继承的 Low 强制标签**。复制进去的文件继承
+该标签，而 Windows 会把带 Low 标签的镜像**以低完整性启动**——即使父进程令牌是 High。现象是 GUI 程序
+写 `%LOCALAPPDATA%` 抛 `UnauthorizedAccessException`，而 agent shell 写同一路径完全正常，看起来像
+ACL 或应用缺陷，而不是沙箱残留。
+
+- `danger-full-access` 下，中继会在启动时**修复显式布防的任务目录**（`icacls ...
+  /setintegritylevel (OI)(CI)Medium /T`）。这是关掉沙箱后的正确配套：那个标签已经不再保护任何东西。
+  传 `--no-integrity-repair` 可保留标签；传 `--repair-integrity` 才允许修复中继继承来的 cwd（系统目录
+  仍然拒绝）。
+- 手管中继应传 `--task-dir <workspace>`，这样自动修复与 S20 探针都有明确的目录。手工修复：
+  `powershell -File slave/repair-workspace-integrity.ps1 -Path <workspace>`。
+- 如果希望 GUI 载荷完全待在工作目录之外：
+  `powershell -File slave/stage-app.ps1 -Source <app-dir> [-Launch]`，它会复制到
+  `%LOCALAPPDATA%\dsh-remote-use\staging\...` 并把暂存目录设为 Medium。
+- `remote_selfcheck` 会把工作目录与 `%TEMP%` 的读数写进 `integrity`，并作为 `S20` 检查上报。降级是
+  **警告**而不是阻断：机器仍然可达，但 GUI 工作会一直失败，直到标签被修复。
 
 ## 运行要求
 

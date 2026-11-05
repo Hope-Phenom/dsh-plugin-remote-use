@@ -12,7 +12,10 @@
 param(
   # The GUI application under test, for S18. Empty means "this worker does not verify a specific
   # app", which is reported as unconfigured rather than missing.
-  [string]$App = ''
+  [string]$App = '',
+  # The task directory, for S20. The relay passes the directory it actually hands the agent, so the
+  # integrity probe measures the tree remote work really runs in. Empty means no probe.
+  [string]$Workspace = ''
 )
 $ErrorActionPreference = 'Continue'
 if ([string]::IsNullOrEmpty($PSScriptRoot)) { $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -271,6 +274,43 @@ if ([string]::IsNullOrEmpty($app)) {
   Add-Check 'S18' 'target app present' 'warning' $(if ($appThere) { 'pass' } else { 'warn' }) 'exists' $(if ($appThere) { 'present: ' + $app } else { 'missing at: ' + $app }) 'sync the app build output' 
 }
 
+# S20 workspace launch integrity
+#
+# WHY THIS IS IN THE READY REPORT: the failure it detects (a GUI app launched from the workspace
+# runs at Low integrity and cannot write %LOCALAPPDATA%) presents as an application or ACL fault.
+# The setting says danger-full-access, the agent shell is High, and only a copied executable reveals
+# the downgrade. The probe copies a signed system binary into the workspace and into %TEMP% and
+# compares the mandatory labels of the two child tokens.
+#
+# It is a warning, not a blocker: GUI work is broken, but the worker is otherwise usable and the fix
+# is a label reset rather than a redeploy. Unconfigured workspace means no probe, not a failure.
+# The relay only passes -Workspace under danger-full-access; a workspace-write workspace is SUPPOSED
+# to be Low, so warning about it there would be a false alarm.
+$integrity = $null
+if (-not [string]::IsNullOrEmpty($Workspace)) {
+  $probeScript = Join-Path $PSScriptRoot 'integrity-probe.ps1'
+  if (-not (Test-Path -LiteralPath $probeScript)) {
+    Add-Check 'S20' 'workspace launch integrity' 'warning' 'warn' 'same as %TEMP%' ('integrity-probe.ps1 missing next to selfcheck.ps1: ' + $probeScript) 'deploy integrity-probe.ps1 with the relay, or stage GUI apps outside the workspace'
+  } else {
+    try {
+      $raw = & $probeScript -Workspace $Workspace 2>$null
+      $integrity = ($raw | Out-String) | ConvertFrom-Json
+      $fmt = { param($x) if ($null -eq $x) { '?' } else { "$($x.level)($($x.sid))" } }
+      $actual = 'self=' + (& $fmt $integrity.self) + ' workspace=' + (& $fmt $integrity.workspace) + ' temp=' + (& $fmt $integrity.temp)
+      if ($integrity.error -ne '') { $actual = $actual + ' error=' + $integrity.error }
+      if ($integrity.degraded) {
+        Add-Check 'S20' 'workspace launch integrity' 'warning' 'warn' 'workspace at least %TEMP% integrity' $actual 'A Low label inherited from an earlier workspace-write session is downgrading apps in this tree. Under danger-full-access the relay repairs it on start (--task-dir), or run slave/repair-workspace-integrity.ps1 -Path <workspace>; otherwise stage the app outside the workspace with slave/stage-app.ps1'
+      } elseif ($null -eq $integrity.workspace -or $null -eq $integrity.temp) {
+        Add-Check 'S20' 'workspace launch integrity' 'warning' 'warn' 'same as %TEMP%' $actual 'the probe could not launch from one of the two directories; check that the task directory exists and is writable by this account'
+      } else {
+        Add-Check 'S20' 'workspace launch integrity' 'warning' 'pass' 'workspace at least %TEMP% integrity' $actual ''
+      }
+    } catch {
+      Add-Check 'S20' 'workspace launch integrity' 'warning' 'warn' 'same as %TEMP%' ('probe failed: ' + $_.Exception.Message) 'run slave/integrity-probe.ps1 -Workspace <dir> by hand to see the failure'
+    }
+  }
+}
+
 $blocking = @($checks | Where-Object { $_.severity -eq 'blocking' -and $_.status -eq 'fail' })
 $warn = @($checks | Where-Object { $_.severity -in @('blocking', 'warning') -and $_.status -eq 'warn' })
 $unchecked = @($checks | Where-Object { $_.status -eq 'unchecked' })
@@ -291,6 +331,10 @@ $payload = [ordered]@{
   blockingFailures = $blocking.Count
   warnings = $warn.Count
   unchecked = $unchecked.Count
+  # The task directory the integrity probe measured, and its raw readings. Null when no workspace
+  # was supplied -- "not probed" must be distinguishable from "probed and equal".
+  workspace = $Workspace
+  integrity = $integrity
   checks = $checks
 }
 $payload | ConvertTo-Json -Depth 6 | Set-Content -Path $outFile -Encoding UTF8

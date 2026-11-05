@@ -18,6 +18,8 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
+import { effectiveSessionMode } from '../../slave/permission-pairing.mjs'
+
 /** How much of the relay's output is kept for diagnosis. Enough to see a crash, not a log file. */
 const OUTPUT_LIMIT = 8 * 1024
 
@@ -70,6 +72,16 @@ export class RelaySupervisor {
     // what matters is that it is outside the plugin.
     this.shotDir = deps.shotDir ?? join(tmpdir(), 'dsh-plugin-remote-use', 'shots')
     this.specFile = ''
+    /**
+     * The session mode the RUNNING relay was started with, captured from the spec at start time.
+     *
+     * The settings page shows `workerSessionMode` (what will be used on the next arming), while this
+     * is what the live listener will actually spawn. Keeping both is the difference between "I set it
+     * to full access" and "it is running at full access"; without it the page can only assert the
+     * first (PITFALLS F38).
+     */
+    this.sessionMode = ''
+    this.sessionModeFrom = 'nothing'
     const log = deps.log ?? {}
     this.log = { info: log.info ?? (() => {}), warn: log.warn ?? (() => {}), error: log.error ?? (() => {}) }
     this.now = deps.now ?? (() => Date.now())
@@ -93,13 +105,25 @@ export class RelaySupervisor {
    * Start the listener. Throws on anything that would leave the caller believing a port is open
    * when it is not -- `WorkerArming` turns a throw into a refusal to arm.
    *
+   * `taskCwd` is passed EXPLICITLY rather than read through a closure. Reading it through
+   * `deps.taskDir()` during a restore hits the temporal dead zone: that restore happens while
+   * `WorkerArming` is still being constructed, so the `arming` binding the closure refers to is
+   * not initialized yet. It also read the OLD value during a normal arm, because `WorkerArming`
+   * called `start()` before assigning the newly requested directory. Both are fixed by taking the
+   * value as an argument from the state machine that already owns it.
+   *
    * @param {string} bindAddress
    * @param {number} port
    * @param {string} token
+   * @param {string} [taskCwd] the armed task directory; omitted means "use deps.taskDir()"
    */
-  start(bindAddress, port, token) {
+  start(bindAddress, port, token, taskCwd) {
     if (this.running) throw new Error(`the listener is already running on ${this.bind}:${this.port}`)
     if (!existsSync(this.relay)) throw new Error(`the relay is missing at ${this.relay}`)
+
+    // No default-parameter call to `this.taskDir()`: that would still evaluate the closure before
+    // the caller's explicit value is considered. Only ask the fallback when no value was provided.
+    const taskDir = taskCwd === undefined ? String(this.taskDir() ?? '') : String(taskCwd ?? '')
 
     const spec = this.launchSpec()
     if (spec?.ok !== true) throw new Error(`cannot launch this machine's ACP agent: ${spec?.error ?? 'unknown'}`)
@@ -143,7 +167,7 @@ export class RelaySupervisor {
       // path here: the relay's own `process.cwd()` is not the operator's task directory when the
       // PLUGIN starts the relay, and a wrong answer is silent -- the transfer succeeds, into the wrong
       // directory, and reports the path the caller asked for.
-      ...(this.taskDir() === '' ? [] : ['--task-dir', this.taskDir()]),
+      ...(taskDir === '' ? [] : ['--task-dir', taskDir]),
       // The byte ceiling, beside the count. Both are passed because they bound different things:
       // the count bounds how many captures exist, the byte budget bounds what they occupy, and a
       // worker left running a long GUI loop needs the second one to stay inside a disk budget.
@@ -171,6 +195,11 @@ export class RelaySupervisor {
     this.output = ''
     this.lastError = ''
     this.exited = undefined
+    // Captured from the SAME spec the relay is reading. `env: process.env` mirrors what the relay
+    // spawn does, so an inherited variable is reported as inherited rather than as the spec's.
+    const mode = effectiveSessionMode({ specEnv: spec.spec.env, env: process.env })
+    this.sessionMode = mode.mode
+    this.sessionModeFrom = mode.from
 
     const collect = (chunk) => {
       this.output += String(chunk)
@@ -184,6 +213,10 @@ export class RelaySupervisor {
       // the page must not keep claiming the first while the second is false.
       if (code !== 0 && code !== null) this.log.warn(`the worker listener exited with code ${code}`)
       this.child = undefined
+      // Nothing is running, so there is no effective mode to report. Leaving the last one here
+      // would let the page compare a dead listener's spec against a live setting.
+      this.sessionMode = ''
+      this.sessionModeFrom = 'nothing'
     })
 
     this.log.info(`worker listener started on ${bindAddress}:${port} (pid ${this.pid})`)
@@ -194,6 +227,8 @@ export class RelaySupervisor {
   stop() {
     const child = this.child
     this.child = undefined
+    this.sessionMode = ''
+    this.sessionModeFrom = 'nothing'
     if (child === undefined) {
       this.#discardSpec()
       this.pid = 0
@@ -221,6 +256,11 @@ export class RelaySupervisor {
       uptimeMs: this.running && this.startedAt > 0 ? Math.max(0, this.now() - this.startedAt) : 0,
       exited: this.exited ?? null,
       lastError: this.lastError,
+      // What the LIVE listener will actually spawn. Empty while stopped, so the page cannot compare
+      // a dead spec against the configured value and call it a running mismatch.
+      sessionMode: this.sessionMode,
+      sessionModeFrom: this.sessionModeFrom,
+      specFile: this.specFile,
       // The tail only: enough to see why it died, not a log relay.
       output: this.output.slice(-2000),
     }

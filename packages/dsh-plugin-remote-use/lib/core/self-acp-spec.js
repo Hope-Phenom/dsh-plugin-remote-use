@@ -19,6 +19,7 @@
  */
 
 import { existsSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 
 /**
  * Every file-effect sandbox mode DSH understands.
@@ -45,6 +46,7 @@ export function installCandidates(env = process.env) {
  * @param {string} opts.installDir
  * @param {string} [opts.profile]  the DSH profile the worker runs under
  * @param {string} [opts.permissionMode]  overrides the sandbox/approval preset for the child
+ * @param {string[]} [opts.patchFiles]  extra patch overlays, applied AFTER the profile layer
  * @returns {{ command: string, args: string[], env: Record<string, string> }}
  */
 export function acpLaunchSpec(opts) {
@@ -52,6 +54,15 @@ export function acpLaunchSpec(opts) {
   if (installDir === '') throw new Error('acpLaunchSpec: no install directory')
   const profile = String(opts.profile ?? 'acp')
   if (!/^[\w.-]+$/u.test(profile)) throw new Error(`acpLaunchSpec: profile "${profile}" is not a plain profile name`)
+  // Overlays are the plugin's only way to configure the ACP child without editing the operator's
+  // profile (the worker-model setting uses this). They must be absolute: the child's working
+  // directory is the relay's, not this process's, so a relative path would resolve elsewhere.
+  const patchFiles = Array.isArray(opts.patchFiles) ? opts.patchFiles : []
+  for (const file of patchFiles) {
+    if (typeof file !== 'string' || file === '' || !isAbsolute(file)) {
+      throw new Error(`acpLaunchSpec: patch file is not an absolute path: ${String(file)}`)
+    }
+  }
   // REFUSE an unknown mode instead of passing it through. `dsh-base` validates the value at load
   // and rejects the whole `sandbox-policy` row, so a typo would start a worker whose session has no
   // resolved policy at all -- a failure that is far harder to notice than a failed arming.
@@ -67,6 +78,7 @@ export function acpLaunchSpec(opts) {
       `${installDir}\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js`,
       '--profile',
       profile,
+      ...patchFiles.flatMap((file) => ['--patch', file]),
     ],
     env: {
       ELECTRON_RUN_AS_NODE: '1',
@@ -91,7 +103,7 @@ export function resolveAcpLaunchSpec(deps = {}) {
   for (const candidate of candidates) {
     if (!exists(`${candidate}\\DeepSeek Harness.exe`)) continue
     try {
-      const spec = acpLaunchSpec({ installDir: candidate, profile: deps.profile, permissionMode: deps.permissionMode })
+      const spec = acpLaunchSpec({ installDir: candidate, profile: deps.profile, permissionMode: deps.permissionMode, patchFiles: deps.patchFiles })
       return { ok: true, spec, installDir: candidate }
     } catch (error) {
       return { ok: false, error: error.message, tried: candidates }

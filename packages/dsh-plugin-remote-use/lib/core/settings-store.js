@@ -48,6 +48,10 @@ export const MANAGED_KEYS = [
   'auditKeepFiles',
   // The sandbox mode this machine arms its own remote sessions with.
   'workerSessionMode',
+  // The model those sessions run with, as `provider/model`. Empty means "whatever the acp profile
+  // configures". It is a deployment value like the mode above: the ACP child's image capability is
+  // decided at startup from the configured route, so it cannot be changed per call.
+  'workerModel',
   'delegationPolicy',
   // The worker role: whether this machine accepts remote execution, on which interface, and
   // the credential a paired master presents. It holds a secret, so anything that renders it

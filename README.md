@@ -38,7 +38,7 @@ GUI 自动化测试和"看屏幕才知道结果"的验证，必须在一台**真
 |---|---|
 | 主机 | DSH（本项目在 `0.2.0-rc.2` 上开发）、Node ≥ 20 |
 | 从机 | DSH 已装并**已登录**、Node ≥ 20、一个**已解锁的交互式桌面会话** |
-| 从机 | 沙箱 mediator 生效（见下方"安全模型"）——**沙箱不可用时会拒绝启用** |
+| 从机 | 沙箱 mediator 就绪（见下方“安全模型”）——**沙箱不可用时会拒绝启用**；缺什么、怎么补，设置页会直接给出一条可执行的命令 |
 | 从机 | **一个虚拟显示器**（见下）——不满足时自检的 S2 **阻断**派单 |
 
 > **从机必须真的登录进桌面**。锁屏或无人登录时无法注入输入，自检会明确报出来。
@@ -202,11 +202,69 @@ Web 会话的 **agent preset** 枚举（`preset-standard.plugins`），而那个
 ```powershell
 node relay.mjs --port 7331 --token <secret> `
   --cmd-file agent-spec.json `
+  --task-dir E:\WorkSpace\dsh-remote `
   --selfcheck-script selfcheck.ps1 `
   --screenshot-script screenshot.ps1
 ```
 
-`agent-spec.json` 由 `slave/make-launch-spec.mjs` 生成——它复刻 DSH 的 `dsh.cmd`，用 **argv 数组**避开 Windows 引号问题。
+`agent-spec.json` 由 `slave/make-launch-spec.mjs` 生成——它复刻 DSH 的 `dsh.cmd`，用 **argv 数组**避开 Windows 引号问题。**不带 `--permission-mode` 时它会读取本机设置里的 `workerSessionMode`**，并把来源写进 `_permissionModeSource`；显式参数仍然优先。
+
+> **`--task-dir` 不只是相对路径的基准。** 在 `danger-full-access` 下，中继会用它来清除
+> `workspace-write` 遗留在工作目录上的 Low 强制标签（否则复制进目录的 GUI 程序会以 Low 完整性启动，
+> 写不了 `%LOCALAPPDATA%`），`remote_selfcheck` 也会把该目录与 `%TEMP%` 的完整性读数作为 `S20`
+> 上报。不传这个参数时，中继不会猜一个目录去修，报告会明确说"未探测"。
+>
+> 中继启动时还会比较设置文件里的档位与自己的 spec；不一致时打印警告，并让 `remote_selfcheck`
+> 带上 `sessionModeMismatch` 与 `S19`。修改设置后请重新生成 spec 并重启中继；插件托管的中继则
+> 需要先停止再重新布防（设置页会直接提示）。详见 [踩坑与教训 F42](docs/PITFALLS.md)。
+>
+> 如果计划任务的运行账户与写设置的那个账户不是同一个（或 `DSH_HOME` 指到别处），给中继加
+> `--settings-file <...\settings.json>`；`make-launch-spec.mjs` 也可以用 `--dsh-home` /
+> `--settings-file` 指向同一份设置。
+>
+> 手管中继如果没有显式传 `--task-dir`，可加 `--repair-integrity`，让中继修复它继承来的工作目录
+> （盘符根与系统目录仍会被拒绝）；也可以单独运行 `slave/repair-workspace-integrity.ps1 -Path <目录>`。
+
+### 3b. 从计划任务迁移到插件布防（跟随 DSH，推荐）
+
+如果你不想每次升级插件都重新部署 `plugin-slave`，就让中继**由 DSH 自己拉起**。这样中继永远用插件包里的
+`slave/relay.mjs`，升级插件 + 重启 DSH 即可，不再有独立的 `agent-spec.json` 和计划任务。
+
+1. 从机升级到 **0.2.23**，重启 DSH（让新插件加载）。
+   > 0.2.20 的布防恢复有 TDZ 缺陷（恢复时抛 `Cannot access 'arming' before initialization`），
+   > 会表现为“已布防但本机中继起不来、旧计划任务仍占端口”。0.2.21 修复了它；不要停在 0.2.20。
+   > 0.2.22 起，「本机角色」在页面加载时就报告**沙箱 mediator** 状态，缺失时直接给出可执行的修复命令
+   > （见下方「沙箱 mediator 没了怎么办」）。
+   > **0.2.23 修复了把模板 `[]` 追加成两个 YAML 文档、导致 `dsh --profile acp` 起不来（主机只看到
+   > `S0 worker reachable: fail`）的问题**——详见 [踩坑与教训 F45](docs/PITFALLS.md)。
+   > **0.2.24 修复了没有 PowerShell 7 的新机器上自检脚本起不来（S0 报 `Unexpected end of JSON
+   > input`）的问题**——详见 [踩坑与教训 F46](docs/PITFALLS.md)。
+2. 停掉并禁用旧的计划任务，确认 7331 已释放：
+   ```powershell
+   schtasks /end /tn DshRelay
+   schtasks /change /tn DshRelay /disable
+   Get-NetTCPConnection -LocalPort 7331 -ErrorAction SilentlyContinue
+   ```
+   > 不先停掉它，插件布防时新中继会因端口占用而退出。设置页的「本机角色」现在会直接显示
+   > “监听已退出（退出码 …）”和输出尾部，而不是只显示“已布防”。
+3. 从机 DSH → 设置 → 远程工作节点 → **本机角色**：选局域网地址、端口 `7331`、任务目录
+   `E:\WorkSpace\dsh-remote`，先点「检查」，再点「布防为工作节点」。
+   > 「本机角色」里有一行**沙箱 mediator**，页面加载时就会显示状态。不是「已就绪」时，面板会给出
+   > 一段**填好本机路径的处方**（含命令），复制出来在本机执行即可 —— 见下方「沙箱 mediator 没了怎么办」。
+   >
+   > **模型**：如果这台从机要用指定模型，在同一区域的「本机远程会话的模型」里填
+   > `provider/model`（例如 `deepseek-official/deepseek-flash`）。布防时它以插件自己的 `--patch`
+   > overlay 传给 ACP，**不改你的 profile**；留空 = 沿用 profile 里配的模型。这个值决定
+   > `initialize` 的 `promptCapabilities.image`：填错会让主机发不了图、从机 `read_image` 也失败，
+   > 而且是**静默**的 —— 所以布防前会先校验：id 不存在直接拒绝，存在但不带图则警告。
+4. 复制它只显示一次的**配对串**，到主机的设置页点「粘贴配对串」。**同一地址的已有 worker 会被更新**
+   （新 token、新任务目录），不会多出一行；如果主机还是旧版，先删掉旧行再粘贴。
+5. 验证：worker 卡片已连接；`sessionMode = danger-full-access`；`S19`、`S20` 通过；
+   workspace 里复制 `whoami.exe` 启动应为 Medium/High。
+
+之后升级只需：**从机升级插件 → 重启 DSH**。布防状态会带着同一个 token 自动恢复，启动规格在每次
+布防时重新生成（`%TEMP%\dsh-plugin-remote-use\acp-spec-<pid>-<port>.json`），不需要手改任何文件。
+代价是：**DSH 不在运行时中继也不在**；如果你需要开机即监听，保留计划任务并采用上面的手动部署路径。
 
 ### 4. 第一次使用
 
@@ -324,6 +382,11 @@ remote_agents   { action: "status", taskId: "rtask_xxx" }  →  状态 + 完整�
 自检里的六项行为检查会**实际执行**验证：工作区内写入成功（对照）、**工作区外写入被拒**、只读档无法写、只读档仍可读。
 
 > **Windows 注意**：`dsh-sandbox-local` 用 `process.execPath` 构造 mediator 调用，而在 GUI 子系统镜像下（无控制台启动）它会在 DLL 初始化阶段死掉（`STATUS_DLL_INIT_FAILED`）。修法是在 profile 里把 `runnerCommand` 指向一个**控制台子系统**的 mediator（本项目用 `C:\dsh-sandbox-mediator\shim.mjs`），并用 `runnerFailureSignatures` 声明失败特征。
+>
+> 这件事**不需要照文档手工做**：mediator 缺失时，设置页的「本机角色」会给出一条已经填好本机
+> `DSH home` / acp profile / mediator 目标 / `node.exe` 的命令，复制执行即可。脚本随插件包发布
+> （`lib/tools/prepare-sandbox-mediator.mjs`），只做三件事：物化 mediator、**仅在 profile 没有
+> `sandbox` 行时**追加、跑同一个六项探针。它幂等，`--dry-run` 可先预演。
 
 ### 人工审批
 
@@ -367,6 +430,39 @@ DSH 会认证**应用外壳**（直接 `GET /` 返回 401），但**不认证插
 ---
 
 ## 运维
+
+### 从机 GUI 环境不达标怎么办（自动配置提示词）
+
+从机的 GUI 就绪项（虚拟显示器、分辨率/原点、QuickEdit、屏保、睡眠/休眠……）可以交给**从机自己的 DSH 会话**
+去做。把随包发布的 `lib/tools/selfcheck-fix-prompt.md` 整段粘进从机的对话即可：
+
+```
+%USERPROFILE%\.dsh\profiles\<profile>\node_modules\@hope_phenom\dsh-plugin-remote-use\lib\tools\selfcheck-fix-prompt.md
+```
+
+它会先跑 `slave/selfcheck.ps1` 读报告，再按项修复（blocking 优先），最后复跑并对比修复前后的 checks。
+需要管理员、装驱动、或**需要人登录/解锁**的步骤，它会停下来说明，不会假装成功。
+
+> 必须在**已登录、已解锁的交互式桌面会话**里跑（DSH 桌面进程所在的那个）。SSH/服务会话里会得到
+> `session=0`、S1=0 块屏的假阴性。
+
+### 沙箱 mediator 没了怎么办
+**症状**：设置页「本机角色」的**沙箱 mediator** 一行显示「未准备」；点「先检查」时被拒绝，理由里
+出现 `is not materialized` 或 `no profile patch at …`。常见成因：手工删除/清理过
+`%DSH_HOME%\sandbox-mediator`（或 `C:\dsh-sandbox-mediator`）、换过机器、profile 从别处拷来。
+
+**在从机上**：直接把面板里那段处方复制出来执行（PowerShell）：
+
+```powershell
+& "<node.exe>" "<插件目录>\lib\tools\prepare-sandbox-mediator.mjs" `
+    --dsh-home "$env:USERPROFILE\.dsh" --profile acp --install "<安装目录>"
+```
+
+要手工确认它做了什么，先加 `--dry-run`。它**不会**改写已有的 `sandbox` 行 —— 如果那一行是坏的，
+它会明确报出来并停下，由你决定。
+
+> **为什么页面不替你执行**：它要写 `%DSH_HOME%\profiles\acp\cordis.patch.yml` 和一个机器级目录，
+> 都在插件自身状态之外。写操作由人（或被指到这条命令的 agent）发起，门禁只负责判定与给处方。
 
 ### 虚拟显示器挂了怎么恢复
 
@@ -425,6 +521,8 @@ node prototype\host\plugin-live.mjs --url 'ws://worker-pc:7331' --token <secret>
 | **S8** 合成输入 | `SetCursorPos` 失败。**注意**：从受限 shell（如 agent 的沙箱内）启动中继时这一项必然假失败 |
 | **S14/S15** DSH 已装 / 已登录 | 路径从环境派生；报告里会写出**找了哪些位置** |
 | **S18** 目标应用 | 未配置时是「未配置」而非「缺失」。用 `-App` 或 `DSH_SELFCHECK_APP` 指定 |
+| **S19** 档位一致性 | 设置里的 `workerSessionMode` 与中继实际启动规格不一致。重建 spec 并重启中继（手管），或先停止再重新布防（插件托管） |
+| **S20** 工作目录完整性 | 工作目录里的 EXE 以 Low 启动（`workspace-write` 遗留标签）。`danger-full-access` 下中继会用 `--task-dir` 自动修复；也可跑 `slave/repair-workspace-integrity.ps1` 或 `slave/stage-app.ps1` |
 
 ### 更新部署
 

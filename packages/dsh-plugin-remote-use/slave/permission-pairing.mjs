@@ -19,11 +19,11 @@
 // to load, the ACP process never comes up and the worker is simply GONE. That is the F24 shape: a
 // configuration combination that stops the whole application, presenting as "the worker broke".
 //
-// WHY THE CHECK IS HERE AND NOT IN THE PLUGIN: the plugin never knows the deployment mode -- it
-// enters the system only through `make-launch-spec.mjs --permission-mode`, which is run by hand on
-// the worker. That script is the only place that both knows the mode and can read the profile, so
-// it is the only place a gate can actually stand. Putting one anywhere else would need new config
-// to carry the mode there, which is the mechanism this design deliberately does not have.
+// WHY THE CHECK IS STILL AT THE SPEC BUILD: the plugin does know the mode it asked for (0.2.15),
+// but a hand-managed relay and the manual generator do not go through the plugin at all. The spec
+// generator is the one place every deployment passes through, and it can read the profile that must
+// compose the mode -- so it is where the gate can cover both the supervised and the manual paths.
+// Putting it only in the plugin would leave the hand-managed deployment ungated.
 
 /** Every file-effect sandbox mode DSH understands. Mirrors `SANDBOX_MODES` in dsh-sandbox-policy. */
 export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access']
@@ -67,6 +67,92 @@ export function effectiveSessionMode(sources = {}) {
   // Empty means the child falls through to `dsh-base`'s own default, which is workspace-write.
   // Reported as '' rather than as that default, so a reader can tell "not set here" from "set here".
   return { mode: '', from: 'nothing' }
+}
+
+/**
+ * The mode the OPERATOR configured for this machine, read from the plugin's settings file.
+ *
+ * WHY THE RELAY READS THIS AT ALL: a hand-run relay (a scheduled task with `--cmd-file
+ * agent-spec.json`) is started outside the plugin, so `workerSessionMode` can be changed on the
+ * settings page without anything rewriting that spec. The result is the exact failure this project
+ * already recorded once (PITFALLS F38): "the setting says full access" and "the spec says
+ * workspace-write" are both true, for as long as nobody restarts anything, and neither side says so.
+ *
+ * The relay is the process that can answer the question from the machine itself: it has the spec it
+ * will actually spawn, and it can read the same settings file the plugin writes.
+ *
+ * @param {object} sources
+ * @param {object} [sources.specEnv] the launch spec's `env`, which wins when it sets the mode
+ * @param {object} [sources.env] the relay's own environment
+ * @param {string} [sources.settingsText] the settings file contents, or '' when it does not exist
+ * @returns {{
+ *   effective: { mode: string, from: 'spec' | 'relay-env' | 'nothing' },
+ *   effectiveMode: string,
+ *   configured: string,
+ *   settingsError: string,
+ *   mismatch: boolean
+ * }}
+ */
+export function sessionModeConsistency(sources = {}) {
+  const effective = effectiveSessionMode(sources)
+  // DSH's own default is workspace-write. Treating "nothing set" as that value is what lets a
+  // machine configured for workspace-write match an old spec that carries no variable at all.
+  const effectiveMode = effective.mode === '' ? 'workspace-write' : effective.mode
+  let configured = ''
+  let settingsError = ''
+  if (typeof sources.settingsText === 'string' && sources.settingsText !== '') {
+    try {
+      const parsed = JSON.parse(sources.settingsText)
+      if (parsed !== null && typeof parsed === 'object' && typeof parsed.workerSessionMode === 'string') {
+        configured = parsed.workerSessionMode
+      }
+    } catch (error) {
+      // A corrupt settings file is reported as its own fact. It must not be read as "not
+      // configured": those are different states, and only one of them means the operator has no
+      // opinion about the mode.
+      settingsError = `settings file is unreadable: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  return {
+    effective,
+    effectiveMode,
+    configured,
+    settingsError,
+    // Only a configured value can be wrong. With none, the relay has nothing to disagree with.
+    mismatch: configured !== '' && configured !== effectiveMode,
+  }
+}
+
+/**
+ * The self-check row that makes a configured/effective mismatch visible in the report the master
+ * already renders.
+ *
+ * Returns null when the operator has not configured a mode: an unconfigured relay should not gain a
+ * warning row that says nothing. The row is `warning`, not `blocking`: the relay still works, it is
+ * running at the wrong level, and that is exactly the state the operator has to be told about.
+ *
+ * @param {ReturnType<typeof sessionModeConsistency>} state
+ * @param {{ specPath?: string }} [meta]
+ * @returns {object | null}
+ */
+export function sessionModeCheck(state, meta = {}) {
+  if (state === null || state === undefined || state.configured === '') return null
+  const from = state.effective.from === 'nothing'
+    ? 'nothing set in the spec or relay env, so DSH defaults to workspace-write'
+    : `from ${state.effective.from}`
+  return {
+    id: 'S19',
+    name: 'launch spec matches configured session mode',
+    severity: 'warning',
+    status: state.mismatch ? 'warn' : 'pass',
+    expected: `configured ${state.configured}`,
+    actual: `effective ${state.effectiveMode} (${from})${meta.specPath ? `; spec ${meta.specPath}` : ''}`,
+    fix: state.mismatch
+      ? `re-generate the launch spec from the saved setting on the worker `
+        + `(node slave/make-launch-spec.mjs --out <spec>), then restart the relay. `
+        + `The relay would spawn ${state.effectiveMode} while this machine is configured for ${state.configured}.`
+      : '',
+  }
 }
 
 /**

@@ -389,6 +389,12 @@ test('the deployment script copies everything the relay imports, and proves it r
   // graph that cannot load.
   assert.match(script, /--print-pairing/u, 'the deployment must RUN the copied relay, not just parse it')
   assert.match(script, /ERR_MODULE_NOT_FOUND|dshpair1/u, 'the run check must assert the relay produced a pairing string')
+
+  // The PowerShell helpers are copied by explicit name too, so a rename must fail here rather than
+  // on a worker where S20 silently reports a missing probe.
+  for (const helper of ['integrity-probe.ps1', 'repair-workspace-integrity.ps1', 'stage-app.ps1']) {
+    assert.ok(script.includes(`'${helper}'`), `${helper} is not copied by tools/deploy-slave.ps1`)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -538,7 +544,7 @@ test('every non-optional peer dependency of our runtime dependencies is declared
 test('param() is the first statement in the scripts that take parameters', () => {  // PowerShell rejects `param()` after any executable statement, and PS 5.1 reports it as a
   // confusing "invalid assignment operator" at the lines that FOLLOW. The deploy gate catches it
   // too, but only when someone runs the gate.
-  for (const name of ['selfcheck.ps1']) {
+  for (const name of ['selfcheck.ps1', 'integrity-probe.ps1', 'repair-workspace-integrity.ps1', 'stage-app.ps1']) {
     const text = readFileSync(join(SLAVE, name), 'utf8')
     const paramAt = text.indexOf('param(')
     if (paramAt < 0) continue

@@ -368,6 +368,40 @@ test('the advanced block exposes the delegation policy and the screenshot budget
   assert.ok(numeric.includes('90000'), 'approvalTimeoutMs must still be seeded')
 })
 
+test('the advanced block exposes the worker model with its image caveat', () => {
+  // The value is a deployment setting (the ACP image capability is fixed at startup), so it must
+  // be visible where the session mode is, together with the warning that a wrong id disables
+  // images -- the failure it causes is silent otherwise.
+  const { tree } = renderSnapshot({ ...BASE_SNAPSHOT })
+  const text = textOf(tree).join(' ')
+  assert.match(text, /F-WORKER-MODEL/)
+  assert.match(text, /F-WORKER-MODEL-HINT/)
+})
+
+test('the advanced block shows configured vs effective mode and warns when a re-arm is required', () => {
+  // Saving `workerSessionMode` does not rewrite the spec of a relay that is already running. The
+  // page has to say both facts, or "saved full access" reads as "running full access".
+  const { tree } = renderSnapshot({
+    ...BASE_SNAPSHOT,
+    settings: {
+      workers: [],
+      sessionsEnabled: 0,
+      enableCommand: '/remote-use on',
+      workerSessionMode: 'danger-full-access',
+      workerSession: {
+        configured: 'danger-full-access',
+        effective: 'workspace-write',
+        running: true,
+        reArmRequired: true,
+        effectiveFrom: 'spec',
+      },
+    },
+  })
+  const text = textOf(tree).join(' ')
+  assert.match(text, /MODE-EFF workspace-write/, 'the running listener value must be visible')
+  assert.match(text, /REARM danger-full-access->workspace-write/, 'and the mismatch must name both values')
+})
+
 test('the role block reports the per-session switch and names the real control', () => {
   // The page has no session identity, so it cannot offer a working toggle. Showing the state
   // and the command is the honest version of this control.
@@ -429,10 +463,17 @@ const ROLE_OFF = {
   ],
 }
 
-function renderRole(role) {
+function renderRole(role, sandbox, readiness) {
   return renderSnapshot({
     ...BASE_SNAPSHOT,
-    settings: { workers: [], sessionsEnabled: 0, enableCommand: '/remote-use on', workerRole: role },
+    settings: {
+      workers: [],
+      sessionsEnabled: 0,
+      enableCommand: '/remote-use on',
+      workerRole: role,
+      ...(sandbox === undefined ? {} : { sandbox }),
+      ...(readiness === undefined ? {} : { readiness }),
+    },
   })
 }
 
@@ -451,6 +492,22 @@ test('the worker role panel says plainly whether a listener is open', () => {
   assert.match(on, /192\.168\.1\.100/)
   assert.match(on, /1m/)
   assert.match(on, /abcd/)
+})
+
+test('an armed role whose listener exited says so, instead of claiming it is listening', () => {
+  // The migration case: the old DshRelay task still owns 7331, so the plugin's relay exits with
+  // EADDRINUSE while `armed` remains true. "Armed" alone would send the operator looking at the
+  // network, not at the process that took the port.
+  const text = textOf(renderRole({
+    ...ROLE_OFF,
+    armed: true,
+    bindAddress: '192.168.1.100',
+    tokenSet: true,
+    listener: { running: false, exited: { code: 1, signal: null }, output: 'Error: listen EADDRINUSE 192.168.1.100:7331' },
+  }).tree).join(' ')
+  assert.match(text, /LISTENER-EXITED 1/)
+  assert.match(text, /EADDRINUSE/)
+  assert.match(text, /7331/)
 })
 
 test('the interface list is complete, and says why the virtual ones are not offered', () => {
@@ -490,6 +547,81 @@ test('the arm button is disabled until a check has passed', () => {
 
   const ok = textOf(renderRole({ ...ROLE_OFF, probe: { ok: true, reason: '' } }).tree).join(' ')
   assert.match(ok, /ROLE-SANDBOX-OK/)
+})
+
+test('a missing mediator is reported at page load, with the exact command that fixes it', () => {
+  // The mediator is deployed BY HAND and can disappear while the role is simply disarmed --
+  // measured 2026-11-04: both directories gone, and the page said nothing because the probe only
+  // runs on a Check click. The diagnosis therefore runs on every load and carries the fix.
+  const sandbox = {
+    state: 'missing',
+    reason: 'the profile names C:\\dsh-sandbox-mediator\\shim.mjs, but it is not materialized there',
+    prescription: { command: '& "node.exe" "prepare-sandbox-mediator.mjs"', text: 'RUN-THIS --dsh-home "C:\\Users\\x\\.dsh"' },
+  }
+  const { tree } = renderRole(ROLE_OFF, sandbox)
+  const text = textOf(tree).join(' ')
+  assert.match(text, /MEDIATOR-MISSING/, 'the state is visible without clicking Check')
+  assert.match(text, /MEDIATOR-FIX/)
+  assert.match(text, /not materialized/, 'the reason is shown, not swallowed')
+  // The command sits in a read-only textarea: verbatim, selectable, and impossible to edit by
+  // accident before pasting it into a terminal or an agent session.
+  const areas = findTextarea(tree, 'RUN-THIS')
+  assert.equal(areas.length, 1)
+  assert.equal(areas[0].props.readOnly, true)
+  assert.equal(findButton(tree, 'MEDIATOR-COPY').length, 1)
+})
+
+test('a ready mediator shows no prescription unless the probe actually failed', () => {
+  const ready = { state: 'ready', reason: '', prescription: { command: 'c', text: 'SHOULD-NOT-SHOW' } }
+  const healthy = renderRole({ ...ROLE_OFF, probe: { ok: true, reason: '' } }, ready).tree
+  assert.match(textOf(healthy).join(' '), /MEDIATOR-READY/)
+  assert.equal(findTextarea(healthy, 'SHOULD-NOT-SHOW').length, 0)
+
+  // The files are there but confinement does not hold (a stale runner, a policy change): the same
+  // command is still the right next step, so the prescription must come back.
+  const broken = renderRole({ ...ROLE_OFF, probe: { ok: false, reason: 'did not confine' } }, ready).tree
+  assert.match(textOf(broken).join(' '), /MEDIATOR-FIX/)
+  assert.equal(findTextarea(broken, 'SHOULD-NOT-SHOW').length, 1)
+})
+
+test('the environment block shows the self-check verdict and offers the fix prompt', () => {
+  // Readiness is ADVISORY: it appears after a Check (the host runs the worker's own selfcheck) and
+  // must never be presented as an arming decision. A blocked report carries the prompt the
+  // operator hands to the worker's DSH session.
+  const blocked = {
+    ok: true,
+    verdict: 'blocked',
+    blockingFailures: 2,
+    warnings: 0,
+    unchecked: 0,
+    checks: [
+      { id: 'S1', status: 'fail', actual: '0 adapters' },
+      { id: 'S6', status: 'fail', actual: 'mySession=0 consoleId=2' },
+      { id: 'S5', status: 'pass' },
+    ],
+    prompt: { text: 'ENV-PROMPT', scriptPath: 'C:\\x\\selfcheck.ps1' },
+  }
+  const { tree } = renderRole(ROLE_OFF, undefined, blocked)
+  const text = textOf(tree).join(' ')
+  assert.match(text, /ROLE-ENV-BLOCKED/)
+  assert.match(text, /ROLE-ENV-FIX/)
+  assert.match(text, /S1 fail: 0 adapters/)
+  assert.equal(findButton(tree, 'ROLE-ENV-COPY').length, 1, 'the fix prompt must be copyable')
+
+  const ready = textOf(renderRole(ROLE_OFF, undefined, { ok: true, verdict: 'warn', checks: [], prompt: { text: 'x' } }).tree).join(' ')
+  assert.match(ready, /ROLE-ENV-READY/)
+  assert.doesNotMatch(ready, /ROLE-ENV-FIX/)
+
+  const unavailable = textOf(renderRole(ROLE_OFF, undefined, { ok: false, reason: 'powershell.exe not found', prompt: { text: 'x' } }).tree).join(' ')
+  assert.match(unavailable, /ROLE-ENV-UNAVAILABLE/)
+  assert.match(unavailable, /powershell\.exe not found/)
+})
+
+test('an older host with no sandbox report renders the panel unchanged', () => {
+  // `sandbox` is a newer field; a page must not break when the host does not send it.
+  const text = textOf(renderRole(ROLE_OFF).tree).join(' ')
+  assert.match(text, /ROLE-DISARMED/)
+  assert.doesNotMatch(text, /MEDIATOR-FIX/)
 })
 
 test('the armed panel offers the local stop and says it does not contact the master', () => {
@@ -1083,6 +1215,15 @@ function textOf(node, out = []) {
   return out
 }
 
+/** Every <textarea> whose `value` prop contains `needle`. Values are PROPS, so textOf cannot see them. */
+function findTextarea(node, needle, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const child of node) findTextarea(child, needle, out); return out }
+  if (node.type === 'textarea' && String(node.props?.value ?? '').includes(needle)) out.push(node)
+  if (Array.isArray(node.children)) for (const child of node.children) findTextarea(child, needle, out)
+  return out
+}
+
 /** Collect every element whose props.className contains `token`. */
 function findByClass(node, token, out = []) {
   if (node === null || typeof node !== 'object') return out
@@ -1132,10 +1273,21 @@ function makeTranslator() {
       verdictPartial: 'VERDICT-PARTIAL', verdictBlocked: 'VERDICT-BLOCKED',
       verdictUnknown: 'VERDICT-UNKNOWN',
       fieldKeepShots: 'F-KEEPSHOTS', fieldPolicy: 'F-POLICY', fieldSessions: 'F-SESSIONS',
+      fieldWorkerSessionMode: 'F-MODE', fieldWorkerSessionModeHint: 'F-MODE-HINT',
+      fieldWorkerModel: 'F-WORKER-MODEL', fieldWorkerModelHint: 'F-WORKER-MODEL-HINT',
+      fieldWorkerSessionModeEffective: 'MODE-EFF {mode}',
+      workerSessionReArmRequired: 'REARM {cfg}->{eff}', workerSessionNotRunning: 'MODE-STOPPED',
       sessionsOn: 'SESSIONS-ON-{n}', sessionsNone: 'SESSIONS-NONE', switchHint: 'SWITCH {cmd}',
       roleArmed: 'ROLE-ARMED', roleDisarmed: 'ROLE-DISARMED', roleDisarmedNote: 'ROLE-DISARMED-NOTE',
       roleUptime: 'UP', roleToken: 'TOK', roleSandbox: 'SANDBOX', roleSandboxOk: 'ROLE-SANDBOX-OK',
       roleSandboxUnknown: 'ROLE-SANDBOX-?',
+      roleMediator: 'MEDIATOR', roleMediatorReady: 'MEDIATOR-READY', roleMediatorMissing: 'MEDIATOR-MISSING',
+      roleMediatorUnsupported: 'MEDIATOR-NA', roleMediatorFix: 'MEDIATOR-FIX',
+      roleMediatorCopy: 'MEDIATOR-COPY', roleMediatorHint: 'MEDIATOR-HINT',
+      roleEnv: 'ROLE-ENV', roleEnvReady: 'ROLE-ENV-READY', roleEnvBlocked: 'ROLE-ENV-BLOCKED',
+      roleEnvUnavailable: 'ROLE-ENV-UNAVAILABLE', roleEnvFix: 'ROLE-ENV-FIX',
+      roleEnvCopy: 'ROLE-ENV-COPY', roleEnvHint: 'ROLE-ENV-HINT',
+      roleListenerExited: 'LISTENER-EXITED {code} {detail}',
       roleBind: 'BIND', roleBindHint: 'BIND-HINT', roleVirtual: 'ROLE-VIRTUAL', roleNotOffered: 'ROLE-NOT-OFFERED',
       rolePort: 'PORT', rolePortHint: 'PORT-HINT', roleCheck: 'ROLE-CHECK', roleArm: 'ROLE-ARM',
       roleCheckOk: 'ROLE-CHECK-OK', roleCheckFailed: 'ROLE-CHECK-FAILED',

@@ -217,6 +217,112 @@ test('a profile naming no sandbox entry says what to add, not just that somethin
   })
 })
 
+test('the probe runs the shim through the INTERPRETER the profile names', () => {
+  // `process.execPath` is the DSH desktop app here -- a GUI-subsystem image that cannot host the
+  // restricted child. Probing it while the profile configures a console-subsystem node.exe answers
+  // a question about the HOST, and can refuse a machine DSH would run correctly.
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-interpreter-'))
+  try {
+    writeFileSync(join(dir, 'shim.mjs'), '// fake shim\n', 'utf8')
+    const runnerDir = join(dir, 'node_modules', '@deepseek-ai', 'dsh-sandbox-windows-acl', 'lib')
+    mkdirSync(runnerDir, { recursive: true })
+    writeFileSync(join(runnerDir, 'runner.js'), '// fake runner\n', 'utf8')
+    const namedNode = join(dir, 'node.exe')
+    writeFileSync(namedNode, '// not a real PE; only existence is checked here\n', 'utf8')
+
+    const entry = [
+      '- id: sandbox',
+      "  name: '@deepseek-ai/dsh-sandbox-local'",
+      '  config:',
+      '    runnerCommand:',
+      `      - "${namedNode.replace(/\\/gu, '\\\\')}"`,
+      `      - "${join(dir, 'shim.mjs').replace(/\\/gu, '\\\\')}"`,
+      '    runnerFailureSignatures:',
+      '      - "windows-acl-run: "',
+    ].join('\n')
+
+    withProfile(entry, (profileFile) => {
+      const exes = []
+      const result = probeSandbox({
+        profile: profileFile,
+        workspace: join(tmpdir(), 'sandbox-probe-interpreter-ws'),
+        spawn: (exe, args) => {
+          exes.push({ exe, shim: args[0] })
+          return { status: 0, stdout: 'sandbox-probe-alive wrote-ok read-only-alive refused: nope' }
+        },
+      })
+      assert.ok(exes.length > 0, 'the probe must actually run something')
+      for (const call of exes) {
+        assert.equal(call.exe, namedNode, 'every confined command must go through the configured interpreter')
+      }
+      // The check list must SAY which interpreter was used, so a refusal names the right executable.
+      const check = (result.checks ?? []).find((c) => c.name === 'the mediator interpreter exists')
+      assert.ok(check !== undefined)
+      assert.equal(check.detail, namedNode)
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a profile naming no interpreter falls back to this process, and says so', () => {
+  // The hand-written test/fixture shape: a runnerCommand of one element (just a shim). The probe
+  // must still run, and must not claim the profile named an interpreter.
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-no-interpreter-'))
+  try {
+    writeFileSync(join(dir, 'shim.mjs'), '// fake shim\n', 'utf8')
+    const runnerDir = join(dir, 'node_modules', '@deepseek-ai', 'dsh-sandbox-windows-acl', 'lib')
+    mkdirSync(runnerDir, { recursive: true })
+    writeFileSync(join(runnerDir, 'runner.js'), '// fake runner\n', 'utf8')
+    const entry = [
+      '- id: sandbox',
+      "  name: '@deepseek-ai/dsh-sandbox-local'",
+      '  config:',
+      '    runnerCommand:',
+      `      - "${join(dir, 'shim.mjs').replace(/\\/gu, '\\\\')}"`,
+      '    runnerFailureSignatures:',
+      '      - "windows-acl-run: "',
+    ].join('\n')
+    withProfile(entry, (profileFile) => {
+      const result = probeSandbox({
+        profile: profileFile,
+        workspace: join(tmpdir(), 'sandbox-probe-nointerp-ws'),
+        spawn: () => ({ status: 0, stdout: 'sandbox-probe-alive wrote-ok read-only-alive refused: nope' }),
+      })
+      const check = (result.checks ?? []).find((c) => c.name === 'the mediator interpreter exists')
+      assert.ok(check !== undefined)
+      assert.match(check.detail, /names no interpreter/u)
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a profile with an empty-list marker AND entries is refused as invalid YAML', () => {
+  // The shipped profile template is `[]`; appending an entry after it makes two YAML documents.
+  // The ACP child refuses the profile, so the arming gate must refuse too -- otherwise the machine
+  // arms and every connection closes (S0 "worker reachable: fail"). Measured 2026-11-05.
+  const broken = `[]\n\n${GOOD_ENTRY}`
+  withProfile(broken, (file) => {
+    const named = shimNamedByProfile(file)
+    assert.equal(named.ok, false)
+    assert.match(named.reason, /empty list marker/u)
+    // A non-existent mediator keeps this unit test from touching the real sandbox: the question
+    // here is the CONFIG verdict, and `config.reason` must carry the marker diagnosis.
+    const result = probeSandbox({ profile: file, mediator: join(tmpdir(), 'no-such-mediator-f45') })
+    assert.equal(result.ok, false)
+    assert.equal(result.config.ok, false)
+    assert.match(result.config.reason, /empty list marker/u)
+  })
+  // The template on its own is NOT this failure: it is simply unwired, and its reason must stay
+  // the actionable "add a sandbox entry" one rather than blaming a marker that is legitimate.
+  withProfile('[]\n', (file) => {
+    const named = shimNamedByProfile(file)
+    assert.equal(named.ok, false)
+    assert.match(named.reason, /no sandbox entry/u)
+  })
+})
+
 test('subsystemOf distinguishes a GUI image from a console one', () => {
   // The distinction is the whole defect, so it is asserted against real binaries on this host.
   const nodeExe = process.execPath

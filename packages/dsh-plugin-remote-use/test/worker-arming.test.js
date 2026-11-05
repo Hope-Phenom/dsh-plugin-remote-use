@@ -22,7 +22,7 @@ function makeArming(overrides = {}) {
   const arming = new WorkerArming({
     interfaces: () => INTERFACES,
     probe: () => ({ ok: true, reason: '' }),
-    start: (bind, port, token) => calls.start.push({ bind, port, token }),
+    start: (bind, port, token, taskCwd) => calls.start.push({ bind, port, token, taskCwd }),
     stop: () => { calls.stop += 1 },
     persist: (state) => calls.persisted.push({ ...state }),
     mint: () => 'minted-token-value',
@@ -40,7 +40,33 @@ test('a healthy machine arms on a named LAN address and latches', () => {
   assert.equal(result.ok, true, result.error)
   assert.equal(result.token, 'minted-token-value', 'the plaintext comes back exactly once')
   assert.equal(arming.status().armed, true)
-  assert.deepEqual(calls.start, [{ bind: '192.168.1.100', port: DEFAULT_ARM_PORT, token: 'minted-token-value' }])
+  assert.deepEqual(calls.start, [{ bind: '192.168.1.100', port: DEFAULT_ARM_PORT, token: 'minted-token-value', taskCwd: '' }])
+})
+
+test('the FIRST arm passes the requested task directory to start, not a stale one', () => {
+  // `arm()` used to call `start()` before assigning `this.taskCwd`, and the supervisor read the
+  // directory through a closure. The relay therefore got the PREVIOUS arm's directory (or the
+  // inherited cwd on the first arm), while the pairing string advertised the new one. Both halves
+  // looked right and disagreed. The directory is now an explicit `start()` argument.
+  const { arming, calls } = makeArming()
+  arming.arm({ bindAddress: '192.168.1.100', taskCwd: 'E:\\WorkSpace\\dsh-remote' })
+  assert.equal(calls.start.length, 1)
+  assert.equal(calls.start[0].taskCwd, 'E:\\WorkSpace\\dsh-remote')
+
+  arming.disarm()
+  arming.arm({ bindAddress: '192.168.1.100', taskCwd: 'E:\\WorkSpace\\second' })
+  assert.equal(calls.start[1].taskCwd, 'E:\\WorkSpace\\second', 'the second arm must not reuse the first directory')
+})
+
+test('a restore passes the stored task directory to start', () => {
+  // The restore runs while `WorkerArming` is still being constructed. A closure that read
+  // `arming.taskCwd` from the plugin scope hit "Cannot access 'arming' before initialization",
+  // so every restore on a worker with an armed state failed. The stored value is available as a
+  // constructor field and is now passed explicitly.
+  const stored = { armed: true, bindAddress: '192.168.1.100', port: 7331, token: 'kept-token', taskCwd: 'E:\\WorkSpace\\dsh-remote', armedAt: 1 }
+  const { arming, calls } = makeArming({ stored })
+  assert.equal(arming.status().armed, true, arming.status().lastError)
+  assert.deepEqual(calls.start, [{ bind: '192.168.1.100', port: 7331, token: 'kept-token', taskCwd: 'E:\\WorkSpace\\dsh-remote' }])
 })
 
 test('BINDING EVERY INTERFACE IS REFUSED, not defaulted against', () => {
@@ -152,7 +178,7 @@ test('the armed state is persisted, and the token survives a restart', () => {
   const restarted = makeArming({ stored: saved })
   assert.equal(restarted.arming.status().armed, true, 'it comes back armed')
   assert.equal(restarted.arming.status().bindAddress, '192.168.1.100')
-  assert.deepEqual(restarted.calls.start, [{ bind: '192.168.1.100', port: DEFAULT_ARM_PORT, token: 'persisted-token' }])
+  assert.deepEqual(restarted.calls.start, [{ bind: '192.168.1.100', port: DEFAULT_ARM_PORT, token: 'persisted-token', taskCwd: '' }])
 })
 
 test('a restart whose listener cannot rebind does NOT claim to be armed', () => {
@@ -368,4 +394,13 @@ test('maskToken reveals a short tail and nothing else', () => {
   assert.equal(mask.includes('0123456789ab'), false)
   // A very short token must not be revealed in full by the mask.
   assert.equal(maskToken('ab').length > 2, true)
+})
+
+test('status carries the listener status, so configured and effective can be told apart', () => {
+  // The arming state machine owns the DECISION to accept work; the listener owns what it was
+  // started with. The page needs both to say "saved full access, running workspace-write".
+  const listener = { running: true, sessionMode: 'workspace-write', sessionModeFrom: 'spec' }
+  const { arming } = makeArming({ listenerStatus: () => listener })
+  arming.arm({ bindAddress: '192.168.1.100' })
+  assert.deepEqual(arming.status().listener, listener)
 })

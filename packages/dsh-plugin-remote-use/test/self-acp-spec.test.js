@@ -52,6 +52,21 @@ test('a trailing separator on the install directory is normalised away', () => {
   }
 })
 
+test('patch overlays are passed to the child as --patch pairs, after the profile', () => {
+  // The worker-model setting is applied this way: a plugin-owned overlay wins over the profile
+  // without editing it (see core/acp-model-overlay.js). A RELATIVE path is refused because the
+  // child's working directory is the relay's, not this process's.
+  const overlay = 'C:\\Users\\you\\.dsh\\storages\\dsh-plugin-remote-use\\acp-model-overlay.yml'
+  const spec = acpLaunchSpec({ installDir: INSTALL, patchFiles: [overlay] })
+  const at = spec.args.indexOf('--patch')
+  assert.ok(at > spec.args.indexOf('acp'), 'the overlay must come after the profile')
+  assert.equal(spec.args[at + 1], overlay)
+  assert.equal(spec.args.filter((a) => a === '--patch').length, 1)
+
+  assert.throws(() => acpLaunchSpec({ installDir: INSTALL, patchFiles: ['relative.yml'] }), /absolute path/u)
+  assert.throws(() => acpLaunchSpec({ installDir: INSTALL, patchFiles: [42] }), /absolute path/u)
+})
+
 test('a profile name that could escape the profiles directory is refused', () => {
   // The value reaches an argv, but it also names a directory; `..\..\desktop` would run a
   // different profile than intended.

@@ -52,13 +52,29 @@ export function subsystemOf(file) {
  */
 export function shimNamedByProfile(profilePath) {
   if (typeof profilePath !== 'string' || profilePath === '' || !existsSync(profilePath)) {
-    return { ok: false, shim: '', reason: `no profile patch at ${profilePath}` }
+    return { ok: false, shim: '', interpreter: '', reason: `no profile patch at ${profilePath}` }
   }
   let text
   try {
     text = readFileSync(profilePath, 'utf8')
   } catch (error) {
-    return { ok: false, shim: '', reason: `cannot read ${profilePath}: ${error.message}` }
+    return { ok: false, shim: '', interpreter: '', reason: `cannot read ${profilePath}: ${error.message}` }
+  }
+  // A file that carries an empty flow array AND list entries is INVALID YAML for this consumer:
+  // `[]` is a complete document, so anything appended after it starts a second document without a
+  // `---` separator, and the ACP child dies with "end of the stream or a document separator is
+  // expected". Measured 2026-11-05: the probe passed (it reads the file structurally), the machine
+  // armed, and every ACP connection then closed -- the master reported only `S0 worker reachable:
+  // fail`. DSH's shipped profile template IS `[]`, so this happens the first time an entry is
+  // appended to a fresh profile. Detected here because this is the one place that reads the file
+  // on the arming path; leaving it to the ACP child is too late (arming would already be allowed).
+  if (/(?:^|\n)[ \t]*\[\][ \t]*(?:\n|$)/u.test(text) && /(?:^|\n)[ \t]*-[ \t]/u.test(text)) {
+    return {
+      ok: false,
+      shim: '',
+      interpreter: '',
+      reason: 'the profile contains an empty list marker `[]` AND entries, which is invalid YAML (two documents) -- the ACP child refuses to start; remove the `[]` line, or run prepare-sandbox-mediator.mjs, which repairs it',
+    }
   }
   const entry = /-\s*id:\s*sandbox\b[\s\S]{0,600}?runnerCommand:([\s\S]{0,400}?)(?=\n\S|\n-|$)/u.exec(text)
   if (entry === null) {
@@ -67,22 +83,30 @@ export function shimNamedByProfile(profilePath) {
     return {
       ok: false,
       shim: '',
+      interpreter: '',
       reason: `the profile has no sandbox entry with a runnerCommand -- add "- id: sandbox" with a runnerCommand naming a console-subsystem mediator and runnerFailureSignatures (see README, Windows sandbox)`,
     }
   }
   const normalised = entry[1].replace(/\\\\/gu, '\\').replace(/["']/gu, '')
   const match = /([A-Za-z]:\\[^\r\n"']*shim\.mjs)/u.exec(normalised)
   if (match === null) {
-    return { ok: false, shim: '', reason: 'runnerCommand does not name a shim.mjs' }
+    return { ok: false, shim: '', interpreter: '', reason: 'runnerCommand does not name a shim.mjs' }
   }
   if (!/runnerFailureSignatures/u.test(text)) {
     return {
       ok: false,
       shim: '',
+      interpreter: '',
       reason: 'runnerCommand is set without runnerFailureSignatures, which sandbox-local rejects at construction -- add the runner\'s error prefix, e.g. "windows-acl-run: "',
     }
   }
-  return { ok: true, shim: match[1], reason: '' }
+  // The INTERPRETER the profile names, i.e. the first runnerCommand element when it is a node.exe.
+  // The probe runs the shim through it rather than through `process.execPath`: on a GUI-subsystem
+  // host (the DSH desktop app) that executable cannot host the restricted child, so probing it
+  // would answer a question about the HOST while the profile configures a different one -- and the
+  // answer could be "refuse" on a machine DSH would have run correctly (see probeSandbox).
+  const interpreter = /([A-Za-z]:\\[^\r\n"']*node\.exe)/iu.exec(normalised)?.[1] ?? ''
+  return { ok: true, shim: match[1], interpreter, reason: '' }
 }
 
 /**
@@ -138,7 +162,7 @@ function writePayload(path) {
 function runConfined(deps, opts, command) {
   const profile = ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--die-with-parent']
   if (opts.readOnly !== true) profile.push('--tmpfs', '/tmp', '--bind', opts.workspace, opts.workspace)
-  const run = deps.spawn(process.execPath, [deps.shim, ...profile, '--', ...command], {
+  const run = deps.spawn(deps.interpreter, [deps.shim, ...profile, '--', ...command], {
     encoding: 'utf8', timeout: opts.timeoutMs ?? 30_000,
   })
   return { code: run.status, stdout: String(run.stdout ?? ''), stderr: String(run.stderr ?? ''), error: run.error?.message ?? '' }
@@ -174,6 +198,15 @@ export function probeSandbox(deps = {}) {
   const mediator = deps.mediator ?? (named.ok ? dirname(named.shim) : defaultMediator)
   const shim = join(mediator, 'shim.mjs')
   const runner = join(mediator, 'node_modules', '@deepseek-ai', 'dsh-sandbox-windows-acl', 'lib', 'runner.js')
+  // WHICH EXECUTABLE RUNS THE SHIM: the one the profile names.
+  //
+  // This used to be `process.execPath` unconditionally, which answered a question about the HOST
+  // (a GUI-subsystem desktop process, which may have no console) while the profile configured a
+  // console-subsystem node.exe. The two can disagree, and the disagreement always goes the same
+  // way: a machine DSH would have sandboxed correctly is refused. An explicit `deps.mediator`
+  // (tests, diagnostics) keeps the old behaviour, because there is no profile to read.
+  const interpreterFromProfile = deps.mediator === undefined && named.ok === true && named.interpreter !== ''
+  const interpreter = interpreterFromProfile ? named.interpreter : process.execPath
   const workspace = deps.workspace ?? join(tmpdir(), 'dsh-sandbox-probe-ws')
   const tempRoot = join(tmpdir(), 'dsh-sandbox-probe-tmp')
 
@@ -200,13 +233,33 @@ export function probeSandbox(deps = {}) {
   }
   add('the mediator is materialized', true)
 
+  // A named interpreter that is not installed is its own failure, not a reason to fall back:
+  // `dsh-sandbox-local` would spawn it too, so the run would fail on the worker side as well --
+  // just with no output, which is the symptom this whole file exists to make visible.
+  if (!existsSync(interpreter)) {
+    add('the mediator interpreter exists', false,
+      `runnerCommand names ${interpreter}, which is not present on this machine`)
+    return {
+      ok: false,
+      checks,
+      config,
+      reason: 'the mediator interpreter is missing: runnerCommand must name a console-subsystem node.exe',
+    }
+  }
+  add('the mediator interpreter exists', true,
+    interpreterFromProfile
+      ? interpreter
+      : deps.mediator === undefined
+        ? 'process.execPath (the profile names no interpreter)'
+        : "process.execPath (an explicit mediator was given, so the profile's interpreter is not used)")
+
   rmSync(workspace, { recursive: true, force: true })
   rmSync(tempRoot, { recursive: true, force: true })
   mkdirSync(workspace, { recursive: true })
   mkdirSync(tempRoot, { recursive: true })
 
   const payload = [shellPath(), '-NoProfile', '-NonInteractive', '-Command']
-  const confined = (opts, command) => runConfined({ shim, spawn }, { workspace, ...opts }, command)
+  const confined = (opts, command) => runConfined({ shim, spawn, interpreter }, { workspace, ...opts }, command)
 
   try {
     const alive = confined({}, [...payload, 'Write-Output sandbox-probe-alive'])

@@ -78,7 +78,11 @@ $files = @(
   @{ name = 'pairing.mjs'; why = 'IMPORTED BY relay.mjs (new)' },
   @{ name = 'net-address.mjs'; why = 'IMPORTED BY relay.mjs (new)' },
   @{ name = 'file-transfer.mjs'; why = 'IMPORTED BY relay.mjs: the /file endpoints and dsh-remote/stat+list' },
-  @{ name = 'selfcheck.ps1'; why = 'S14/S15/S18 path fixes' },
+  @{ name = 'workspace-integrity.mjs'; why = 'IMPORTED BY relay.mjs: clears a stale Low label under danger-full-access' },
+  @{ name = 'selfcheck.ps1'; why = 'S14/S15/S18 path fixes, plus S20 workspace integrity' },
+  @{ name = 'integrity-probe.ps1'; why = 'IMPORTED BY selfcheck.ps1: the workspace/%TEMP% integrity probe' },
+  @{ name = 'repair-workspace-integrity.ps1'; why = 'manual repair for a hand-managed relay' },
+  @{ name = 'stage-app.ps1'; why = 'stage a GUI app outside the workspace' },
   @{ name = 'screenshot.ps1'; why = 'capture' },
   @{ name = 'make-launch-spec.mjs'; why = 'optional: generates the ACP launch spec' },
   @{ name = 'permission-pairing.mjs'; why = 'IMPORTED BY make-launch-spec.mjs (the F34 mode/profile gate)' },
@@ -258,7 +262,7 @@ $nodeHere = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $remoteMode -and -not $nodeHere) {
   & $check 'node is on PATH (needed to verify and to run the relay)' $false
 } else {
-  foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'file-transfer.mjs', 'make-launch-spec.mjs') {
+  foreach ($name in 'relay.mjs', 'prune-shots.mjs', 'pairing.mjs', 'net-address.mjs', 'file-transfer.mjs', 'workspace-integrity.mjs', 'permission-pairing.mjs', 'make-launch-spec.mjs') {
     if ((& $exists $name) -ne 'yes') { continue }
     if ($remoteMode) {
       $r = Invoke-Remote "node --check $Destination/$name"
@@ -310,11 +314,11 @@ $localForScripts = $Destination
 if ($remoteMode) {
   $localForScripts = Join-Path ([System.IO.Path]::GetTempPath()) "deploy-slave-check-$PID"
   New-Item -ItemType Directory -Force -Path $localForScripts | Out-Null
-  foreach ($name in 'selfcheck.ps1', 'screenshot.ps1') {
+  foreach ($name in 'selfcheck.ps1', 'integrity-probe.ps1', 'repair-workspace-integrity.ps1', 'stage-app.ps1', 'screenshot.ps1') {
     & scp -q -o BatchMode=yes -o ConnectTimeout=20 "${Remote}:$remotePath/$name" $localForScripts 2>&1 | Out-Null
   }
 }
-foreach ($name in 'selfcheck.ps1', 'screenshot.ps1') {
+foreach ($name in 'selfcheck.ps1', 'integrity-probe.ps1', 'repair-workspace-integrity.ps1', 'stage-app.ps1', 'screenshot.ps1') {
   $target = Join-Path $localForScripts $name
   if (-not (Test-Path -LiteralPath $target)) { continue }
   $text = Get-Content -LiteralPath $target -Raw

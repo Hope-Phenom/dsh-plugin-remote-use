@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { PRESETS, SANDBOX_MODES, approvalPolicyFor, checkPairing, effectiveSessionMode, pinnedApprovalPolicy } from '../slave/permission-pairing.mjs'
+import { PRESETS, SANDBOX_MODES, approvalPolicyFor, checkPairing, effectiveSessionMode, pinnedApprovalPolicy, sessionModeCheck, sessionModeConsistency } from '../slave/permission-pairing.mjs'
 
 const SLAVE = join(dirname(fileURLToPath(import.meta.url)), '..', 'slave')
 const SCRIPT = join(SLAVE, 'make-launch-spec.mjs')
@@ -134,12 +134,16 @@ test('an unreadable profile WARNS and does not block', () => {
 // the real script
 // ---------------------------------------------------------------------------
 
-function runScript(args, { profile }) {
+function runScript(args, { profile, settings } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ru-launch-spec-'))
   try {
     const home = join(dir, 'home')
     mkdirSync(join(home, 'profiles', 'acp'), { recursive: true })
     if (profile !== undefined) writeFileSync(join(home, 'profiles', 'acp', 'cordis.patch.yml'), profile, 'utf8')
+    if (settings !== undefined) {
+      mkdirSync(join(home, 'storages', 'dsh-plugin-remote-use'), { recursive: true })
+      writeFileSync(join(home, 'storages', 'dsh-plugin-remote-use', 'settings.json'), JSON.stringify(settings), 'utf8')
+    }
     const out = join(dir, 'agent-spec.json')
     // `spawnSync`, not `execFileSync`: the latter hands back stdout only and THROWS on a non-zero
     // exit, so a successful run's stderr is silently unavailable -- which made the warning case
@@ -198,6 +202,32 @@ test('a typo in --permission-mode is refused before it can reach dsh-base', () =
   assert.equal(run.spec, undefined)
 })
 
+test('with no --permission-mode the script follows the machine\'s saved workerSessionMode', () => {
+  // A hand-managed relay and the settings page write the same value. If the manual generator kept
+  // defaulting to "unset", changing the setting would leave the spec at workspace-write forever --
+  // and the relay's mismatch check would be the only thing saying so.
+  const run = runScript([], { profile: DERIVED, settings: { workerSessionMode: 'danger-full-access' } })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.spec.env.DSH_PERMISSION_MODE, 'danger-full-access')
+  assert.match(run.spec._permissionModeSource, /settings/u)
+  assert.match(run.stdout, /mode: danger-full-access \(from settings/u, 'the source must be visible in the output')
+
+  // An explicit flag is still reproducible and wins over the stored setting.
+  const explicit = runScript(['--permission-mode', 'read-only'], { profile: DERIVED, settings: { workerSessionMode: 'danger-full-access' } })
+  assert.equal(explicit.status, 0, explicit.stderr)
+  assert.equal(explicit.spec.env.DSH_PERMISSION_MODE, 'read-only')
+  assert.equal(explicit.spec._permissionModeSource, '--permission-mode')
+})
+
+test('the saved setting is gated exactly like a flag, including an unknown mode', () => {
+  // Reading the setting must not create a path around the F34 gate. `dsh-base` rejects an unknown
+  // mode at load, so the spec must not be written at all.
+  const run = runScript([], { profile: DERIVED, settings: { workerSessionMode: 'yolo' } })
+  assert.equal(run.status, 3)
+  assert.match(run.stderr, /not a sandbox mode DSH understands/u)
+  assert.equal(run.spec, undefined)
+})
+
 test('a missing profile warns on stderr but still writes the spec', () => {
   const run = runScript(['--permission-mode', 'danger-full-access'], { profile: undefined })
   assert.equal(run.status, 0)
@@ -224,4 +254,78 @@ test('the mode a child will actually get is read from the SPEC first, then the r
   assert.deepEqual(
     effectiveSessionMode({ specEnv: { DSH_PERMISSION_MODE: '' }, env: { DSH_PERMISSION_MODE: 'read-only' } }),
     { mode: 'read-only', from: 'relay-env' })
+})
+
+// ---------------------------------------------------------------------------
+// configured vs effective: the F38/F41 mismatch
+//
+// A hand-managed relay reads its spec once at startup. The settings page writes a DIFFERENT file.
+// Both can be true at once -- "configured full access" and "running workspace-write" -- for hours.
+// The relay is the only process that can compare them, so the comparison is tested here.
+// ---------------------------------------------------------------------------
+
+test('configured and effective modes are compared, and "not set" is resolved to DSH\'s default', () => {
+  const full = JSON.stringify({ workerSessionMode: 'danger-full-access' })
+  const confined = JSON.stringify({ workerSessionMode: 'workspace-write' })
+
+  // The failure this exists for: the spec says workspace-write while the setting says full access.
+  const stale = sessionModeConsistency({
+    specEnv: { DSH_PERMISSION_MODE: 'workspace-write' },
+    settingsText: full,
+  })
+  assert.equal(stale.mismatch, true)
+  assert.equal(stale.configured, 'danger-full-access')
+  assert.equal(stale.effectiveMode, 'workspace-write')
+
+  // Agreement is not a warning.
+  assert.equal(sessionModeConsistency({
+    specEnv: { DSH_PERMISSION_MODE: 'danger-full-access' },
+    settingsText: full,
+  }).mismatch, false)
+
+  // A spec with NO variable means dsh-base's default, so a workspace-write setting agrees with it.
+  // Reporting a mismatch here would send the operator to rebuild a spec that is already correct.
+  const omitted = sessionModeConsistency({ specEnv: {}, env: {}, settingsText: confined })
+  assert.equal(omitted.effective.mode, '')
+  assert.equal(omitted.effectiveMode, 'workspace-write')
+  assert.equal(omitted.mismatch, false)
+
+  // No settings file means the operator has no opinion, so there is nothing to disagree with.
+  const unconfigured = sessionModeConsistency({ specEnv: { DSH_PERMISSION_MODE: 'read-only' }, settingsText: '' })
+  assert.equal(unconfigured.configured, '')
+  assert.equal(unconfigured.mismatch, false)
+
+  // A typo still differs, and is reported as a mismatch rather than silently ignored.
+  assert.equal(sessionModeConsistency({
+    specEnv: { DSH_PERMISSION_MODE: 'danger-full-access' },
+    settingsText: JSON.stringify({ workerSessionMode: 'yolo' }),
+  }).mismatch, true)
+})
+
+test('a corrupt settings file is reported as its own error, not as "not configured"', () => {
+  const state = sessionModeConsistency({ specEnv: { DSH_PERMISSION_MODE: 'workspace-write' }, settingsText: '{ broken' })
+  assert.equal(state.configured, '')
+  assert.match(state.settingsError, /unreadable/)
+  // It cannot produce a mismatch because it produced no value; the caller must show the error.
+  assert.equal(state.mismatch, false)
+})
+
+test('the S19 row appears only when a mode is configured, and warns only on a mismatch', () => {
+  const full = JSON.stringify({ workerSessionMode: 'danger-full-access' })
+  const matching = sessionModeConsistency({ specEnv: { DSH_PERMISSION_MODE: 'danger-full-access' }, settingsText: full })
+  const matchingRow = sessionModeCheck(matching, { specPath: 'C:\\dsh\\agent-spec.json' })
+  assert.equal(matchingRow.id, 'S19')
+  assert.equal(matchingRow.status, 'pass')
+  assert.match(matchingRow.actual, /danger-full-access/)
+  assert.match(matchingRow.actual, /agent-spec\.json/)
+
+  const stale = sessionModeConsistency({ specEnv: { DSH_PERMISSION_MODE: 'workspace-write' }, settingsText: full })
+  const staleRow = sessionModeCheck(stale)
+  assert.equal(staleRow.status, 'warn')
+  assert.equal(staleRow.severity, 'warning', 'the worker still runs; the level is wrong')
+  assert.match(staleRow.fix, /make-launch-spec/u)
+  assert.match(staleRow.fix, /restart the relay/u)
+
+  // No setting: no row. An unconfigured relay must not gain a warning that says nothing.
+  assert.equal(sessionModeCheck(sessionModeConsistency({ specEnv: {}, settingsText: '' })), null)
 })

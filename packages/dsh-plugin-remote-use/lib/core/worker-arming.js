@@ -75,11 +75,12 @@ export class WorkerArming {
    * @param {object} deps
    * @param {() => Record<string, any>} deps.interfaces  `os.networkInterfaces()` in production
    * @param {(state: object) => void} [deps.persist]     write the armed state so it survives a restart
-   * @param {(bindAddress: string, port: number, token: string) => void} [deps.start]
+   * @param {(bindAddress: string, port: number, token: string, taskCwd: string) => void} [deps.start]
    * @param {() => void} [deps.stop]
    * @param {() => { ok: boolean, reason: string, checks?: object[] }} [deps.probe] sandbox gate
    * @param {() => number} [deps.now]
    * @param {() => string} [deps.mint]
+   * @param {() => object | null} [deps.listenerStatus] the supervised listener's own status, if any
    * @param {{ info?: Function, warn?: Function }} [deps.log]
    * @param {object} [deps.stored]  the persisted state, if any
    */
@@ -89,6 +90,7 @@ export class WorkerArming {
     this.start = deps.start ?? (() => {})
     this.stop = deps.stop ?? (() => {})
     this.probe = deps.probe ?? (() => probeSandbox())
+    this.listenerStatus = deps.listenerStatus ?? (() => null)
     this.now = deps.now ?? (() => Date.now())
     this.mint = deps.mint ?? generateToken
     const log = deps.log ?? {}
@@ -137,7 +139,7 @@ export class WorkerArming {
         this.armed = true
         this.armedAt = Number.isFinite(stored.armedAt) ? Number(stored.armedAt) : this.now()
         try {
-          this.start(this.bindAddress, this.port, this.token)
+          this.start(this.bindAddress, this.port, this.token, this.taskCwd)
           this.log.info(`worker role restored: listening on ${this.bindAddress}:${this.port}`)
         } catch (error) {
           // A failed rebind must NOT leave the object claiming to be armed: the operator would
@@ -166,6 +168,10 @@ export class WorkerArming {
       // rather than silently omit.
       interfaces: candidateAddresses(this.interfaces()),
       probe: { ok: this.lastProbe.ok, reason: this.lastProbe.reason },
+      // The listener's own view, including the session mode its launch spec carries. The arming
+      // object owns the decision to accept remote work; it does not own what the relay was started
+      // with, and merging the two here is what lets the page show BOTH instead of assuming they agree.
+      listener: this.listenerStatus(),
     }
   }
 
@@ -233,7 +239,7 @@ export class WorkerArming {
     const token = this.mint()
 
     try {
-      this.start(bindAddress, port, token)
+      this.start(bindAddress, port, token, taskCwd)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.lastError = `could not start the listener: ${message}`

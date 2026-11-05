@@ -110,6 +110,11 @@
   - [F39. 两半各自"测试充分"，而它们之间**那条缝**谁的测试都不覆盖](#f39-两半各自测试充分而它们之间那条缝谁的测试都不覆盖)
   - [F40. 相对路径写进了**应用自己的 profile 目录**，而工具报告成功](#f40-相对路径写进了应用自己的-profile-目录而工具报告成功)
   - [F41. "我做过这个动作"不是结果 —— 四次"就绪"背后是四个不同的未就绪](#f41-我做过这个动作不是结果--四次就绪背后是四个不同的未就绪)
+  - [F42. 档位设成全权、规格还是 workspace-write；而 workspace 里的 EXE **仍然以 Low 启动**](#f42-档位设成全权规格还是-workspace-write而-workspace-里的-exe-仍然以-low-启动)
+  - [F43. 布防恢复时读了一个**尚未初始化**的变量 —— 已布防的 worker 每次都恢复失败](#f43-布防恢复时读了一个尚未初始化的变量--已布防的-worker-每次都恢复失败)
+  - [F44. 布防门禁依赖两个**手工部署物**，它们会悄悄消失，而页面什么都不说](#f44-布防门禁依赖两个手工部署物它们会悄悄消失而页面什么都不说)
+  - [F45. 往 `[]` 后面追加条目 = 两个 YAML 文档 —— 门禁过了，ACP 子进程起不来](#f45-往--后面追加条目--两个-yaml-文档--门禁过了acp-子进程起不来)
+  - [F46. 新机器只有 PowerShell 5.1：中继的"兜底"又返回了 `pwsh`，S0 报成 `Unexpected end of JSON input`](#f46-新机器只有-powershell-51中继的兜底又返回了-pwshs0-报成-unexpected-end-of-json-input)
 - [G. 需求本身的坑](#g-需求本身的坑)
   - [G1. "主屏必须是虚拟屏" —— 一条忠实实现后让机器无法登录的要求](#g1-主屏必须是虚拟屏--一条忠实实现后让机器无法登录的要求)
 - [这些教训的共同形状](#这些教训的共同形状)
@@ -2429,6 +2434,24 @@ pnpm install --config.minimumReleaseAge=0
 本仓库的做法是**加这行、但带注释标明可以删**（`.research/relax-release-age.ps1`），
 等需要的版本超过 24 小时之后再删掉以恢复默认。
 
+> **实测补充（2026-11-05，0.2.22 发布后 20 分钟）**：**安装**走的是解析路径，**版本级**白名单就够，
+> 不需要把门禁整个关掉：
+>
+> ```yaml
+> minimumReleaseAgeExclude:
+>   - '@hope_phenom/dsh-plugin-remote-use@0.2.22'
+> ```
+>
+> 之后 `pnpm add @hope_phenom/dsh-plugin-remote-use@0.2.22` 输出
+> `Lockfile passes supply-chain policies (8 entries)` 并装上了 0.2.22。
+> F6b 那条"白名单拦不住"的现象发生在**卸载**路径上（`Already up to date` 之后仍被拒）。
+>
+> 代价：**每发一个新版本要加一条对应版本的条目**。想省这件事，就在发布窗口期用 `minimumReleaseAge: 0`，
+> 过了 24 小时再删。
+>
+> 工具：`tools/release-age-exclude.ps1`（增/删都幂等；`-Install` 会**校验装上的版本**；
+> `-Remote <host>` 走 ssh 在目标机上执行）。
+
 > **它拦的是"发布后 24 小时内"的一切操作** —— 包括**装、卸、改**。
 > 反直觉的地方在于：报错说"这个条目太新"，而你的意图恰恰是**把它拿掉**。
 
@@ -4050,6 +4073,287 @@ SSH 独立核对：文件在 `C:\Users\<从机账户>\.dsh\profiles\desktop\`（
    这一条是"问 registry 不要问你的发布会话"。
 
 ---
+
+## F42. 档位设成全权、规格还是 workspace-write；而 workspace 里的 EXE **仍然以 Low 启动**
+
+**现象（2026-10-19，参考从机）**
+
+从机 settings 写着 `workerSessionMode = danger-full-access`，但手管的 `agent-spec.json`（计划任务
+`DshRelay` 读的那份）里仍是 `DSH_PERMISSION_MODE = workspace-write`。于是：
+
+- 设置页/配置显示全权，实际 ACP 会话是 workspace-write；
+- 手动重建 spec 并重启中继后，agent shell 变成 **High**（`S-1-16-12288`）；
+- 但把签名过的 `whoami.exe` 复制到 workspace 再启动，子进程仍是 **Low**（`S-1-16-4096`）；
+  复制到 `%TEMP%` 或 `%LOCALAPPDATA%\Programs\...` 则是 Medium。
+- GUI 程序（VidHex）写 `%LOCALAPPDATA%\...\Config.json` 抛 `UnauthorizedAccessException`，
+  而同一个 High shell 写同一路径成功。签名/ACL/应用都被排除，问题在**路径标签**。
+
+**这是两个独立的缺陷，只是同时出现：**
+
+1. **配置有两个来源，却没有任何地方比较它们。** 插件设置页写一份，手管中继读另一份；中继只在启动时
+   读一次 spec。`make-launch-spec.mjs` 不带 `--permission-mode` 时又写"未设置"，所以手工重建也不会
+   跟随设置。两边都能"看起来正常"几个小时（与 F38 同形，但这次是**两份都还在使用**）。
+2. **`workspace-write` 留下的 Low 强制标签不会自己消失。** DSH 的 Windows 沙箱不只把子令牌降到 Low，
+   还给工作目录写一条**可继承的 Low 标签**。切到 `danger-full-access` 后标签仍在；复制进树的 EXE 继承
+   它，而 Windows 会把带 Low 标签的镜像**以 Low 完整性启动**——即使父令牌是 High。于是"路径"看起来
+   决定了完整性，实际是**残留标签**决定了它。
+
+**实测（同一台机器、同一个 High shell）**
+
+| 启动对象 | 完整性 |
+|---|---|
+| 当前 pwsh / `System32\whoami.exe` | High |
+| `System32\timeout.exe` 原位置 | High |
+| 复制到 workspace 的 `whoami.exe` / `timeout.exe` | **Low** |
+| 复制到 `%TEMP%` 的 `whoami.exe` | Medium |
+| 把 workspace 目录 `icacls /setintegritylevel (OI)(CI)Medium /T` 后再复制 | Medium |
+
+**修法**
+
+- 中继**每次** `selfcheck` 读本机 settings，与自己的 spec 比较；不一致时回传
+  `configuredSessionMode` / `sessionModeMismatch` 并追加 `S19` 警告；启动时也打一行警告。
+- `make-launch-spec.mjs` 无 flag 时读取 settings 的 `workerSessionMode`，并把来源写进
+  `_permissionModeSource`；显式 flag 仍优先。
+- 插件页面同时显示 **configured** 与运行中 listener 的 **effective**；不一致时提示重新布防。
+- `danger-full-access` 下，中继对**显式 `--task-dir`** 执行 `icacls ... /setintegritylevel
+  (OI)(CI)Medium /T`；`workspace-write` 下绝不执行（标签就是约束）。保护栏拒绝盘符根、
+  `%SystemRoot%`、`%ProgramFiles%`、`%ProgramData%`、profile 根；继承 cwd 需 `--repair-integrity`。
+- 手工入口：`slave/repair-workspace-integrity.ps1 -Path <workspace>`；
+  不想修 workspace 就用 `slave/stage-app.ps1 -Source <app-dir>` 把 GUI 暂存到
+  `%LOCALAPPDATA%\dsh-remote-use\staging`。
+- `selfcheck.ps1` 增加 `S20`：把 `whoami.exe` 复制到 workspace 与 `%TEMP%` 各启动一次，读
+  `whoami /groups` 的 `S-1-16-*` 行，报告 `integrity`（self/workspace/temp）。`S20` 是 warning：
+  机器仍可达，但 GUI 工作会失败。
+
+**教训**
+
+1. **"设置生效了吗"要问运行中的进程，不能问配置页。** 这一次配置页和 spec 各自都"成功"，而它们
+   说的是两件事。可观测性不是把配置值再显示一遍，而是显示**实际值**与**两者之差**。
+2. **一个修复的副作用可能活过它的会话。** Low 标签是 workspace-write 的正确行为，但它没有在退出时
+   被撤销；切到全权后它从"约束"变成了"残留"，而残留仍然在改变进程行为。**关闭一个机制时，要问它
+   留下了什么。**
+3. **"路径导致完整性降级"读起来像 Windows 的约定，实际是文件标签。** 诊断必须把
+   "同一份签名二进制放到两个目录各跑一次"作为对照，而不是从路径推断；这与 F34/F38 的
+   "能跑就不要推"是同一条纪律。
+4. **可观测性要放在已经会被看的那份报告里。** `S19`/`S20` 进入 `remote_selfcheck`，而不是新增一个
+   没人会打开的诊断页；否则修复只对知道要看哪里的人有效。
+
+---
+## F43. 布防恢复时读了一个**尚未初始化**的变量 —— 已布防的 worker 每次都恢复失败
+
+**现象（2026-10-20，0.2.20 真机验证）**：插件包已经是 0.2.20，但从机的“本机角色”接口返回：
+
+```
+workerRole.armed = false
+workerRole.lastError = "could not restore the listener: Cannot access 'arming' before initialization"
+workerRole.listener.running = false
+```
+
+而 `settings.json` 里 `workerRole.armed = true`，端口 7331 却被旧的计划任务中继占着。主机侧的
+`remote_selfcheck` 仍然只有 S1–S18，`/healthz` 没有 `sessionMode` / `mismatch` / `integrityRepair`
+字段——看起来像“新版本没生效”，实际是新版本**在恢复布防时抛异常，根本没有启动自己的中继**。
+
+**根因**：`apply()` 里中继的 `taskDir` 是一个闭包：
+
+```js
+const supervisor = new RelaySupervisor({ taskDir: () => arming.taskCwd })
+const arming = new WorkerArming({ stored: cfg.workerRole, ... })
+```
+
+`WorkerArming` 的构造函数在**恢复已布防状态时**会调用 `start()`。`start()` 再由 supervisor 调用
+`taskDir()`，而此刻 `arming` 这个 `const` 还在 temporal dead zone 里——于是抛出
+`Cannot access 'arming' before initialization`，被恢复路径的 `catch` 记成 `lastError`。
+
+**同一个闭包还有第二个错误**：正常 `arm()` 里 `this.start()` 在 `this.taskCwd = taskCwd` **之前**调用，
+所以 supervisor 读到的是**上一次布防**的任务目录（第一次就是空）。配对串广告的是新目录，中继拿到的
+是旧目录——两边都“看起来正常”。
+
+**修法**：任务目录不再由闭包读取，而是由拥有它的状态机**显式传参**：
+
+- `WorkerArming.start(bind, port, token, taskCwd)`；恢复路径传构造函数里已从 stored 读入的
+  `this.taskCwd`，正常 `arm()` 传本次请求的 `taskCwd`。
+- `RelaySupervisor.start(..., taskCwd)` 优先使用这个参数；只有直接调用者不传时才回落到
+  `deps.taskDir()`。
+- `apply()` 里删掉 `taskDir: () => arming.taskCwd`，避免任何人再把这条 TDZ 路径加回来。
+
+**测试**：`worker-arming.test.js` 断言第一次布防传的是本次目录、恢复传的是 stored 目录；
+`relay-supervisor.test.js` 断言显式参数覆盖旧 getter；`relay-session-mode.test.js` 用源码守卫
+禁止 `taskDir: () => arming.taskCwd` 这个形状回来。
+
+**教训**
+
+1. **构造函数里的“恢复”路径会调用尚未构造完成的对象。** 一个在 `const` 初始化期间被调用的闭包，
+   可能读到 temporal dead zone；它不是“偶尔的引用错误”，而是**每次恢复都失败**。恢复代码要走
+   “只依赖已经赋值的字段”的路径，而不是依赖外层作用域里正在构造的绑定。
+2. **“参数在 start 里读”与“参数在 start 前赋值”必须对齐。** 这次 `start()` 读的是 `this.taskCwd`，
+   而 `this.taskCwd` 在 `start()` 之后才赋值；即使没有 TDZ，也会把旧目录传给中继。**顺序本身也是
+   契约**，测试要直接断言第一次调用拿到的是新值。
+3. **“新版本没生效”先问进程，再问版本号。** 包版本是 0.2.20，但真正监听的是 10/14 的旧计划任务
+   拷贝；`/healthz` 缺字段、`selfcheck` 缺 S19/S20，才是“实际跑的是旧代码”的证据。与 F38 同族：
+   **问运行中的进程，不要问安装目录。**
+
+---
+
+## F44. 布防门禁依赖两个**手工部署物**，它们会悄悄消失，而页面什么都不说
+
+**现象**
+
+2026-11-04 在开发机上实测：
+
+```
+node tools\check-sandbox-ready.mjs --profile C:\Users\dev\.dsh\profiles\acp\cordis.patch.yml
+  [FAIL] the mediator is materialized -- shim=false runner=false at C:\dsh-sandbox-mediator
+  VERDICT: NOT READY -- the profile names C:\dsh-sandbox-mediator\shim.mjs but it is not materialized there
+
+C:\dsh-sandbox-mediator        -> False
+C:\dsh-remote\sandbox-mediator -> False
+settings.json workerRole.armed -> false
+```
+
+门禁已经坏了，**页面上却什么都没有**：探针只在点「先检查」、布防、或**恢复已布防状态**时跑，
+而本机处于未布防（默认）状态。于是“DSH 升级两次没问题”是真的 —— **没人再问过它**。
+
+另一台机器上的形状更绕：`profiles\acp\cordis.patch.yml` **根本不存在**，于是报
+
+```
+· the sandbox does not contain this machine: the sandbox mediator is not materialized:
+  no profile patch at C:\Users\<user>\.dsh\profiles\acp\cordis.patch.yml
+```
+
+**根因是一个循环依赖，不是操作者漏了一步**
+
+DSH 的 profile 是**懒创建**的（`dsh-app-boot` 的 `loadProfile → initProfile`，只有真正加载
+`dsh --profile acp` 时才写 `package.json` / `cordis.patch.yml`(模板 `[]`)）。而插件的门禁在**布防之前**
+就要读这份 patch 找 `runnerCommand`；中继却要**布防之后**才拉起 `dsh --profile acp`。新机器上这个环
+永远闭不上。两个文件（profile 行、mediator 目录）又都是**手工部署物**，删目录、迁移、清理都能让它们
+悄悄消失 —— 而消失之后，唯一会说话的是那个**没人点**的按钮。
+
+**为什么这次没有改成“插件自己把环境修好”**（考虑过，否掉了）
+
+- 修法要写 `%DSH_HOME%\profiles\acp\cordis.patch.yml` 和一个机器级 mediator 目录 —— 都在插件自身
+  状态之外。一次页面访问不该改动操作者的环境；写 profile 还会接管“哪份配置算数”这个问题。
+- “这个 mediator 对应哪个 DSH 版本”**答不准**。实测 DSH 升级过两次、mediator 一次没重抽，一切正常，
+  说明 runner 的 CLI 契约是稳的；按版本号**主动**重抽反而可能把好的换成坏的。真正该做主的是探针。
+
+**改法：门禁仍然是门禁，另外补一个只读诊断 + 一条可执行的处方**
+
+1. `lib/core/sandbox-diagnosis.js`：只读判定 mediator 三态（`ready` / `missing` / `unwired` /
+   `unsupported`），**页面加载时就算**（不再等点击），并给出**填好本机真实路径**的处方：
+   DSH home、acp profile、mediator 目标、找到的 `node.exe`、要执行的命令。
+2. `lib/tools/prepare-sandbox-mediator.mjs` 随包发布，执行那条处方：物化 mediator（从本机
+   `app.asar` 抽依赖闭包，`ELECTRON_RUN_AS_NODE` 下跑）→ **仅在 profile 没有 `sandbox` 行时**追加
+   managed 块（备份、无 BOM、幂等）→ 跑**同一个探针**。`--dry-run` 可预演。
+3. `shimNamedByProfile` 现在同时读回 `runnerCommand` 的**解释器**，探针改用 profile 指定的
+   `node.exe` 跑 shim。原来用 `process.execPath`（GUI 子系统的桌面宿主）——那是在**问宿主**，
+   而配置问的是另一个进程；两者不一致时，一台 DSH 本来能约束的机器会被拒绝。
+4. 页面新增一行「沙箱 mediator」+ 处方卡片（只读文本域 + 复制）。**不自动执行**：写操作由人
+   或者被指到这条命令的 agent 发起。
+
+**真机验收**
+
+- 空 home + 空 mediator：生成 managed 块（首字节 `#`，无 BOM），探针 **7/7 PASS**；
+- profile 已指名一个不存在的 mediator：物化到**那个目录**，profile 哈希不变（操作者的配置是权威）；
+- 再跑一次：`already materialized` / `already names this shim`，一个文件都不写；
+- `--dry-run`：报告“would materialize / would append”，目录与 profile 都不出现。
+
+**教训**
+
+1. **门禁的依赖物必须和门禁一起被检查。** 探针再强，也只在被调用时强；只读诊断放到页面加载，
+   才能让“已经坏了但没人点按钮”变成可见状态。
+2. **“必须手工准备”不是错误，假设它会一直在才是。** 手工物天生会漂移（删除、迁移、清理），
+   所以要么有诊断，要么有自愈 —— 而自愈要能回答版本问题，否则就是在猜。
+3. **循环依赖看起来总像“用户没做某一步”。** 先把顺序画出来（门禁读的文件 ← 谁在什么时候创建），
+   再决定是补文档还是改依赖关系。
+4. **探针要跑配置说的那个东西，不是当前进程。** 被测对象与执行对象不一致时，结论再确定也是
+   关于另一个对象的（与 F10 同族：那次是把默认路径当成了配置）。
+
+---
+
+## F45. 往 `[]` 后面追加条目 = 两个 YAML 文档 —— 门禁过了，ACP 子进程起不来
+
+**现象**（2026-11-05，从机 192.168.3.35）
+
+从机布防成功、`/healthz` 正常、7331 在监听，主机 `remote_selfcheck` 却只有一行：
+
+```
+S0  worker reachable   fail   ACP connection closed
+```
+
+在从机上按 relay 的方式手工 spawn ACP 子进程，真相在 stderr 里：
+
+```
+Error: dsh: failed to parse overlay C:\Users\dev\.dsh\profiles\acp\cordis.patch.yml:
+YAMLException: end of the stream or a document separator is expected (12:1)
+  12 | - id: sandbox
+```
+
+而那个文件的内容是：DSH 模板的 `[]`，后面接着我们追加的 `sandbox` 条目。
+
+**根因**
+
+1. DSH 初始化 profile 时的补丁模板就是 `[]` —— **空列表是一个完整的 YAML 文档**；
+2. 在它后面追加 `- id: sandbox`，得到的是**第二个文档**，没有 `---` 分隔符。YAML 解析器拒绝，
+   `dsh --profile acp` 直接退出，relay 只能关连接，主机看到的正是 `ACP connection closed`；
+3. **布防门禁不会发现它**：探针做的是结构化扫描（`runnerCommand` 读得到），确认"沙箱能约束本机"，
+   机器就布防了。两个判断都正确，只是**回答的不是同一个问题**——一个说"机制可用"，一个说"配置可解析"。
+
+**修法（0.2.23）**
+
+1. `prepare-sandbox-mediator.mjs`：`appendEntry` 先剥掉独立的 `[]` 行；对已经坏掉的文件在**诊断之前**
+   自动修复（备份 → 去 `[]` → 继续），并在输出里说明；
+2. 写完 profile 后跑 **`--dump-config`**（ACP 子进程用的同一个 loader）验证它能解析；不通过就退出 1，
+   不布防；
+3. `sandbox-probe.js` 的 `shimNamedByProfile` 对"`[]` + 条目"这个形状**直接拒绝**并写明原因，
+   门禁不再放行。
+
+**教训**
+
+1. **"机制可用" ≠ "配置可解析"。** 门禁证明了机制，没有证明配置；而这两种失败在主机侧长得一模一样
+   （都是 `ACP connection closed`），一条 S0 看不出来。
+2. **模板里的占位符是语义，不是空行。** `[]` 意思是"空列表"，不是一段可以随便追加的注释头。
+   写文件的工具必须要么替换它、要么在它前面插入。
+3. **验证要用真消费者。** 这次最后一句话最贵：探针的结论是对的，只是它回答的不是"这个文件能不能被
+   解析"。`--dump-config` 一秒就能回答后者，应该早点用上。
+
+---
+
+## F46. 新机器只有 PowerShell 5.1：中继的"兜底"又返回了 `pwsh`，S0 报成 `Unexpected end of JSON input`
+
+**现象**（2026-11-05，全新从机，Windows 只自带 Windows PowerShell 5.1）
+
+```
+S0  self-check produced a report   fail   Unexpected end of JSON input
+```
+
+但手工用 `powershell.exe` 跑同一个 `selfcheck.ps1` **完全正常**，写出 7.5 KB 的 `selfcheck.json`。
+
+**根因**
+
+`relay.mjs` 的 `PS_EXE` 依次找 `Program Files\PowerShell\7\pwsh.exe` 与 Store 别名；**两个都不在时，它又返回了
+`'pwsh'`**（注释写的是"退回 powershell.exe"，代码没有）。于是：
+
+```
+spawn('pwsh') → ENOENT → 脚本根本没跑 → 没有 selfcheck.json
+→ readTextFile() 返回 '' → JSON.parse('') → S0 报 JSON 解析失败
+```
+
+这条链把"没有解释器"报告成了"报告格式不对"——**一个关于生产者没跑的错误，被描述成产物坏了**。
+
+**修法（0.2.24）**
+
+1. 兜底改成 `powershell.exe`（Windows 必有 5.1）；
+2. Store 的执行别名是 0 字节 reparse point，不算"已安装"（否则 spawn 起来只会打开商店）；
+3. **spawn 失败单独报 S0**：`self-check script ran` + 实际尝试的解释器 + 错误文本；
+4. 非 JSON 报告附带脚本退出码与 **stderr 尾部**（之前这些都被丢掉，只剩一句 JSON 错误）。
+
+**教训**
+
+1. **"兜底"必须真的换一个东西。** 返回刚刚没找到的那个名字不是兜底，是把失败推迟成另一种更误导的失败。
+2. **看到"产物坏了"，先问生产者跑起来了吗。** 这里的 `JSON.parse('')` 只是最后一步；沿着解析器往下查会把
+   注意力从"没有 pwsh"引开。
+3. **测试机 = 干净的 Windows。** 开发机装了 PowerShell 7，所以这条路径一直没被走到。
+
+---
 ## G1. "主屏必须是虚拟屏" —— 一条**忠实实现后让机器无法登录**的要求
 
 **现象**
@@ -4115,7 +4419,7 @@ verdict=blocked  blockingFailures=1
 
 # 这些教训的共同形状
 
-把 **78** 条放在一起看，反复出现的其实只有**三条**元教训 —— 而第三条是条目长到 78 条时才显形的
+把 **81** 条放在一起看，反复出现的其实只有**三条**元教训 —— 而第三条是条目长到 78 条时才显形的
 （写这一节时文档里只有 30 条，那时只看得出两条）。
 
 ## 一、用一个近似去代替那个真正会给出答案的东西 —— 而近似总是给出你想要的答案

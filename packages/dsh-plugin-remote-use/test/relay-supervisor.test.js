@@ -193,6 +193,22 @@ test('the ARMED task directory is passed to the relay, and omitted when there is
   }
 })
 
+test('an explicit taskCwd argument wins over the fallback getter', () => {
+  // `WorkerArming` passes the directory explicitly, because a restore calls start() while the
+  // plugin-scope `arming` binding is still in its temporal dead zone. The fallback getter remains
+  // for direct callers and tests; the explicit value must not be ignored.
+  const { supervisor, calls, dir } = makeSupervisor({ taskDir: () => 'E:\\stale\\from-getter' })
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok', 'E:\\WorkSpace\\fresh')
+    const args = calls[0].args
+    assert.equal(args[args.indexOf('--task-dir') + 1], 'E:\\WorkSpace\\fresh')
+    assert.equal(args.includes('E:\\stale\\from-getter'), false)
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the ACP agent is handed over as a spec FILE, not a command line', () => {
   // The install path contains a space, and passing it as a string has already produced
   // `Cannot find module '...\Programs\DeepSeek'`.
@@ -347,6 +363,46 @@ test('status reports the bind and how long it has been up', () => {
     assert.equal(status.pid, 4242)
     assert.equal(status.uptimeMs, 0, 'the injected clock does not advance')
     void calls
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('status reports the session mode the RUNNING spec carries, and forgets it when stopped', () => {
+  // The settings page shows the mode the NEXT arming will use. This is the other half: what the
+  // listener that is running now was actually started with. Without it the page can only assert
+  // the configured value and call it live (PITFALLS F38).
+  const { supervisor, dir } = makeSupervisor()
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    const status = supervisor.status()
+    assert.equal(status.sessionMode, 'danger-full-access')
+    assert.equal(status.sessionModeFrom, 'spec')
+    assert.equal(typeof status.specFile, 'string')
+    assert.ok(status.specFile.length > 0)
+
+    supervisor.stop()
+    const stopped = supervisor.status()
+    assert.equal(stopped.running, false)
+    assert.equal(stopped.sessionMode, '', 'a stopped listener has no effective mode to compare')
+    assert.equal(stopped.sessionModeFrom, 'nothing')
+  } finally {
+    supervisor.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a spec that omits the mode is reported as unset, not as DSH\'s default', () => {
+  // `nothing` is a different fact from `workspace-write`: the first means the spec is silent and
+  // dsh-base will choose, the second means someone chose. The page resolves the default when it
+  // compares; the supervisor must not erase that distinction.
+  const spec = { ...GOOD_SPEC, spec: { ...GOOD_SPEC.spec, env: { ELECTRON_RUN_AS_NODE: '1' } } }
+  const { supervisor, dir } = makeSupervisor({ launchSpec: () => spec })
+  try {
+    supervisor.start('192.168.1.100', 7331, 'tok')
+    assert.equal(supervisor.status().sessionMode, '')
+    assert.equal(supervisor.status().sessionModeFrom, 'nothing')
   } finally {
     supervisor.stop()
     rmSync(dir, { recursive: true, force: true })

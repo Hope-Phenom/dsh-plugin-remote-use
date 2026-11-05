@@ -78,6 +78,13 @@ window.__ModuleLoader__.load({
       // 三个值都不翻译成中文：它们是 DSH 的闭集取值，翻成中文就对不上 profile 与日志里写的了。
       sessionModeUnset: '未设置（DSH 默认 workspace-write）',
       sessionModeNeedsFull: 'GUI 自动化需要 danger-full-access',
+      sessionModeMismatch: '实际 {eff}，配置 {cfg} —— 启动规格与设置不一致；重建规格并重启中继后才会一致',
+      labelIntegrity: '进程完整性',
+      integrityDegraded: '工作目录里的程序以 {ws} 启动，低于 %TEMP% 的 {tmp}；GUI 写 %LOCALAPPDATA% 会失败（见 S20）',
+      fieldWorkerSessionModeEffective: '运行中的中继实际档位：{mode}',
+      workerSessionReArmRequired: '已保存的档位是 {cfg}，但运行中的中继仍以 {eff} 启动。需要重新布防（先停止再布防）才会生效 —— 保存设置不会改写已经启动的中继所用的启动规格。',
+      workerSessionNotRunning: '本插件当前没有运行中的中继；下次布防会按已保存的档位生成启动规格。手管中继请重新生成 spec 并重启。',
+      labelListenerMode: '中继实际档位',
       btnSelfcheck: '重新自检',
       btnScreenshot: '截图',
       btnPing: '连接测试',
@@ -118,6 +125,8 @@ window.__ModuleLoader__.load({
       fieldKeepShotsHint: '保留最新的若干张。全分辨率截图约 9.5 MB，这一项决定了长时间 GUI 验证会占用多少磁盘。填负数表示全部保留。',
       fieldWorkerSessionMode: '本机远程会话的沙箱档位',
       fieldWorkerSessionModeHint: '布防时写进启动规格：之后由本机接的远程会话都从这一档开始。GUI 自动化需要 danger-full-access —— GUI 在受限令牌下的失败是静默的（命令返回成功、只留一个桌面对话框），所以它不能被逐次审批掉。',
+      fieldWorkerModel: '本机远程会话的模型',
+      fieldWorkerModelHint: '填 provider/model（例如 deepseek-official/deepseek-flash），布防时写进 ACP 启动配置。留空 = 用从机 profile 里配的模型。这个值同时决定"能不能收图"：模型不声明 image 输入时，主机会被拒绝发图，从机的 read_image 也会失败 —— 填错是静默降级，布防时留意警告。改了需要重新布防。',
       fieldAuditMaxBytes: '审计文件轮转阈值（字节）',
       fieldAuditMaxBytesHint: '审计是追加式文件，本身没有停止点。达到该大小就改名归档并另起一个，绝不截断正在写的文件。填 0 或负数表示不轮转（无限增长）。',
       fieldAuditKeepFiles: '保留的审计归档数',
@@ -176,6 +185,20 @@ window.__ModuleLoader__.load({
       roleSandbox: '约束状态',
       roleSandboxOk: '沙箱已验证',
       roleSandboxUnknown: '尚未验证',
+      roleMediator: '沙箱 mediator',
+      roleMediatorReady: '已就绪',
+      roleEnv: '环境就绪',
+      roleEnvReady: '就绪',
+      roleEnvBlocked: '未就绪',
+      roleEnvUnavailable: '未检查',
+      roleEnvFix: '这台机器还没准备好跑 GUI 任务。复制下面的提示词，粘到本机的 DSH 会话里执行：',
+      roleEnvCopy: '复制环境修复提示词',
+      roleEnvHint: '提示词会先跑自检、按项修复、再复跑验证；需要管理员或需要人登录/解锁的步骤，它会停下来告诉你，不会假装成功。',      roleMediatorMissing: '未准备',
+      roleMediatorUnsupported: '本机不适用',
+      roleMediatorFix: '这台机器还不能布防：沙箱 mediator 未就绪。把下面这段内容交给本机的 DSH 会话执行，或在终端里直接运行其中的命令。',
+      roleMediatorCopy: '复制命令与说明',
+      roleMediatorHint: '命令必须在这台机器上运行；DSH 自己的沙箱可能拦住工作区外的写入 —— 被拦时请改用终端，或在全权会话里运行。执行完回到这里点「先检查」。',
+      roleListenerExited: '监听已退出（退出码 {code}）—— 布防状态还在，但端口没有在监听。常见原因：旧中继（如 DshRelay 计划任务）仍占用该端口。先停掉它，再重新布防。输出：{detail}',
       roleBind: '监听地址',
       roleBindHint: '指定某个局域网接口。不提供"所有接口"的选项；虚拟网卡会列出来，只是为了让你看到它为何不被选中。',
       roleVirtual: '虚拟网卡',
@@ -337,6 +360,13 @@ window.__ModuleLoader__.load({
       // one would no longer match what the profile and the logs say.
       sessionModeUnset: 'not set (DSH defaults to workspace-write)',
       sessionModeNeedsFull: 'GUI automation needs danger-full-access',
+      sessionModeMismatch: 'effective {eff}, configured {cfg} \u2014 the launch spec and the setting disagree; re-generate the spec and restart the relay',
+      labelIntegrity: 'Process integrity',
+      integrityDegraded: 'Programs launched from the workspace run at {ws}, below %TEMP% at {tmp}; a GUI app cannot write %LOCALAPPDATA% (see S20)',
+      fieldWorkerSessionModeEffective: 'The running relay actually uses: {mode}',
+      workerSessionReArmRequired: 'Saved mode is {cfg}, but the running relay was started with {eff}. Re-arm (stop, then arm again) for it to take effect \u2014 saving does not rewrite the launch spec of a relay that is already running.',
+      workerSessionNotRunning: 'This plugin has no relay running; the next arming will generate its launch spec from the saved mode. For a hand-managed relay, re-generate the spec and restart it.',
+      labelListenerMode: 'Relay session mode',
       btnSelfcheck: 'Re-check now',
       btnScreenshot: 'Screenshot',
       btnPing: 'Test link',
@@ -377,6 +407,8 @@ window.__ModuleLoader__.load({
       fieldKeepShotsHint: 'Newest first. A full-resolution capture is roughly 9.5 MB, so this bounds what a long GUI run costs on disk. Negative keeps everything.',
       fieldWorkerSessionMode: 'Sandbox mode for this machine\'s remote sessions',
       fieldWorkerSessionModeHint: 'Written into the launch spec when arming: remote sessions this machine accepts start at this level. GUI automation needs danger-full-access -- a GUI process failing under a restricted token does so SILENTLY (the command returns success; only a desktop dialog is left), so it cannot be surfaced as a per-call approval.',
+      fieldWorkerModel: 'Model for this machine\'s remote sessions',
+      fieldWorkerModelHint: 'Fill in provider/model (for example deepseek-official/deepseek-flash); it is written into the ACP launch configuration when arming. Empty means "use whatever the worker profile configures". This value also decides image input: a model that does not declare image support makes the master unable to send pictures and breaks read_image on the worker, and that failure is silent -- watch the warning shown when arming. Changing it needs re-arming.',
       fieldAuditMaxBytes: 'Audit rotation threshold (bytes)',
       fieldAuditMaxBytesHint: 'The trail is append-only, so it has no stopping point of its own. At this size it is renamed to an archive and a fresh file starts -- the live file is never truncated. 0 or negative disables rotation (unbounded growth).',
       fieldAuditKeepFiles: 'Audit archives kept',
@@ -435,6 +467,21 @@ window.__ModuleLoader__.load({
       roleSandbox: 'Confinement',
       roleSandboxOk: 'sandbox verified',
       roleSandboxUnknown: 'not verified yet',
+      roleMediator: 'Sandbox mediator',
+      roleMediatorReady: 'ready',
+      roleEnv: 'Environment',
+      roleEnvReady: 'ready',
+      roleEnvBlocked: 'not ready',
+      roleEnvUnavailable: 'not checked',
+      roleEnvFix: 'This machine is not ready for GUI tasks yet. Copy the prompt below and hand it to this machine\'s DSH session:',
+      roleEnvCopy: 'Copy environment fix prompt',
+      roleEnvHint: 'The prompt runs the self-check, fixes each item and re-runs it to prove the result; steps that need an administrator or a logged-in desktop are reported, not faked.',
+      roleMediatorMissing: 'not prepared',
+      roleMediatorUnsupported: 'not applicable here',
+      roleMediatorFix: 'This machine cannot be armed yet: its sandbox mediator is not ready. Hand the text below to this machine\'s DSH session, or run the command in it from a terminal.',
+      roleMediatorCopy: 'Copy command and notes',
+      roleMediatorHint: 'The command must run on THIS machine. DSH\'s own sandbox may refuse writes outside the workspace -- if it does, run it in a terminal or in a full-access session, then press Check again.',
+      roleListenerExited: 'The listener exited (code {code}) \u2014 the role is still marked armed, but nothing is listening. A common cause is an older relay (for example the DshRelay scheduled task) still holding the port. Stop it and arm again. Output: {detail}',
       roleBind: 'Listen on',
       roleBindHint: 'A specific LAN interface. Binding every interface is not offered, and virtual adapters are listed only so you can see why they are not chosen.',
       roleVirtual: 'virtual adapter',
@@ -960,6 +1007,38 @@ window.__ModuleLoader__.load({
         ? t('sessionModeUnset')
         : (mode === 'danger-full-access' ? mode : `${mode} \u00b7 ${t('sessionModeNeedsFull')}`)))
 
+      // The mode the relay will actually spawn (above) versus the mode the WORKER's settings page
+      // has saved. A manual relay can run for hours with an old spec while its settings show the
+      // intended value; that disagreement is repeated here, where the operator is looking.
+      const cardWarnings = []
+      const configuredMode = typeof report?.configuredSessionMode === 'string' ? report.configuredSessionMode : ''
+      if (report?.sessionModeMismatch === true && configuredMode !== '') {
+        cardWarnings.push(fmt(t('sessionModeMismatch'), {
+          eff: String(report?.effectiveSessionMode ?? mode),
+          cfg: configuredMode,
+        }))
+      }
+
+      // The integrity reading comes from S20: a copy of a signed system binary launched from the
+      // workspace and from %TEMP%. A degraded reading is why a GUI app cannot write %LOCALAPPDATA%
+      // even though the agent shell is High.
+      const integrity = report?.integrity
+      if (integrity !== null && typeof integrity === 'object'
+        && (integrity.workspace !== null || integrity.temp !== null)) {
+        const levelOf = (entry) => (entry === null || entry === undefined ? '?' : String(entry.level ?? '?'))
+        kv.push(h('span', { key: 'k-integrity', className: 'ru-k' }, t('labelIntegrity')))
+        kv.push(h('span', {
+          key: 'v-integrity',
+          className: `ru-v ru-mono${integrity.degraded === true ? ' ru-mode-warn' : ''}`,
+        }, `workspace=${levelOf(integrity.workspace)} \u00b7 temp=${levelOf(integrity.temp)}`))
+        if (integrity.degraded === true) {
+          cardWarnings.push(fmt(t('integrityDegraded'), {
+            ws: levelOf(integrity.workspace),
+            tmp: levelOf(integrity.temp),
+          }))
+        }
+      }
+
       const head = [
         h('span', { key: 'name', className: 'ru-name' }, String(row.name ?? row.peerId ?? '')),
         h('span', { key: 'id', className: 'ru-badge mute ru-mono' }, String(row.peerId ?? '')),
@@ -997,6 +1076,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ru-card' },
         h('div', { className: 'ru-card-head' }, head),
         h('div', { className: 'ru-kv' }, kv),
+        ...cardWarnings.map((warning, index) => h('div', { key: `warn-${index}`, className: 'ru-msg err' }, warning)),
         // The cache block sits directly under the facts about the worker and above the check
         // table: it is about this worker, and the check table is the long, rarely-needed part.
         h(CachePanel, { t, row, maxBytes: cacheMaxBytes, onCache }),
@@ -1136,6 +1216,7 @@ window.__ModuleLoader__.load({
         heartbeatMs: settings.heartbeatMs ?? 15000,
         keepShots: settings.keepShots ?? 20,
         workerSessionMode: settings.workerSessionMode ?? 'danger-full-access',
+        workerModel: settings.workerModel ?? '',
         auditMaxBytes: settings.auditMaxBytes ?? 8388608,
         auditKeepFiles: settings.auditKeepFiles ?? 5,
         delegationPolicy: settings.delegationPolicy ?? '',
@@ -1170,7 +1251,42 @@ window.__ModuleLoader__.load({
           h('select', { className: 'ru-input', value: form.workerSessionMode, onChange: set('workerSessionMode') },
             ...[['danger-full-access', 'danger-full-access'], ['workspace-write', 'workspace-write'], ['read-only', 'read-only']]
               .map(([value, label]) => h('option', { key: value, value }, label))),
-          h('span', { className: 'ru-field-hint' }, t('fieldWorkerSessionModeHint'))),
+          h('span', { className: 'ru-field-hint' }, t('fieldWorkerSessionModeHint')),
+          // Configured and EFFECTIVE are two different facts. The select above is what the next
+          // arming will write; this is what the running listener was started with. Showing only the
+          // first is how "I set it to full access" and "it still runs workspace-write" looked the
+          // same on the page (PITFALLS F38/F41).
+          ...(() => {
+            const live = settings.workerSession
+            if (live === null || live === undefined) return []
+            const notes = []
+            if (live.running === true && typeof live.effective === 'string' && live.effective !== '') {
+              notes.push(h('span', { key: 'mode-effective', className: 'ru-field-hint ru-mono' },
+                fmt(t('fieldWorkerSessionModeEffective'), { mode: live.effective })))
+            }
+            if (live.reArmRequired === true) {
+              notes.push(h('span', { key: 'mode-rearm', className: 'ru-note warn' },
+                fmt(t('workerSessionReArmRequired'), {
+                  cfg: String(live.configured ?? form.workerSessionMode),
+                  eff: String(live.effective ?? '?'),
+                })))
+            } else if (live.running !== true) {
+              notes.push(h('span', { key: 'mode-stopped', className: 'ru-field-hint' }, t('workerSessionNotRunning')))
+            }
+            return notes
+          })()),
+        // The model the worker's ACP sessions run with. It is a deployment value for the same
+        // reason the mode is: `dsh-acp` advertises image capability at startup from the configured
+        // route, so it cannot be requested per call -- and a wrong id silently disables images.
+        h('label', { className: 'ru-field' },
+          h('span', { className: 'ru-field-label' }, t('fieldWorkerModel')),
+          h('input', {
+            className: 'ru-input ru-mono',
+            value: form.workerModel,
+            placeholder: 'provider/model',
+            onChange: set('workerModel'),
+          }),
+          h('span', { className: 'ru-field-hint' }, t('fieldWorkerModelHint'))),
         // The audit trail is append-only, so it has no natural stopping point: without a cap it
         // grows for as long as the plugin is installed. These two are what bound it. Negative
         // disables the bound, for an operator who archives the trail elsewhere.
@@ -1194,6 +1310,7 @@ window.__ModuleLoader__.load({
               heartbeatMs: Number(form.heartbeatMs) || 0,
               keepShots: Number.isFinite(Number(form.keepShots)) ? Number(form.keepShots) : 20,
               workerSessionMode: form.workerSessionMode,
+              workerModel: String(form.workerModel ?? '').trim(),
               auditMaxBytes: Number.isFinite(Number(form.auditMaxBytes)) ? Number(form.auditMaxBytes) : 8388608,
               auditKeepFiles: Number.isFinite(Number(form.auditKeepFiles)) ? Number(form.auditKeepFiles) : 5,
               // An empty string is a real choice -- it switches the injected prompt off while
@@ -1215,8 +1332,113 @@ window.__ModuleLoader__.load({
      * The credential is shown ONCE, immediately after arming, and the panel says so. Every later
      * render reads `tokenHint` from the status, which is a mask.
      */
+    /** Clipboard, best effort: the textarea below stays selectable when the API is unavailable. */
+    async function copyToClipboard(text) {
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText !== undefined) {
+          await navigator.clipboard.writeText(text)
+          return true
+        }
+      } catch { /* the operator can select the text instead */ }
+      return false
+    }
+
+    /**
+     * The sandbox mediator: state, plus the exact prescription when it is not usable.
+     *
+     * WHY THIS EXISTS AT ALL: the mediator is deployed by hand and can disappear (a cleanup, a disk
+     * migration, an uninstall) while the role is simply disarmed. Measured 2026-11-04 on this very
+     * machine: both mediator directories gone, and the page said nothing, because the probe only
+     * runs when somebody clicks Check. "Not verified yet" and "the mediator is not there" are
+     * different statements, and only the second one tells an operator what to do.
+     *
+     * It renders nothing when the host does not send a report (an older build): a page must not
+     * invent a state it was not told.
+     */
+    function MediatorBlock(props) {
+      const { t, sandbox, probe } = props
+      if (sandbox === null || sandbox === undefined) return null
+      const ready = sandbox.state === 'ready'
+      // The prescription applies when the artifacts are missing or the profile is unwired, AND when
+      // the probe failed even though they look present (a stale mediator, confinement that no longer
+      // holds). NOT when the host cannot have one: printing a Windows command there is advice that
+      // cannot work.
+      const showFix = sandbox.state === 'missing' || sandbox.state === 'unwired'
+        || (ready && probe?.ok === false)
+      const prescription = String(sandbox.prescription?.text ?? '')
+      const copy = () => { void copyToClipboard(prescription) }
+
+      return h('div', null,
+        h('div', { className: 'ru-kv' },
+          h('span', { className: 'ru-k' }, t('roleMediator')),
+          h('span', { className: 'ru-v' },
+            ready
+              ? h('span', { className: 'ru-badge ok' }, t('roleMediatorReady'))
+              : h('span', { className: 'ru-badge warn' },
+                sandbox.state === 'unsupported' ? t('roleMediatorUnsupported') : t('roleMediatorMissing')))),
+        ready ? null : h('p', { className: 'ru-note dim' }, String(sandbox.reason ?? '')),
+        showFix
+          ? h('div', { className: 'ru-card' },
+            h('p', { className: 'ru-note warn' }, t('roleMediatorFix')),
+            h('textarea', {
+              className: 'ru-input ru-textarea',
+              rows: '9',
+              readOnly: true,
+              // The exact text an agent or a person needs: this machine's paths, the one command,
+              // and what "done" looks like. A placeholder path here is the documentation that failed.
+              value: prescription,
+            }),
+            h('div', { className: 'ru-actions' },
+              h('button', { type: 'button', className: 'ru-btn', onClick: copy }, t('roleMediatorCopy'))),
+            h('p', { className: 'ru-note dim' }, t('roleMediatorHint')))
+          : null)
+    }
+
+    /**
+     * The worker's own environment readiness (`slave/selfcheck.ps1`), plus the machine-specific
+     * fix prompt.
+     *
+     * WHY THIS IS ADVISORY: the session checks depend on somebody being logged in and unlocked,
+     * which is an OPERATIONAL state, and S8 moves the mouse. It therefore runs only on an explicit
+     * "Check" and never blocks arming; the master's dispatch gate remains the hard gate.
+     */
+    function EnvironmentBlock(props) {
+      const { t, readiness } = props
+      if (readiness === null || readiness === undefined) return null
+      const ran = readiness.ok === true
+      const blocked = ran && String(readiness.verdict ?? '') === 'blocked'
+      const failing = ran && Array.isArray(readiness.checks)
+        ? readiness.checks.filter((c) => String(c.status ?? '') !== 'pass').slice(0, 6)
+        : []
+      const prompt = String(readiness.prompt?.text ?? '')
+      const copy = () => { void copyToClipboard(prompt) }
+      return h('div', null,
+        h('div', { className: 'ru-kv' },
+          h('span', { className: 'ru-k' }, t('roleEnv')),
+          h('span', { className: 'ru-v' },
+            ran
+              ? (blocked
+                ? h('span', { className: 'ru-badge warn' }, t('roleEnvBlocked'))
+                : h('span', { className: 'ru-badge ok' }, t('roleEnvReady')))
+              : h('span', { className: 'ru-badge warn' }, t('roleEnvUnavailable')))),
+        ran ? null : h('p', { className: 'ru-note dim' }, String(readiness.reason ?? '')),
+        blocked
+          ? h('div', { className: 'ru-card' },
+            h('p', { className: 'ru-note warn' }, t('roleEnvFix')),
+            ...failing.map((check, index) => h('p', {
+              key: `${String(check.id ?? '?')}-${String(index)}`,
+              className: 'ru-note dim ru-mono',
+            }, `${String(check.id ?? '?')} ${String(check.status ?? '?')}${String(check.actual ?? '') === '' ? '' : `: ${String(check.actual).slice(0, 160)}`}`)),
+            prompt === ''
+              ? null
+              : h('div', { className: 'ru-actions' },
+                h('button', { type: 'button', className: 'ru-btn', onClick: copy }, t('roleEnvCopy'))),
+            h('p', { className: 'ru-note dim' }, t('roleEnvHint')))
+          : null)
+    }
+
     function WorkerRolePanel(props) {
-      const { t, role, busy, onPreflight, onArm, onDisarm } = props
+      const { t, role, sandbox, readiness, busy, onPreflight, onArm, onDisarm } = props
       const [bindAddress, setBindAddress] = React.useState('')
       const [port, setPort] = React.useState(7331)
       const [taskDir, setTaskDir] = React.useState(String(role?.taskCwd ?? ''))
@@ -1229,15 +1451,35 @@ window.__ModuleLoader__.load({
       const armed = role?.armed === true
       const checked = check !== null
       const blocked = checked && check.ok !== true
+      // A fresh Check carries a fresh diagnosis. Prefer it over the snapshot's copy, which was read
+      // when the page loaded -- the operator may have run the prescription in between.
+      const sandboxNow = check?.sandbox ?? sandbox
+      // The environment check runs only when the operator asks for it, so its result arrives with
+      // the check response; the snapshot carries the LAST result so a reload keeps showing it.
+      const readinessNow = check?.readiness ?? readiness
+      const listener = role?.listener
+      // `armed` is the decision; `running` is the fact. A relay that exited (the port was taken by
+      // the old scheduled task, for instance) leaves the first true and the second false. Saying
+      // "armed" alone there is the same class of lie this project keeps removing.
+      const listenerDead = armed && listener !== null && listener !== undefined
+        && listener.running !== true && listener.exited !== null && listener.exited !== undefined
 
       const doCheck = async () => {
-        const result = await onPreflight({ bindAddress: chosen, port: Number(port), taskCwd: taskDir })
+        // `checkEnvironment` is what makes the host run the worker's OWN selfcheck: it costs a
+        // PowerShell process and S8 moves the mouse, so it must not ride on a page load.
+        const result = await onPreflight({ bindAddress: chosen, port: Number(port), taskCwd: taskDir, checkEnvironment: true })
         setCheck(result)
       }
       const doArm = async () => {
         const result = await onArm({ bindAddress: chosen, port: Number(port), taskCwd: taskDir })
         if (result?.ok === true) setIssued({ token: result.token, pairing: result.pairing })
-        else setCheck({ ok: false, blockers: result?.blockers ?? [String(result?.error ?? '')] })
+        else setCheck({
+          ok: false,
+          blockers: result?.blockers ?? [String(result?.error ?? '')],
+          // The refusal carries a fresh diagnosis; keep it so the prescription shown beside the
+          // blockers is the one that matches this attempt, not the page-load snapshot.
+          sandbox: result?.sandbox,
+        })
       }
       const doDisarm = async (forget) => {
         await onDisarm({ forget })
@@ -1264,13 +1506,36 @@ window.__ModuleLoader__.load({
 
         role?.lastError ? h('p', { className: 'ru-note warn' }, String(role.lastError)) : null,
 
+        // "Armed" but nothing listening is a distinct, actionable state -- most often the old
+        // scheduled-task relay still owns the port when migrating to plugin-managed mode.
+        listenerDead ? h('p', { className: 'ru-note warn' }, fmt(t('roleListenerExited'), {
+          code: String(listener.exited?.code ?? (listener.exited?.signal !== undefined ? listener.exited.signal : '?')),
+          detail: String(listener.output ?? listener.lastError ?? '').trim().split(/\r?\n/u).slice(-3).join(' / ').slice(0, 300),
+        })) : null,
+
         // What confinement remote work would actually have.
         h('div', { className: 'ru-kv' },
           h('span', { className: 'ru-k' }, t('roleSandbox')),
           h('span', { className: 'ru-v' },
             role?.probe?.ok === true
               ? h('span', { className: 'ru-badge ok' }, t('roleSandboxOk'))
-              : h('span', { className: 'ru-badge warn' }, t('roleSandboxUnknown')))),
+              : h('span', { className: 'ru-badge warn' }, t('roleSandboxUnknown'))),
+          // The mode the supervised relay was STARTED with. The arming panel's setting is the
+          // next arm's value; this row is the one that answers "what is running now".
+          role?.listener?.running === true
+            ? h('span', { key: 'listener-k', className: 'ru-k' }, t('labelListenerMode'))
+            : null,
+          role?.listener?.running === true
+            ? h('span', { key: 'listener-v', className: 'ru-v ru-mono' }, String(role.listener.sessionMode ?? '') === ''
+              ? t('sessionModeUnset')
+              : String(role.listener.sessionMode))
+            : null),
+
+        // The mediator, whether or not anyone has clicked Check. Rendered on its own because the
+        // report is a newer field: an older host simply sends none, and the panel must look exactly
+        // as it did before.
+        h(MediatorBlock, { t, sandbox: sandboxNow, probe: role?.probe }),
+        h(EnvironmentBlock, { t, readiness: readinessNow }),
 
         armed ? null : h('div', null,
           h('label', { className: 'ru-field' },
@@ -1795,6 +2060,11 @@ window.__ModuleLoader__.load({
             : h(WorkerRolePanel, {
               t,
               role: snapshot?.settings?.workerRole ?? null,
+              // Read-only diagnosis, present on the FIRST load: a missing mediator must not need a
+              // click to become visible.
+              sandbox: snapshot?.settings?.sandbox ?? null,
+              // The last environment check, if one has been run (advisory only).
+              readiness: snapshot?.settings?.readiness ?? null,
               busy,
               onPreflight: onRoleCheck,
               onArm: onRoleArm,
