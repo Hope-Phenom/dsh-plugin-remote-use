@@ -901,6 +901,8 @@ export function apply(ctx, config) {
   const enabledAgents = new Set()
   /** agent -> the disposer that lifts its restriction. Present means "currently denied". */
   const restrictions = new Map()
+  /** Agents whose next request must open a NEW request series, because the switch just moved. */
+  const seriesPending = new WeakSet()
 
   /** Hide the remote tools from one session's model. Idempotent. */
   function denyFor(agent) {
@@ -922,6 +924,34 @@ export function apply(ctx, config) {
     restrictions.delete(agent)
     if (typeof lift === 'function') lift()
   }
+
+  /**
+   * Ask the NEXT request of this session to open a fresh request series.
+   *
+   * WHY THE SWITCH ALONE IS NOT ENOUGH (PITFALLS F47): flipping it changes the tool set in the
+   * middle of a conversation, and dsh then delivers the difference the only way it can -- the new
+   * schemas are declared `defer_loading` and a `tool-addition` developer message is supposed to
+   * activate them. On the DeepSeek route the model never actually got them that way: the tool
+   * catalog it worked with stayed at the pre-switch set, while the policy section (a plain system
+   * prompt section, projected separately) was there. That is the "instructions without tools"
+   * report. A series boundary makes the harness log a NEW baseline header instead of a delta, so
+   * the tools are immediate in the same request that first mentions them.
+   */
+  function refreshToolSeries(agent) {
+    if (agent === undefined) return
+    seriesPending.add(agent)
+  }
+
+  // The hook the platform itself uses for this (`dsh-goal-round-driver`): a waterfall listener
+  // may turn the step it helped decide into a series start.
+  ctx.on('agent/pre-step', async ({ agent } = {}, next) => {
+    const decision = await next()
+    if (agent === undefined || !seriesPending.has(agent)) return decision
+    // A rejected step issues no request, so the flag has to survive for the next one.
+    if (decision?.kind === 'reject') return decision
+    seriesPending.delete(agent)
+    return { ...decision, startsRequestSeries: true }
+  })
 
   ctx.on('agent/created', ({ agent } = {}) => {
     if (agent === undefined) return
@@ -963,8 +993,10 @@ export function apply(ctx, config) {
         return { kind: 'error', text: `/${ENABLE_COMMAND}: this invocation carries no session, so the switch cannot be scoped to it.` }
       }
       if (argument === 'on') {
+        const wasOn = enabledAgents.has(agent)
         enabledAgents.add(agent)
         allowFor(agent)
+        if (!wasOn) refreshToolSeries(agent)
         return {
           kind: 'success',
           text: `remote-use is on for this session. The remote tools are available and the delegation policy is in effect;`
@@ -972,8 +1004,10 @@ export function apply(ctx, config) {
         }
       }
       if (argument === 'off') {
+        const wasOn = enabledAgents.has(agent)
         enabledAgents.delete(agent)
         denyFor(agent)
+        if (wasOn) refreshToolSeries(agent)
         return {
           kind: 'success',
           text: `remote-use is off for this session. The remote tools are hidden and any further call is refused.`,

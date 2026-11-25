@@ -3064,6 +3064,28 @@ ctx.systemPrompt.section({
 `context.agent` 来自 `assembleContextFor(agent)`，所以**同一个 agent 对象**既标识命令作用域、
 也标识提示词作用域 —— 两侧天然一致。
 
+#### (4) 切换时开启新的 request series（0.2.25，PITFALLS F47）
+
+仅仅让 gate 改变是**不够**的：tool 集合在会话中途变了以后，`dsh-session` 的 `ToolHistoryProjection`
+只在 `reason: 'series'` / `startsSeries` / 定义重declared 时重建基线，否则会把新增工具当**增量**投递
+（`deferLoading: true` + 一条 `tool-addition` developer 消息），而 DeepSeek 路由下模型实际拿不到这些
+schema —— 具体症状是"系统提示里有授权说明，函数清单里没有 remote_*"。
+
+所以 `/remote-use on|off` 在**可见工具集真的改变**时，给该会话的**下一次请求**打标记：
+
+```js
+ctx.on('agent/pre-step', async ({ agent }, next) => {
+  const decision = await next()
+  if (agent === undefined || !seriesPending.has(agent)) return decision
+  if (decision?.kind === 'reject') return decision   // 被拒的 step 不发请求，标记要留到下一次
+  seriesPending.delete(agent)
+  return { ...decision, startsRequestSeries: true }
+})
+```
+
+这是宿主自己的 `dsh-goal-round-driver` 用的同一个钩子。series 让下一次 header 成为**新基线**，
+工具随即变成 immediate，不再依赖增量激活。重复 `on`（状态没变）不标记，避免多付一次基线重建。
+
 **order 放在 `TEAM_POLICY`**：`dsh-tools` 给它的 PTC-only 声明写过理由 ——
 *"Its order places the rule before that guidance rather than after it"*。
 策略要**先于**它所限定的工具说明被读到。

@@ -239,6 +239,9 @@ node relay.mjs --port 7331 --token <secret> `
    > `S0 worker reachable: fail`）的问题**——详见 [踩坑与教训 F45](docs/PITFALLS.md)。
    > **0.2.24 修复了没有 PowerShell 7 的新机器上自检脚本起不来（S0 报 `Unexpected end of JSON
    > input`）的问题**——详见 [踩坑与教训 F46](docs/PITFALLS.md)。
+   > **0.2.25 修复了「已经聊过的会话里再 `/remote-use on`，模型只看到授权说明、拿不到 remote_* 工具」
+   > 的问题**——切换现在会为下一次请求开启新的 request series，工具不再以延迟增量投递；
+   > 详见 [踩坑与教训 F47](docs/PITFALLS.md)。
 2. 停掉并禁用旧的计划任务，确认 7331 已释放：
    ```powershell
    schtasks /end /tn DshRelay

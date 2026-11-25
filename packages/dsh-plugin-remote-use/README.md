@@ -67,7 +67,10 @@ even when written correctly, because a Web session's model-facing tool catalog i
    ```
 
    The switch is **per session and does not persist** — a restart puts it back to off, and in a new
-   session the remote tools are not visible.
+   session the remote tools are not visible. It also works mid-conversation: flipping it asks the next
+   request to open a fresh request series, so the tool list the model actually receives changes with it
+   (PITFALLS F47 — without that, a mid-conversation addition is delivered as a deferred delta and the
+   model never gets the schemas).
 
 2. Let the model do the work that needs a GUI. It will call `remote_selfcheck` first to confirm the
    node is ready, and only then delegate.

@@ -1061,6 +1061,68 @@ test('/remote-use off puts the restriction back', () => {
   assert.equal(h.policyFor(agent), '')
 })
 
+/** Deliver an `agent/pre-step` waterfall the way the agent loop does. */
+async function preStep(h, agent, base = { kind: 'enter', messages: [] }) {
+  const handlers = [...(h.listeners.get('agent/pre-step') ?? [])]
+  assert.ok(handlers.length > 0, 'the plugin must listen for agent/pre-step')
+  let decision = base
+  // Last registered runs innermost, like a Cordis waterfall.
+  for (const handler of handlers.reverse()) {
+    const next = async () => decision
+    decision = await handler({ agent, messages: [], turn: 1, step: 1, signal: undefined, modelSelection: undefined }, next)
+  }
+  return decision
+}
+
+test('switching on asks the next request to start a new series', async () => {
+  const h = mountWithGate()
+  const a1 = h.createAgent('a1')
+  const a2 = h.createAgent('a2')
+
+  // A session that never opted in needs no rebase: its tool list never changed.
+  assert.equal((await preStep(h, a1)).startsRequestSeries, undefined)
+
+  runCommand(h, a1, 'on')
+  // PITFALLS F47: without the series, the new tools travel as `defer_loading` + a
+  // `tool-addition` message, and the model does not actually get them.
+  assert.equal((await preStep(h, a1)).startsRequestSeries, true)
+  // One request is enough -- the baseline header now lists the tools as immediate.
+  assert.equal((await preStep(h, a1)).startsRequestSeries, undefined)
+  // The switch stays per session: the other agent's requests are not churned.
+  assert.equal((await preStep(h, a2)).startsRequestSeries, undefined)
+})
+
+test('switching off asks for a new series too, so the tools really leave the catalog', async () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+  await preStep(h, agent)
+  runCommand(h, agent, 'off')
+  assert.equal((await preStep(h, agent)).startsRequestSeries, true)
+})
+
+test('repeating the same switch state does not churn the request series', async () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+  await preStep(h, agent)
+  // Saying `on` again changes nothing visible, so there is nothing to rebase.
+  runCommand(h, agent, 'on')
+  assert.equal((await preStep(h, agent)).startsRequestSeries, undefined)
+})
+
+test('a rejected step keeps the series request pending for the next one', async () => {
+  const h = mountWithGate()
+  const agent = h.createAgent('a1')
+  runCommand(h, agent, 'on')
+
+  const rejected = await preStep(h, agent, { kind: 'reject' })
+  assert.equal(rejected.kind, 'reject')
+  assert.equal(rejected.startsRequestSeries, undefined, 'a rejected step issues no request')
+  // ...so the flag must survive, or the first real request after it would still get a delta.
+  assert.equal((await preStep(h, agent)).startsRequestSeries, true)
+})
+
 test('/remote-use reports the state, and rejects anything else', () => {
   const h = mountWithGate()
   const agent = h.createAgent('a1')

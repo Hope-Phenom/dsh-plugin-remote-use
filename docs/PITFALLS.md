@@ -4354,6 +4354,69 @@ spawn('pwsh') → ENOENT → 脚本根本没跑 → 没有 selfcheck.json
 3. **测试机 = 干净的 Windows。** 开发机装了 PowerShell 7，所以这条路径一直没被走到。
 
 ---
+## F47. `/remote-use on` 把工具"加"进了会话，而模型从头到尾没拿到它们 —— 增量工具要用 series 送
+
+**现象**（2026-11-25，DSH 0.2.2-rc.5，deepseek-flash）
+
+一个已经聊过的会话里输入 `/remote-use on`：命令回 success，系统提示里立刻出现 6 个 remote 工具的
+**授权说明**，`/remote-use status` 也报 on，宿主 HTTP 一切正常。但模型反复说
+
+> 还是不行——… 系统提示里的授权说明在，但可调用的工具清单里没有 `remote_subagent` / `remote_selfcheck`
+
+重启 DSH、再 `on`、甚至 `off` 再 `on`，都一样。反过来"**先** `on`，再开始聊"的会话一直正常。
+用户的两个观察（"重启后才坏"、"先写提示词后开就坏"）让人先怀疑插件把自己的工具弄丢了。
+
+**根因：不是插件的 gate，是 DSH 给 provider 的**增量工具**形状**
+
+会话日志（`~/.dsh/sessions/…/session.v4.jsonl.zstd`）里那段请求的 `request/header` **确实有 64 个工具、
+含 6 个 remote_\***；`/remote-use on` 的差别只是"在会话中途多了 6 个"。DSH 对这种中途新增的投递方式是：
+
+1. `ToolHistoryProjection` 只在 `reason: 'series'` / `startsSeries` / 工具定义重declared 时**重建基线**，
+   否则基线一直是最早那个 header（58 个工具）；
+2. `projectToolUpdates`（`dsh-llm`）把基线之外的工具一律标成 `deferLoading: true` 发给 provider，
+   再附一条 `tool-addition` 的 developer 消息指望 provider 去"激活"它们；
+3. DeepSeek 路由是 `toolUpdate: 'addition-only'`（`dsh-llm-deepseek/src/models.ts`），于是这条路
+   完全依赖 `anthropic-beta: mid-conversation-tool-changes-2026-07-01` 那套服务端语义。
+
+实测结果是**没有激活**：模型侧看到的 catalog 一直是最早的 58 个，而系统提示（另一条通道）照常出现
+——这就是"有说明、没工具"能同时成立的原因。反过来，"先 on 再聊"的会话首次 header 就有 64 个，
+工具是 immediate 的，所以从来不出问题。
+
+最容易被带偏的一步：另一个失败现场里，模型**盲调**了 `remote_selfcheck` 并成功（工具名来自策略文本），
+于是"它能看到工具"看起来被证实了。**能调用 ≠ 看得到 schema**。
+
+**修法（0.2.25）**
+
+`/remote-use on|off` 真的改变了可见工具集时，给该会话的**下一次请求**标记新 series：
+
+```js
+ctx.on('agent/pre-step', async ({ agent }, next) => {
+  const decision = await next()
+  if (agent === undefined || !seriesPending.has(agent)) return decision
+  if (decision?.kind === 'reject') return decision   // 被拒的 step 不发请求，标记要留着
+  seriesPending.delete(agent)
+  return { ...decision, startsRequestSeries: true }
+})
+```
+
+series 让 `ToolHistoryProjection` 用这次 header 重建基线 → 工具是 immediate，不再走 defer + addition。
+这正是宿主自己的 `dsh-goal-round-driver` 用的钩子（`ctx.on('agent/pre-step', …)` 返回
+`{ ...decision, startsRequestSeries: true }`）。
+
+重复 `on`（状态没变）不标记，避免多付一次基线重建；`off` 也标记，让工具真正离开 catalog。
+
+**教训**
+
+1. **"我没看到"要按证据分层**：`request/header` 有工具 ≠ provider 收到 immediate 工具 ≠ 模型看到 schema。
+   本次三层都查了才定位到第二、三层之间。
+2. **能调用一个工具，证明不了模型看得见它。** 模型会照着策略文本里的名字盲调；反过来，"模型说没有"
+   也可能是它没找。要么看日志里的形状，要么看它枚举出来的清单。
+3. **中途改工具集是平台级的难题，不是插件的。** 插件只负责"该不该可见"，投递形状由 harness 决定；
+   gate 改动之后必须确认**下一次请求**的投递方式，而不是只确认 gate 状态。
+4. **用户的因果叙事可能是对的症状、错的机制。** "重启后失效"实际是"on 的当轮就失效"；顺着"重启"查
+   会一直查到进程生命周期，而 bug 在请求序列。
+
+---
 ## G1. "主屏必须是虚拟屏" —— 一条**忠实实现后让机器无法登录**的要求
 
 **现象**
